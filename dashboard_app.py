@@ -50,7 +50,7 @@ max_month = summary["Month"].max()
 st.sidebar.header("Duration")
 preset = st.sidebar.radio(
     "Quick range",
-    ["All", "YTD", "Last 12M", "Last 6M", "Last 3M", "Custom"],
+    ["All", "YTD", "Last 12M", "Last 6M", "Last 3M", "This Month", "Custom"],
     index=0,
 )
 
@@ -64,6 +64,10 @@ elif preset == "Last 6M":
     start, end = max_month - pd.DateOffset(months=5), max_month
 elif preset == "Last 3M":
     start, end = max_month - pd.DateOffset(months=2), max_month
+elif preset == "This Month":
+    # "This month" means the latest month with data, not today's calendar month --
+    # the two can differ (e.g. no statement imported yet for the current month).
+    start, end = max_month, max_month
 else:
     max_day = max_month + pd.offsets.MonthEnd(0)
     # No min_value/max_value here on purpose: Streamlit's own range validation shows a

@@ -122,9 +122,13 @@ def extract_summary(pdf, month, period, account_no):
         "Cost and Fees ($)": clean_num(label_map.get("Cost and Fees")),
         "Ending Cash ($)": clean_num(label_map.get("Ending Value")),
         "Long ($)": clean_num(label_map.get("Long")),
-        "Total Market Value ($)": clean_num(label_map.get("Total Market Value")),
+        # Pre-mid-2024 statements label the account total "Equity" instead of "Total
+        # Market Value" (and don't have Options/Fixed Income rows at all).
+        "Total Market Value ($)": clean_num(label_map.get("Total Market Value") or label_map.get("Equity")),
         "Dividend ($)": clean_num(label_map.get("Dividend")),
-        "Interest ($)": clean_num(label_map.get("Interest**")),
+        # Same era boundary: the "**" profit-sharing footnote marker on Interest was
+        # added later; earlier statements just say "Interest".
+        "Interest ($)": clean_num(label_map.get("Interest**") or label_map.get("Interest")),
         "Realized ST Net ($)": realized.get("Short Term"),
         "Realized LT Net ($)": realized.get("Long Term"),
     }

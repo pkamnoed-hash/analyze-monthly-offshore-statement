@@ -12,7 +12,11 @@ def compute_realized_pl(transactions: pd.DataFrame) -> pd.DataFrame:
     history. This is an estimate: it will differ slightly from the broker's
     official Realized ST/LT figures, which may use specific-lot identification."""
     tx = transactions[transactions["Symbol"].notna()].copy()
-    tx = tx.sort_values(["Symbol", "Trade Date"])
+    # Corporate actions (Stock Split/ReOrg CA) take effect before market open, so on a day
+    # that also has a regular trade, the split must be applied first -- otherwise its ADD
+    # row overwrites (rather than compounds with) that same-day trade's quantity change.
+    tx["_entry_order"] = (tx["Entry Type"] == "Trade Entry").astype(int)
+    tx = tx.sort_values(["Symbol", "Trade Date", "_entry_order"])
     state = {}
     rows = []
     for _, row in tx.iterrows():
@@ -47,6 +51,16 @@ def compute_realized_pl(transactions: pd.DataFrame) -> pd.DataFrame:
             realized = 0.0 - avg_cost * qty
             qty = 0.0
             avg_cost = 0.0
+        elif quantity:
+            # Anything else with a nonzero quantity (e.g. a rights-offering distribution,
+            # recorded with a blank Entry Type) -- fold it in at whatever cost this row
+            # shows (typically $0 for a free distribution) instead of silently dropping
+            # it, so a later sell/removal of these shares still nets out correctly rather
+            # than acting on an avg_cost that never accounted for them.
+            new_qty = qty + quantity
+            total_cost = qty * avg_cost + quantity * price
+            avg_cost = total_cost / new_qty if new_qty else 0.0
+            qty = new_qty
 
         state[sym] = (qty, avg_cost)
         if realized != 0:
