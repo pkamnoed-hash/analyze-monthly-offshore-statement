@@ -147,7 +147,13 @@ start_value = prior_rows.iloc[-1]["Total Market Value ($)"] if not prior_rows.em
 
 total_deposits = fl["Net Amt"].clip(lower=0).sum()
 total_withdrawals = -fl["Net Amt"].clip(upper=0).sum()
-total_fees = fe["Net Amt"].sum() if "Net Amt" in fe else 0
+
+# Regulatory fees (TAF/REG/CAT, Fees sheet) plus per-trade commissions (Transactions sheet)
+# -- the latter isn't in the Fees sheet at all, so "Total Fees" without it understates true
+# trading cost by ~80x over this account's history. Commissions are already folded into
+# Realized P/L's cost-basis math (calculations.py), so this is a display-only figure and
+# doesn't get double-subtracted anywhere else.
+total_fees = (fe["Net Amt"].sum() if "Net Amt" in fe else 0) - t["Commission"].fillna(0).sum()
 net_flows = total_deposits - total_withdrawals
 balance_based_gain = ending_value - start_value - net_flows
 
@@ -184,10 +190,10 @@ c7.metric("Total Fees", f"${total_fees:,.2f}")
 if abs(balance_based_gain - investment_gain) > 1:
     st.caption(
         f"Note: (Portfolio Value − Net Deposits) gives ${balance_based_gain:,.2f}, which differs from the "
-        f"Investment Gain/Loss above by ${balance_based_gain - investment_gain:,.2f}. That gap comes from "
-        "\"Journal Entry(Cash)\" rows in the statement's Income sheet — cash movements that aren't classified "
-        "as deposits or as dividend/interest income. The Investment Gain/Loss figure isn't affected by that "
-        "ambiguity, so treat it as the more reliable number."
+        f"Investment Gain/Loss above by ${balance_based_gain - investment_gain:,.2f}. Most of that gap is the "
+        "average-cost Realized P/L estimate above differing from the broker's own specific-lot ST/LT figures "
+        "(expected — see the Realized P/L caveat); the remainder is minor rounding accumulated across months. "
+        "The Investment Gain/Loss figure is the more reliable number for tracking performance."
     )
 
 st.divider()
