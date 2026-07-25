@@ -8,7 +8,7 @@ import streamlit as st
 from calculations import compute_realized_pl as _compute_realized_pl
 from calculations import compute_roi
 
-DATA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Offshore_Statements_2023-01_to_2026-04.xlsx")
+DATA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "Offshore_Statements_2023-01_to_2026-06.xlsx")
 
 st.set_page_config(page_title="Financial Summary Dashboard", layout="wide")
 
@@ -66,17 +66,28 @@ elif preset == "Last 3M":
     start, end = max_month - pd.DateOffset(months=2), max_month
 else:
     max_day = max_month + pd.offsets.MonthEnd(0)
+    # No min_value/max_value here on purpose: Streamlit's own range validation shows a
+    # blocking error and withholds the value entirely if a date outside the bound is
+    # picked (e.g. via a browser autofill suggesting today's real date) -- the picker
+    # then won't recover until the user manually re-enters a valid date. Clamping
+    # ourselves below is more forgiving.
     date_range = st.sidebar.date_input(
         "Custom range",
         value=(min_month.date(), max_day.date()),
-        min_value=min_month.date(),
-        max_value=max_day.date(),
     )
     if isinstance(date_range, tuple) and len(date_range) == 2:
         start, end = pd.Timestamp(date_range[0]), pd.Timestamp(date_range[1])
     else:
         st.sidebar.info("Pick both a start and end date.")
         start, end = min_month, max_month
+
+    clamped = start < min_month or end > max_month
+    start = min(max(start, min_month), max_month)
+    end = min(max(end, min_month), max_month)
+    if clamped:
+        st.sidebar.caption(
+            f"Clamped to available data: {min_month.strftime('%b %Y')} – {max_month.strftime('%b %Y')}."
+        )
     # Data is stored monthly, so snap the picked dates to whichever months they fall in.
     start = pd.Timestamp(start.year, start.month, 1)
     end = pd.Timestamp(end.year, end.month, 1)
