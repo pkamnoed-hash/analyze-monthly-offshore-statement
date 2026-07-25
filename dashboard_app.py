@@ -46,55 +46,62 @@ st.title("Financial Summary Dashboard")
 # --- Duration filter ---
 min_month = summary["Month"].min()
 max_month = summary["Month"].max()
+max_day = max_month + pd.offsets.MonthEnd(0)  # last actual calendar date covered by data
 
 st.sidebar.header("Duration")
-preset = st.sidebar.radio(
-    "Quick range",
-    ["All", "YTD", "Last 12M", "Last 6M", "Last 3M", "This Month", "Custom"],
-    index=0,
-)
 
-if preset == "All":
-    start, end = min_month, max_month
-elif preset == "YTD":
-    start, end = pd.Timestamp(max_month.year, 1, 1), max_month
-elif preset == "Last 12M":
-    start, end = max_month - pd.DateOffset(months=11), max_month
-elif preset == "Last 6M":
-    start, end = max_month - pd.DateOffset(months=5), max_month
-elif preset == "Last 3M":
-    start, end = max_month - pd.DateOffset(months=2), max_month
-elif preset == "This Month":
-    # "This month" means the latest month with data, not today's calendar month --
-    # the two can differ (e.g. no statement imported yet for the current month).
-    start, end = max_month, max_month
+# Months back from the latest available month, per preset. "Past Week" and "Past Month"
+# both resolve to just that one month -- data is stored monthly, so there's no finer
+# granularity to tell them apart at.
+PRESET_MONTHS_BACK = {
+    "All": None,
+    "This Month": 0,
+    "Past Week": 0,
+    "Past Month": 0,
+    "Past 3 Months": 2,
+    "Past 6 Months": 5,
+    "Past Year": 11,
+    "Past 2 Years": 23,
+}
+preset = st.sidebar.selectbox("Choose a date range", list(PRESET_MONTHS_BACK.keys()), index=0)
+
+months_back = PRESET_MONTHS_BACK[preset]
+if months_back is None:
+    default_start = min_month
 else:
-    max_day = max_month + pd.offsets.MonthEnd(0)
-    # No min_value/max_value here on purpose: Streamlit's own range validation shows a
-    # blocking error and withholds the value entirely if a date outside the bound is
-    # picked (e.g. via a browser autofill suggesting today's real date) -- the picker
-    # then won't recover until the user manually re-enters a valid date. Clamping
-    # ourselves below is more forgiving.
-    date_range = st.sidebar.date_input(
-        "Custom range",
-        value=(min_month.date(), max_day.date()),
-    )
-    if isinstance(date_range, tuple) and len(date_range) == 2:
-        start, end = pd.Timestamp(date_range[0]), pd.Timestamp(date_range[1])
-    else:
-        st.sidebar.info("Pick both a start and end date.")
-        start, end = min_month, max_month
+    # Anchored to the latest month with data, not today's real calendar date -- those can
+    # differ (e.g. no statement imported yet for the current month).
+    default_start = max_month - pd.DateOffset(months=months_back)
 
-    clamped = start < min_month or end > max_month
-    start = min(max(start, min_month), max_month)
-    end = min(max(end, min_month), max_month)
-    if clamped:
-        st.sidebar.caption(
-            f"Clamped to available data: {min_month.strftime('%b %Y')} – {max_month.strftime('%b %Y')}."
-        )
-    # Data is stored monthly, so snap the picked dates to whichever months they fall in.
-    start = pd.Timestamp(start.year, start.month, 1)
-    end = pd.Timestamp(end.year, end.month, 1)
+# No min_value/max_value here on purpose: Streamlit's own range validation shows a
+# blocking error and withholds the value entirely if a date outside the bound is picked
+# (e.g. via a browser autofill suggesting today's real date) -- the picker then won't
+# recover until the user manually re-enters a valid date. Clamping ourselves below is
+# more forgiving -- and load-bearing here, since a browser extension has been observed
+# overwriting this field with its own guess independent of what we set as the default.
+# The key is re-seeded per preset so picking a new preset refreshes the shown range,
+# while manual edits to the range persist until the preset changes again.
+date_range = st.sidebar.date_input(
+    "Custom range",
+    value=(default_start.date(), max_day.date()),
+    key=f"custom_range_{preset}",
+)
+if isinstance(date_range, tuple) and len(date_range) == 2:
+    start, end = pd.Timestamp(date_range[0]), pd.Timestamp(date_range[1])
+else:
+    st.sidebar.info("Pick both a start and end date.")
+    start, end = min_month, max_month
+
+clamped = start < min_month or end > max_day
+start = min(max(start, min_month), max_month)
+end = min(max(end, min_month), max_day)
+if clamped:
+    st.sidebar.caption(
+        f"Clamped to available data: {min_month.strftime('%b %Y')} – {max_month.strftime('%b %Y')}."
+    )
+# Data is stored monthly, so snap the picked dates to whichever months they fall in.
+start = pd.Timestamp(start.year, start.month, 1)
+end = pd.Timestamp(end.year, end.month, 1)
 
 st.sidebar.header("Display")
 thb_rate = st.sidebar.number_input(
@@ -275,6 +282,33 @@ with col4:
         st.plotly_chart(fig4, use_container_width=True)
         st.caption("See the **By Symbol** tab below for holding, P/L, and dividend detail per symbol.")
 
+# Net of the 15% Thai withholding tax, matching the Dividends / Avg. Monthly Dividend KPIs
+# above -- deliberately not the Summary sheet's "Dividend ($)" column used in the Income
+# Breakdown chart, which is gross (pre-withholding) and would be inconsistent with those.
+dividend_by_month = div_in_range.groupby(div_in_range["Month"].dt.to_period("M"))["Net Amt"].sum().reset_index()
+dividend_by_month["Month"] = dividend_by_month["Month"].dt.to_timestamp()
+fig_div = px.bar(dividend_by_month, x="Month", y="Net Amt", title="Monthly Dividend (net of 15% withholding tax)",
+                  color_discrete_sequence=["#1f77b4"])
+fig_div.add_hline(y=avg_monthly_dividend, line_dash="dot", line_color="gray",
+                   annotation_text=f"Avg: ${avg_monthly_dividend:,.2f}/mo", annotation_position="top left")
+fig_div.update_layout(yaxis_title="USD", xaxis_title="Month")
+st.plotly_chart(fig_div, use_container_width=True)
+
+# Average-cost estimate (calculations.py), matching the "Realized P/L (est.)" KPI -- not the
+# Summary sheet's broker specific-lot ST/LT columns already shown in Income Breakdown, which
+# is a different figure (see docs/METHODOLOGY.md). Realized is event-driven and can spike in
+# a single month; Unrealized is a smoother month-to-month mark-to-market balance -- shown as
+# grouped (not stacked) bars so one doesn't get summed into or read as part of the other.
+realized_by_month = realized_in_range.groupby("Month")["Realized P/L"].sum().reset_index()
+unrealized_by_month = h[h["Symbol"] != "*Cash"].groupby("Month")["Unrealized"].sum().reset_index()
+unrealized_by_month = unrealized_by_month.rename(columns={"Unrealized": "Unrealized P/L"})
+pl_by_month = pd.merge(realized_by_month, unrealized_by_month, on="Month", how="outer").fillna(0).sort_values("Month")
+
+fig_pl = px.bar(pl_by_month, x="Month", y=["Realized P/L", "Unrealized P/L"],
+                 title="Realized vs Unrealized P/L by Month (est.)", barmode="group")
+fig_pl.update_layout(legend_title_text="", yaxis_title="USD", xaxis_title="Month")
+st.plotly_chart(fig_pl, use_container_width=True)
+
 st.divider()
 
 def for_display(df):
@@ -345,19 +379,6 @@ with tab0:
         by_symbol_view = by_symbol[by_symbol["Status"] == "Sold"]
     else:
         by_symbol_view = by_symbol
-
-    pl_chart_df = by_symbol_view[(by_symbol_view["Total P/L"] != 0) | (by_symbol_view["Market Value"] != 0)].copy()
-    pl_chart_df = pl_chart_df.sort_values("Total P/L")
-    if not pl_chart_df.empty:
-        fig5 = px.bar(
-            pl_chart_df, x="Total P/L", y="Symbol", orientation="h",
-            color=pl_chart_df["Total P/L"] >= 0,
-            color_discrete_map={True: "#2ca02c", False: "#d62728"},
-            title="Total P/L by Symbol (Realized + Unrealized + Dividends)",
-            height=max(400, 18 * len(pl_chart_df)),
-        )
-        fig5.update_layout(showlegend=False, yaxis_title="", xaxis_title="USD")
-        st.plotly_chart(fig5, use_container_width=True)
 
     display_cols = ["Symbol", "Status", "Description", "Quantity", "Market Price", "Market Value", "Cost Price",
                      "Unrealized", "Unrealized %", "Realized P/L", "Dividends", "Total P/L"]
