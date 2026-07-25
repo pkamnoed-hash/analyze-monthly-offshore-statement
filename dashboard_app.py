@@ -367,18 +367,27 @@ with tab0:
         "show the last values from the month before the position was fully closed, not a live quote."
     )
 
-    n_holding = (by_symbol["Status"] == "Holding").sum()
-    n_sold = (by_symbol["Status"] == "Sold").sum()
-    status_filter = st.radio(
-        "Status", [f"All ({len(by_symbol)})", f"Holding ({n_holding})", f"Sold ({n_sold})"],
-        horizontal=True, label_visibility="collapsed",
-    )
+    fcol1, fcol2 = st.columns([1, 2])
+    with fcol1:
+        symbol_search = st.text_input("Search symbol", placeholder="Search symbol or name...", label_visibility="collapsed")
+    with fcol2:
+        n_holding = (by_symbol["Status"] == "Holding").sum()
+        n_sold = (by_symbol["Status"] == "Sold").sum()
+        status_filter = st.radio(
+            "Status", [f"All ({len(by_symbol)})", f"Holding ({n_holding})", f"Sold ({n_sold})"],
+            horizontal=True, label_visibility="collapsed",
+        )
     if status_filter.startswith("Holding"):
         by_symbol_view = by_symbol[by_symbol["Status"] == "Holding"]
     elif status_filter.startswith("Sold"):
         by_symbol_view = by_symbol[by_symbol["Status"] == "Sold"]
     else:
         by_symbol_view = by_symbol
+    if symbol_search:
+        by_symbol_view = by_symbol_view[
+            by_symbol_view["Symbol"].str.contains(symbol_search, case=False, na=False)
+            | by_symbol_view["Description"].str.contains(symbol_search, case=False, na=False)
+        ]
 
     display_cols = ["Symbol", "Status", "Description", "Quantity", "Market Price", "Market Value", "Cost Price",
                      "Unrealized", "Unrealized %", "Realized P/L", "Dividends", "Total P/L"]
