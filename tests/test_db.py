@@ -1,8 +1,9 @@
+import os
 import sqlite3
 
 import pytest
 
-import db
+from core import db
 
 
 @pytest.fixture
@@ -11,6 +12,17 @@ def conn():
     db.init_db(conn=c)
     yield c
     c.close()
+
+
+class TestDbPath:
+    def test_db_path_resolves_to_project_root_data_folder_not_core(self):
+        # Regression test: DB_PATH used to be computed relative to db.py's own directory,
+        # which broke silently (pointed at core/data/portfolio.db -- a fresh empty database)
+        # when db.py moved from the project root into core/. app_pages/ is a directory that
+        # only exists at the true project root, sibling to core/ -- confirms PROJECT_ROOT
+        # wasn't left one level too deep.
+        assert os.path.isdir(os.path.join(db.PROJECT_ROOT, "app_pages"))
+        assert db.DB_PATH == os.path.join(db.PROJECT_ROOT, "data", "portfolio.db")
 
 
 class TestSchema:

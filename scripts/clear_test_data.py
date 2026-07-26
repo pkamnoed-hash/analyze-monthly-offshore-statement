@@ -13,7 +13,7 @@ import sys
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
-import db  # noqa: E402  (needs sys.path set up above)
+from core import db  # noqa: E402  (needs sys.path set up above)
 
 
 def main():

@@ -5,10 +5,10 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
-import db
-from calculations import blended_dividends, blended_realized_pl
-from calculations import compute_realized_pl as _compute_realized_pl
-from calculations import compute_roi
+from core import db
+from core.calculations import blended_dividends, blended_realized_pl
+from core.calculations import compute_realized_pl as _compute_realized_pl
+from core.calculations import compute_roi
 
 DATA_FILE = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "Offshore_Statements_2023-01_to_2026-06.xlsx"

@@ -1,9 +1,7 @@
 import pandas as pd
 import streamlit as st
 
-import calculations
-import db
-import slip_parser
+from core import calculations, db, slip_parser
 
 
 def render_trade_form(symbol, side, quantity, price, prefill=None, form_key="manual_trade", oversell_blocked=False):

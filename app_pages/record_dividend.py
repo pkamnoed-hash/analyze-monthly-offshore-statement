@@ -1,7 +1,7 @@
 import pandas as pd
 import streamlit as st
 
-import db
+from core import db
 
 ENTRY_TYPES = ["Dividend", "Interest", "Capital Distribution"]
 

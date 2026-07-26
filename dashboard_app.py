@@ -1,7 +1,7 @@
 import streamlit as st
 
-from auth import verify_password
-from db import init_db
+from core.auth import verify_password
+from core.db import init_db
 
 st.set_page_config(page_title="Financial Summary Dashboard", layout="wide")
 

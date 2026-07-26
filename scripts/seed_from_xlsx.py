@@ -15,7 +15,7 @@ import pandas as pd
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
-import db  # noqa: E402  (needs sys.path set up above)
+from core import db  # noqa: E402  (needs sys.path set up above)
 
 XLSX_PATH = os.path.join(ROOT, "data", "Offshore_Statements_2023-01_to_2026-06.xlsx")
 

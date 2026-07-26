@@ -5,3 +5,4 @@ __pycache__/
 *.log
 * - bk.xlsx
 labs/
+scripts/full_history_check.json

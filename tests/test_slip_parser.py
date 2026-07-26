@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from slip_parser import ParsedSlip, parse_slip_image
+from core.slip_parser import ParsedSlip, parse_slip_image
 
 
 class FakeTextBlock:

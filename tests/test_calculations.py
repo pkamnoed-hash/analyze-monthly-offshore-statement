@@ -1,7 +1,7 @@
 import pandas as pd
 import pytest
 
-from calculations import (
+from core.calculations import (
     blended_dividends,
     blended_realized_pl,
     compute_current_positions,
@@ -149,10 +149,12 @@ class TestComputeFifoRealizedPl:
         result = compute_fifo_realized_pl(tx)
         assert result.iloc[0]["id"] == 102  # the sell row's id, not the buy's
 
-    def test_id_is_none_when_column_absent(self):
+    def test_id_is_nan_when_column_absent(self):
+        # id is float64 (see compute_fifo_realized_pl's docstring -- needed so it concats
+        # cleanly with historical rows that have no id at all), so "missing" is NaN, not None.
         tx = make_transactions([buy("AAA", "2023-01-01", 10, 10.0), sell("AAA", "2023-02-01", 10, 15.0)])
         result = compute_fifo_realized_pl(tx)
-        assert result.iloc[0]["id"] is None
+        assert pd.isna(result.iloc[0]["id"])
 
     def test_sell_consumes_oldest_lot_only_not_blended_average(self):
         # buy 10@10, buy 10@20, sell 5 -- FIFO uses the FIRST lot's cost (10),

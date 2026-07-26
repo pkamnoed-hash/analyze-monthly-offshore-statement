@@ -1,4 +1,4 @@
-from auth import hash_password, verify_password
+from core.auth import hash_password, verify_password
 
 
 class TestVerifyPassword:
@@ -25,7 +25,7 @@ class TestVerifyPassword:
         # hmac.compare_digest, not `==` -- guards against timing attacks.
         import hmac
 
-        import auth
+        from core import auth
 
         calls = []
         original = hmac.compare_digest

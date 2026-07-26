@@ -158,7 +158,14 @@ def compute_fifo_realized_pl(trades: pd.DataFrame) -> pd.DataFrame:
     is available (unlike the historical average-cost estimate kept unchanged
     in compute_realized_pl -- see docs/METHODOLOGY.md)."""
     rows, _ = _run_fifo(trades)
-    return pd.DataFrame(rows, columns=["Symbol", "Trade Date", "Month", "Realized P/L", "id"])
+    df = pd.DataFrame(rows, columns=["Symbol", "Trade Date", "Month", "Realized P/L", "id"])
+    # id comes through row.get("id") in _run_fifo's .iterrows() loop, which boxes it as a
+    # generic Python object -- left as-is, the column ends up dtype=object rather than a
+    # clean numeric dtype, which pandas' merge() rejects when joined against a float64 id
+    # column (seen for real merging this against dashboard.py's live_trades). float64 (not
+    # int) since callers concat this with historical rows that have no id at all -> NaN.
+    df["id"] = df["id"].astype(float)
+    return df
 
 
 def compute_current_positions(trades: pd.DataFrame) -> pd.DataFrame:
