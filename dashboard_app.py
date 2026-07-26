@@ -5,12 +5,28 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
+from auth import verify_password
 from calculations import compute_realized_pl as _compute_realized_pl
 from calculations import compute_roi
 
 DATA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "Offshore_Statements_2023-01_to_2026-06.xlsx")
 
 st.set_page_config(page_title="Financial Summary Dashboard", layout="wide")
+
+if not st.session_state.get("authenticated"):
+    st.title("Financial Summary Dashboard")
+    pw = st.text_input("Password", type="password")
+    if st.button("Log in"):
+        if verify_password(pw, st.secrets["APP_PASSWORD_SALT"], st.secrets["APP_PASSWORD_HASH"]):
+            st.session_state["authenticated"] = True
+            st.rerun()
+        else:
+            st.error("Incorrect password.")
+    st.stop()
+
+if st.sidebar.button("Log out"):
+    st.session_state["authenticated"] = False
+    st.rerun()
 
 
 @st.cache_data
