@@ -198,14 +198,20 @@ def fetch_trades(conn=None):
 
 
 def fetch_dividends(conn=None):
+    """Returns a DataFrame shaped like the xlsx Income sheet (Symbol, Trade
+    Date, Entry Type, Net Amt) so calculations.py::blended_dividends can
+    concatenate this directly with the xlsx side -- see that function's
+    docstring for the Entry Type vocabulary difference callers must handle."""
     import pandas as pd
 
     c, should_close = _with_connection(conn)
     df = pd.read_sql_query("SELECT * FROM dividends ORDER BY trade_date", c)
     if should_close:
         c.close()
-    if not df.empty:
-        df["trade_date"] = pd.to_datetime(df["trade_date"])
+    df["trade_date"] = pd.to_datetime(df["trade_date"])
+    df = df.rename(columns={
+        "trade_date": "Trade Date", "symbol": "Symbol", "entry_type": "Entry Type", "net_amount": "Net Amt",
+    })
     return df
 
 
@@ -221,6 +227,47 @@ def delete_seed_rows(conn=None):
     c, should_close = _with_connection(conn)
     c.execute("DELETE FROM trades WHERE source='seed'")
     c.execute("DELETE FROM dividends WHERE source='seed'")
+    c.commit()
+    if should_close:
+        c.close()
+
+
+def delete_trade(trade_id, conn=None):
+    """Deletes one trade by id -- the Record Trade page's per-row delete
+    button. No source restriction here (unlike delete_trades_by_source):
+    the page only ever shows manual/slip rows to delete from, so the
+    restriction is enforced by what's displayed, not by this function."""
+    c, should_close = _with_connection(conn)
+    c.execute("DELETE FROM trades WHERE id=?", (trade_id,))
+    c.commit()
+    if should_close:
+        c.close()
+
+
+def delete_dividend(dividend_id, conn=None):
+    """Deletes one dividend by id -- the Record Dividend page's per-row delete
+    button. Mirrors delete_trade(): no source restriction here, since the
+    page only ever shows/deletes manual rows, enforced by what's displayed."""
+    c, should_close = _with_connection(conn)
+    c.execute("DELETE FROM dividends WHERE id=?", (dividend_id,))
+    c.commit()
+    if should_close:
+        c.close()
+
+
+def delete_trades_by_source(source, conn=None):
+    """E.g. delete_trades_by_source("manual") to clear test entries made while
+    trying out Record Trade, without touching seeded history or other sources."""
+    c, should_close = _with_connection(conn)
+    c.execute("DELETE FROM trades WHERE source=?", (source,))
+    c.commit()
+    if should_close:
+        c.close()
+
+
+def delete_dividends_by_source(source, conn=None):
+    c, should_close = _with_connection(conn)
+    c.execute("DELETE FROM dividends WHERE source=?", (source,))
     c.commit()
     if should_close:
         c.close()

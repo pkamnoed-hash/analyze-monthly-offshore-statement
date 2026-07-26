@@ -89,6 +89,45 @@ take effect before market open. Getting this backwards previously overstated
 one position's (MSTY) realized loss by $131.45 -- fixed, but worth knowing
 the ordering is deliberate if extending this function.
 
+## Realized P/L since the last statement -- FIFO, not average-cost
+
+Everything above (`compute_realized_pl`) is kept **unchanged** for the frozen,
+audited xlsx history -- it's already reconciled, and moving those numbers
+would undo that work. But trades entered live through **Record Trade**
+(manual or slip upload) are tracked at full lot-level detail, so
+`calculations.py::compute_fifo_realized_pl` uses **FIFO lot matching**
+instead: each symbol keeps a queue of `[quantity, cost_per_share]` lots, and
+a sell draws down the *oldest* lot(s) first rather than blending into one
+running average. A sell spanning multiple lots sums the cost across them;
+stock splits rescale every open lot proportionally; a ReOrg CA closes all
+lots for that symbol.
+
+This is why a sell can realize a **loss** even when the sale price is above
+your average cost: FIFO doesn't sell "the average," it sells specific,
+already-purchased shares -- and if those particular (oldest) shares cost more
+than both the sale price and the blended average, the trade still loses
+money. Confirmed on a real trade: selling 10 shares of a DCA'd position at
+$25/share (above its $18.54 blended average) produced a **-$6.93** loss,
+because FIFO drew from a 2024 lot costing $25.69/share.
+
+`compute_current_positions` builds on the same lot-tracking loop (factored
+out into a shared `_run_fifo` helper) to expose the *current* open position
+per symbol -- quantity and quantity-weighted average cost -- shown on Record
+Trade while entering a new trade, so a sell's likely FIFO outcome isn't a
+surprise. `estimate_sell_realized_pl` simulates a sell against that same lot
+book live, as Quantity/Price are typed, before the trade is even saved
+(commission excluded from the estimate, since fee fields aren't known yet at
+that point).
+
+**Blending**: `blended_realized_pl`/`blended_dividends` split at a `cutoff`
+date (the xlsx Summary sheet's last covered month) -- everything dated on or
+before it keeps the audited average-cost/xlsx figures; everything after
+switches to the live FIFO recompute. Portfolio Value, Unrealized P/L, and
+Holdings are **not** blended (that would need a live price feed and cash
+ledger, out of scope) -- they stay labeled "as of `<cutoff month>`", with a
+separate **Since Last Statement** panel showing what's been logged since,
+labeled per-row with the Realized P/L it actually produced.
+
 ## Unrealized P/L
 
 Sum of the `Unrealized` column across the latest month's Holdings rows
@@ -141,3 +180,49 @@ that should roughly match Investment Gain/Loss. When it doesn't, the
 dashboard explains the gap inline -- currently that's mostly the Realized
 P/L average-cost estimate described above, plus minor rounding accumulated
 across months. Investment Gain/Loss is the more reliable number either way.
+
+## Recording a trade (Record Trade page)
+
+Both entry paths (Upload Slip, parsed via the Claude vision API in
+`slip_parser.py`; Manual Entry) funnel into the same `db.insert_trade()`,
+so they can't drift out of sync. `quantity` is always entered as a positive
+magnitude with a Side dropdown -- the sign conversion to the xlsx
+Transactions convention (+buy, -sell) happens once, at insert time.
+
+**Fee netting** (`db.compute_net_commission`), one formula for both sides:
+
+```
+commission = commission_fee + vat + reserved_fee (SEC+TAF, sell only) - fee_rebate (coupon, sell only)
+```
+
+Verified against a real sell slip: `1.04 + 0.00 + 0.03 - 1.04 = 0.03`, and
+`689.98 (gross Stock Amount) - 0.03 = 689.95`, matching the slip's own
+printed Total Credit exactly.
+
+**Oversell confirmation**: if a sell's quantity exceeds the symbol's current
+FIFO position (see above), the save is blocked behind an explicit checkbox
+("I understand this sells more than my current holding"), keyed per
+symbol+quantity so confirming one oversell never silently carries over to a
+different one. This is a soft gate, not a hard block -- a legitimate reason
+to oversell is that an earlier buy simply hasn't been logged yet.
+
+## Recording a dividend (Record Dividend page)
+
+Takes **Gross Amount** and **Withholding Tax** as two separate numbers --
+matching the two separate line items Dime! itself shows for a dividend
+(e.g. "Dividend HDV: 2.45 USD" and "Dividend Withholding Tax HDV: -0.36
+USD") -- and computes `Net = round(Gross - Withholding, 2)` silently at save
+time. This is **not** an assumed flat 15%: Capital Distribution rows have no
+separate withholding line at all in the real data (confirmed against an
+actual Dime! activity receipt), so entering Withholding Tax as 0 there
+correctly leaves Net equal to Gross. The `round()` avoids binary
+floating-point noise (`2.45 - 0.36 == 2.0900000000000003` before rounding)
+leaking into stored data.
+
+Symbol is required unless Entry Type is Interest -- matches the xlsx seed
+convention, where Interest rows carry no symbol. The Symbol dropdown is
+sourced from trade history (a dividend can't happen before the stock was
+bought, so this covers virtually every real case) via
+`st.column_config.SelectboxColumn`, which -- unlike Record Trade's Symbol
+field -- has no free-text escape hatch for a symbol that hasn't been traded
+yet in this app.

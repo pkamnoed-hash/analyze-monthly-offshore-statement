@@ -177,3 +177,61 @@ class TestSeedTracking:
         db.delete_seed_rows(conn=conn)
         remaining = [r[0] for r in conn.execute("SELECT symbol FROM trades")]
         assert remaining == ["AAA"]
+
+
+class TestDeleteTrade:
+    def test_deletes_only_the_given_id(self, conn):
+        db.insert_trade(trade_date="2026-01-05", side="buy", symbol="AAA", quantity=1, price=1.0, conn=conn)
+        db.insert_trade(trade_date="2026-01-06", side="buy", symbol="BBB", quantity=1, price=1.0, conn=conn)
+        target_id = conn.execute("SELECT id FROM trades WHERE symbol='AAA'").fetchone()[0]
+        db.delete_trade(target_id, conn=conn)
+        remaining = [r[0] for r in conn.execute("SELECT symbol FROM trades")]
+        assert remaining == ["BBB"]
+
+    def test_unknown_id_is_a_noop(self, conn):
+        db.insert_trade(trade_date="2026-01-05", side="buy", symbol="AAA", quantity=1, price=1.0, conn=conn)
+        db.delete_trade(999999, conn=conn)
+        remaining = [r[0] for r in conn.execute("SELECT symbol FROM trades")]
+        assert remaining == ["AAA"]
+
+
+class TestDeleteDividend:
+    def test_deletes_only_the_given_id(self, conn):
+        db.insert_dividend(trade_date="2026-01-05", entry_type="Dividend", net_amount=1.0, symbol="AAA", conn=conn)
+        db.insert_dividend(trade_date="2026-01-06", entry_type="Dividend", net_amount=2.0, symbol="BBB", conn=conn)
+        target_id = conn.execute("SELECT id FROM dividends WHERE symbol='AAA'").fetchone()[0]
+        db.delete_dividend(target_id, conn=conn)
+        remaining = [r[0] for r in conn.execute("SELECT symbol FROM dividends")]
+        assert remaining == ["BBB"]
+
+    def test_unknown_id_is_a_noop(self, conn):
+        db.insert_dividend(trade_date="2026-01-05", entry_type="Dividend", net_amount=1.0, symbol="AAA", conn=conn)
+        db.delete_dividend(999999, conn=conn)
+        remaining = [r[0] for r in conn.execute("SELECT symbol FROM dividends")]
+        assert remaining == ["AAA"]
+
+
+class TestDeleteBySource:
+    def test_delete_trades_by_source_only_removes_that_source(self, conn):
+        db.insert_trade(trade_date="2026-01-05", side="buy", symbol="AAA", quantity=1, price=1.0, source="manual", conn=conn)
+        db.insert_trade(trade_date="2026-01-06", side="buy", symbol="BBB", quantity=1, price=1.0, source="slip", conn=conn)
+        db.insert_trade_raw({
+            "trade_date": "2023-01-03", "entry_type": "Trade Entry", "side": "buy", "symbol": "CCC",
+            "quantity": 1.0, "price": 1.0, "amount": -1.0, "commission": 0.0, "source": "seed",
+        }, conn=conn)
+        db.delete_trades_by_source("manual", conn=conn)
+        remaining = sorted(r[0] for r in conn.execute("SELECT symbol FROM trades"))
+        assert remaining == ["BBB", "CCC"]
+
+    def test_delete_dividends_by_source_only_removes_that_source(self, conn):
+        db.insert_dividend(trade_date="2026-01-05", entry_type="Dividend", net_amount=1.0, symbol="AAA", source="manual", conn=conn)
+        db.insert_dividend(trade_date="2026-01-06", entry_type="Dividend", net_amount=2.0, symbol="BBB", source="seed", conn=conn)
+        db.delete_dividends_by_source("manual", conn=conn)
+        remaining = [r[0] for r in conn.execute("SELECT symbol FROM dividends")]
+        assert remaining == ["BBB"]
+
+    def test_delete_by_source_with_no_matching_rows_is_a_noop(self, conn):
+        db.insert_trade(trade_date="2026-01-05", side="buy", symbol="AAA", quantity=1, price=1.0, source="manual", conn=conn)
+        db.delete_trades_by_source("slip", conn=conn)  # nothing with this source exists
+        remaining = [r[0] for r in conn.execute("SELECT symbol FROM trades")]
+        assert remaining == ["AAA"]

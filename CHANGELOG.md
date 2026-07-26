@@ -1,5 +1,43 @@
 # Changelog
 
+## Unified Portfolio Web App (v1): record trades and dividends, don't just view them
+
+Adds a write path on top of the previously read-only dashboard, so new
+activity no longer needs re-typing into a separate Excel workbook between
+official broker statements.
+
+- **Login gate**: a single shared password (salted SHA-256, `auth.py`)
+  guards every page, including the Dashboard -- Streamlit binds to
+  `0.0.0.0` by default, so this was a real, current exposure, not a
+  hypothetical.
+- **Persistent storage**: `data/portfolio.db` (SQLite, `db.py`), seeded once
+  from the existing audited xlsx (`scripts/seed_from_xlsx.py`) so FIFO
+  lot-matching and dividend continuity work from day one.
+- **Multi-page shell**: `dashboard_app.py` is now a thin `st.navigation`
+  router; the dashboard body moved to `app_pages/dashboard.py`.
+- **Dashboard blending**: KPIs blend the audited xlsx (up to the last
+  official statement) with a live FIFO recompute of anything logged since --
+  see `docs/METHODOLOGY.md` for the full FIFO-vs-average-cost writeup. A new
+  "Since Last Statement" panel shows what's been logged and the Realized
+  P/L it produced, per row.
+- **Record Trade page**: Upload Slip (Claude vision API parses a Dime!
+  trade confirmation screenshot into an editable confirm form) and Manual
+  Entry, both writing to the same trade record. Shows the current FIFO
+  position and a live estimated Realized P/L as a sell is typed, before
+  it's saved. Blocks saving a sell that exceeds the current position behind
+  an explicit confirmation checkbox. Symbol is a searchable dropdown sourced
+  from trade history, with a free-text fallback for a genuinely new symbol.
+  Delete (with a confirmation popover) for mistakes -- editing is delete +
+  re-enter, not in-place.
+- **Record Dividend page**: a bulk entry grid (several rows in one sitting)
+  taking Gross Amount + Withholding Tax as the two separate numbers Dime!
+  itself shows, computing Net automatically -- deliberately not an assumed
+  flat 15%, since Capital Distribution rows have no withholding line in the
+  real data. A Recent list (with the same delete-with-confirm pattern) and a
+  Matrix view (symbols x months, full history, with row/column totals).
+- **`requirements.txt`** added, pinning all direct dependencies including
+  the new `anthropic` SDK.
+
 ## Dashboard KPI clarity pass
 
 - **Total Fees tooltip**: clarifies that the figure is the Fees sheet *plus*
