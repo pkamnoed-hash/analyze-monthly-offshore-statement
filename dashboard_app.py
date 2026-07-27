@@ -28,6 +28,6 @@ pg = st.navigation({
         st.Page("app_pages/record_trade.py", title="Record Trade"),
         st.Page("app_pages/record_dividend.py", title="Record Dividend"),
     ],
-    # "Tools" section (Reconciliation, Rebalance) is v2, out of scope for this build.
+    "Tools": [st.Page("app_pages/reconciliation.py", title="Reconciliation")],
 })
 pg.run()

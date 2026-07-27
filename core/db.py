@@ -216,6 +216,54 @@ def fetch_dividends(conn=None):
     return df
 
 
+def fetch_unreconciled_trades(cutoff, conn=None):
+    """Trades within an official (<=cutoff) statement period that haven't been matched
+    against the xlsx yet -- reconciliation candidates. Built on fetch_trades() rather
+    than a raw query so callers get the same renamed/typed shape every other page
+    already works with."""
+    df = fetch_trades(conn=conn)
+    if df.empty:
+        return df
+    return df[(df["Trade Date"] <= cutoff) & df["reconciled_month"].isna()].reset_index(drop=True)
+
+
+def fetch_unreconciled_dividends(cutoff, conn=None):
+    """Dividend-side counterpart to fetch_unreconciled_trades()."""
+    df = fetch_dividends(conn=conn)
+    if df.empty:
+        return df
+    return df[(df["Trade Date"] <= cutoff) & df["reconciled_month"].isna()].reset_index(drop=True)
+
+
+def mark_reconciled(table, row_id, month, conn=None):
+    """Sets reconciled_month on a single row. See mark_reconciled_bulk() for the
+    table/month contract -- this is just the one-row convenience wrapper."""
+    mark_reconciled_bulk(table, [row_id], month, conn=conn)
+
+
+_RECONCILABLE_TABLES = {"trades", "dividends"}
+
+
+def mark_reconciled_bulk(table, ids, month, conn=None):
+    """One transaction for the whole batch -- mirrors insert_trades_bulk/
+    insert_dividends_bulk's pattern. `table` must be 'trades' or 'dividends'
+    (validated against a fixed allowlist since table names can't be parameterized
+    via '?'). `month` is the xlsx statement Month the row matched against ('%Y-%m'),
+    not the cutoff date, so it's traceable to which statement actually covered it."""
+    if table not in _RECONCILABLE_TABLES:
+        raise ValueError(f"table must be one of {sorted(_RECONCILABLE_TABLES)}, got {table!r}")
+    c, should_close = _with_connection(conn)
+    try:
+        c.executemany(f"UPDATE {table} SET reconciled_month=? WHERE id=?", [(month, i) for i in ids])
+        c.commit()
+    except Exception:
+        c.rollback()
+        raise
+    finally:
+        if should_close:
+            c.close()
+
+
 def count_seed_rows(conn=None):
     c, should_close = _with_connection(conn)
     n = c.execute("SELECT COUNT(*) FROM trades WHERE source='seed'").fetchone()[0]

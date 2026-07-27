@@ -1,5 +1,41 @@
 # Changelog
 
+## Reconciliation (v2): verify live-logged activity against each new official statement
+
+Adds a **Reconciliation** page (new "Tools" nav section) that closes the
+loop v1 opened: once a new official xlsx statement arrives, everything
+logged live through Record Trade/Record Dividend up to that point needs
+checking against it, not just trusted. Uses the `reconciled_month` schema
+column that's existed since v1's Step 2 but was never read or written
+until now.
+
+- **`core/reconciliation.py`**: pure matching logic, no Streamlit/DB
+  dependency. Trades match on `(Trade Date, Symbol, Quantity, Price)`;
+  dividends match on the xlsx's grouped gross+withholding sum; interest
+  matches on `(Trade Date, Net Amt)` only, deliberately ignoring xlsx
+  Symbol since the seed script always blanks it. A shared duplicate-safe
+  pairing helper (`_pair_1to1`) stops same-key duplicates on one side from
+  fanning out and over-matching the other side.
+- **Three sections on the Reconciliation page**: "Ready to confirm"
+  (matched, grouped by statement month, bulk or per-month "Mark
+  reconciled"), "Needs review" (logged rows with no xlsx match -- fix is
+  delete-and-re-enter, same correction pattern as everywhere else in this
+  app), and "Official activity not yet logged" (xlsx rows never logged at
+  all -- arguably the highest-value check, since nothing else in the app
+  would ever surface this).
+- **`core/db.py`**: `fetch_unreconciled_trades`/`_dividends` (candidates:
+  `<= cutoff` and not yet reconciled), `mark_reconciled`/`_bulk` (one
+  transaction per statement month, since a bulk "mark all" can span dozens
+  of months on a first run).
+- Verified against this account's real broker slips/receipts (`labs/`) --
+  the matching definitions line up exactly with the actual Gross/Withholding
+  dividend split, fee-netting formula, and whole-share/fractional-share
+  trade-leg splitting already documented in v1.
+- First real run against this account's history: 902/902 trades and
+  895/895 dividend+interest rows matched cleanly, 0 rows needing review, 0
+  gaps -- confirming the audited xlsx and the live-logged data have agreed
+  the whole time.
+
 ## Unified Portfolio Web App (v1): record trades and dividends, don't just view them
 
 Adds a write path on top of the previously read-only dashboard, so new
