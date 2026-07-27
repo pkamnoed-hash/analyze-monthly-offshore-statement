@@ -280,3 +280,51 @@ confirmation, and a dividend activity receipt) -- confirming the
 Gross/Withholding split, the fee-netting formula, and the whole-share/
 fractional-share leg pattern all match exactly what this feature expects,
 not just an assumption about how the broker's data is shaped.
+
+## Allocation Type (Tools page)
+
+Classifies each symbol ever traded as **Dividend** or **Growth**, matching
+how the user already tracks two parallel portfolios in a personal Excel
+workbook (one sheet per type). **Others** is the default for anything not
+yet actively sorted -- it is never itself a stored value (see
+`docs/DATA_MODEL.md`'s `symbol_types` section); a symbol shows Others
+purely because no row exists for it yet. This is **tagging only** -- one
+classification per symbol, not per trade, with no target-%/rebalance math
+attached (that's the separately-deferred Rebalance planner in
+`docs/ROADMAP.md`).
+
+**Two ways a symbol gets classified**:
+
+1. **One-time bulk catch-up** -- the Allocation Type page itself
+   (`app_pages/allocation_type.py`), a `st.data_editor` grid covering every
+   symbol that's ever appeared in `trades` (via `db.fetch_symbol_types()`,
+   so a fully sold-out symbol still shows up -- not just current
+   holdings). Two independent input paths on the same grid: check several
+   rows' `Select` boxes and click a "Set N selected to Dividend/Growth/
+   Others" button (applies immediately), or edit a row's dropdown directly
+   and click "Save dropdown changes" (diffs against current state, only
+   writes what actually changed). A `st.radio` filter (All/Others/
+   Dividend/Growth) plus a "Showing N of M" row count help work through a
+   large backlog without losing track of progress.
+2. **First-trade inline field** -- going forward, `app_pages/record_trade.py`
+   shows an `Allocation Type` selectbox only when the symbol being saved
+   has **never appeared in `trades` before** (checked against
+   `known_symbols`, the same list that drives the Symbol autocomplete) --
+   not "has no type yet," since an existing-but-still-Others symbol from
+   the bulk catch-up must never be re-prompted on every future trade of
+   the same symbol. Optional, defaults to Others, save proceeds either
+   way; only calls `db.set_symbol_type()` if a real choice (Dividend/
+   Growth) was made.
+
+Once the one-time bulk pass is done, the inline field is self-sustaining --
+there's no recurring maintenance task, only an occasional revisit via the
+Tools page if you want to *change* an existing symbol's type.
+
+**Dashboard integration**: the By Symbol tab's table gets an `Allocation
+Type` column (via the same `fetch_symbol_types()` merge), and a
+Dividend/Growth/Others `st.metric` row (Market Value + % of holdings) sits
+under the existing "Current Allocation" pie chart, grouped the same way
+that chart's data already supports, just by allocation type instead of by
+symbol. A large Others total there is expected right after this feature
+first ships -- it's the visible prompt to go classify more via the Tools
+page, not a bug.

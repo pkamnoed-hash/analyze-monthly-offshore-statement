@@ -1,8 +1,10 @@
 # Data model
 
-Two independent SQLite tables (`data/portfolio.db`, schema defined in
-`core/db.py`). No foreign key between them -- a dividend/interest posting
-isn't linked back to the specific trade(s) that produced it.
+Three independent SQLite tables (`data/portfolio.db`, schema defined in
+`core/db.py`). No foreign keys between any of them -- a dividend/interest
+posting isn't linked back to the specific trade(s) that produced it, and
+`symbol_types` links to the others only loosely, by `symbol` string, not a
+declared FK.
 
 ```mermaid
 erDiagram
@@ -37,6 +39,11 @@ erDiagram
         TEXT reconciled_month
         TEXT notes
         TEXT created_at
+    }
+    symbol_types {
+        TEXT symbol PK
+        TEXT allocation_type
+        TEXT updated_at
     }
 ```
 
@@ -74,6 +81,27 @@ erDiagram
 | `reconciled_month` | TEXT | same semantics as `trades.reconciled_month` |
 | `notes` | TEXT | |
 | `created_at` | TEXT NOT NULL | |
+
+## `symbol_types`
+
+| Column | Type | Notes |
+|---|---|---|
+| `symbol` | TEXT PK | one row per symbol, not per trade |
+| `allocation_type` | TEXT NOT NULL | CHECK constrained: `'Dividend'` \| `'Growth'` -- **`'Others'` is deliberately not a valid stored value** |
+| `updated_at` | TEXT NOT NULL | `datetime('now')`, refreshed on every upsert |
+
+A symbol with **no row at all** here means "Others" -- the default for
+anything not yet actively classified, guaranteed at fetch time by
+`db.fetch_symbol_types()` (starts from every distinct symbol in `trades`,
+left-joins this table, fills missing with `"Others"`) rather than by
+writing a row for every symbol. This mirrors `reconciled_month IS NULL`
+meaning "not yet reconciled" elsewhere in this schema: absence of a row is
+the default state, not a stored sentinel. Keeps the table itself small
+(only symbols someone has actively tagged) while every caller (Allocation
+Type page, Dashboard, a future rebalance planner) still sees a complete,
+always-classified view. See `docs/METHODOLOGY.md` for how a symbol gets
+tagged (bulk catch-up vs. first-trade inline field) and `docs/ROADMAP.md`'s
+V2.1 section for the full design reasoning.
 
 ## Mapping to the official xlsx
 

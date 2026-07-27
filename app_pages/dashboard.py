@@ -169,6 +169,11 @@ fl = flows.loc[fl_mask]
 st.caption(f"Showing **{start.strftime('%b %Y')} – {end.strftime('%b %Y')}**")
 
 # --- Shared per-symbol aggregates (used by KPIs, allocation chart, and By Symbol tab) ---
+# fetch_symbol_types() already guarantees every symbol ever traded has a value (Others by
+# default) -- the .fillna("Others") calls below are a safety net, not the primary path.
+symbol_types = db.fetch_symbol_types()
+symbol_type_map = dict(zip(symbol_types["Symbol"], symbol_types["Allocation Type"]))
+
 latest_month = h["Month"].max()
 latest_holdings = h[(h["Month"] == latest_month) & (h["Symbol"] != "*Cash")].copy()
 latest_holdings = latest_holdings[latest_holdings["Market Value"].notna()]
@@ -360,6 +365,22 @@ with col4:
         st.plotly_chart(fig4, use_container_width=True)
         st.caption("See the **By Symbol** tab below for holding, P/L, and dividend detail per symbol.")
 
+if not latest_holdings.empty:
+    alloc_totals = latest_holdings.copy()
+    alloc_totals["Allocation Type"] = alloc_totals["Symbol"].map(symbol_type_map).fillna("Others")
+    type_mv = alloc_totals.groupby("Allocation Type")["Market Value"].sum()
+    total_mv = type_mv.sum()
+
+    st.caption(
+        f"Allocation type breakdown ({latest_month.strftime('%b %Y')} holdings) -- "
+        "classify more under Tools → Allocation Type."
+    )
+    ac1, ac2, ac3 = st.columns(3)
+    for col, label in zip((ac1, ac2, ac3), ("Dividend", "Growth", "Others")):
+        mv = type_mv.get(label, 0.0)
+        pct = (mv / total_mv * 100) if total_mv else 0.0
+        col.metric(label, f"${mv:,.2f}", delta=f"{pct:.1f}% of holdings", delta_color="off")
+
 # Net of the 15% Thai withholding tax, matching the Dividends / Avg. Monthly Dividend KPIs
 # above -- deliberately not the Summary sheet's "Dividend ($)" column used in the Income
 # Breakdown chart, which is gross (pre-withholding) and would be inconsistent with those.
@@ -414,6 +435,7 @@ by_symbol = by_symbol.merge(
 )
 by_symbol["Realized P/L"] = by_symbol["Symbol"].map(realized_by_symbol).fillna(0.0)
 by_symbol["Dividends"] = by_symbol["Symbol"].map(dividends_by_symbol).fillna(0.0)
+by_symbol["Allocation Type"] = by_symbol["Symbol"].map(symbol_type_map).fillna("Others")
 for col in ["Quantity", "Market Value", "Unrealized"]:
     by_symbol[col] = by_symbol[col].fillna(0.0)
 by_symbol["Market Price"] = by_symbol["Market Price"].fillna(0.0)
@@ -461,8 +483,8 @@ with tab0:
             | by_symbol_view["Description"].str.contains(symbol_search, case=False, na=False)
         ]
 
-    display_cols = ["Symbol", "Status", "Description", "Quantity", "Market Price", "Market Value", "Cost Price",
-                     "Unrealized", "Unrealized %", "Realized P/L", "Dividends", "Total P/L"]
+    display_cols = ["Symbol", "Status", "Allocation Type", "Description", "Quantity", "Market Price", "Market Value",
+                     "Cost Price", "Unrealized", "Unrealized %", "Realized P/L", "Dividends", "Total P/L"]
     st.dataframe(
         by_symbol_view[display_cols],
         use_container_width=True,

@@ -47,6 +47,12 @@ CREATE TABLE IF NOT EXISTS dividends (
     created_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_dividends_symbol_date ON dividends(symbol, trade_date);
+
+CREATE TABLE IF NOT EXISTS symbol_types (
+    symbol           TEXT PRIMARY KEY,
+    allocation_type  TEXT NOT NULL CHECK(allocation_type IN ('Dividend', 'Growth')),
+    updated_at       TEXT NOT NULL DEFAULT (datetime('now'))
+);
 """
 
 TRADE_COLUMNS = [
@@ -214,6 +220,60 @@ def fetch_dividends(conn=None):
         "trade_date": "Trade Date", "symbol": "Symbol", "entry_type": "Entry Type", "net_amount": "Net Amt",
     })
     return df
+
+
+def set_symbol_type(symbol, allocation_type, conn=None):
+    """Upserts a symbol's allocation type. `allocation_type` must be
+    'Dividend' or 'Growth' (CHECK-constrained) -- returning a symbol to the
+    default is clear_symbol_type(), not set_symbol_type(symbol, "Others"),
+    since "Others" is never itself a stored value (see fetch_symbol_types)."""
+    c, should_close = _with_connection(conn)
+    c.execute(
+        "INSERT INTO symbol_types (symbol, allocation_type, updated_at) VALUES (?, ?, datetime('now')) "
+        "ON CONFLICT(symbol) DO UPDATE SET allocation_type=excluded.allocation_type, updated_at=excluded.updated_at",
+        (symbol, allocation_type),
+    )
+    c.commit()
+    if should_close:
+        c.close()
+
+
+def clear_symbol_type(symbol, conn=None):
+    """Deletes the row, returning the symbol to the "Others" default. An
+    unknown symbol is a no-op, matching delete_trade()'s convention."""
+    c, should_close = _with_connection(conn)
+    c.execute("DELETE FROM symbol_types WHERE symbol=?", (symbol,))
+    c.commit()
+    if should_close:
+        c.close()
+
+
+def fetch_symbol_types(conn=None):
+    """Returns a DataFrame (Symbol, Allocation Type) covering EVERY symbol
+    that's ever appeared in trades -- not just symbols someone has actively
+    classified. A symbol with no symbol_types row (including one that's
+    been fully bought and sold -- a real, common case, not an edge case --
+    see tests/test_db.py) defaults to "Others". This is the one function
+    any caller (the Allocation Type page, the Dashboard, a future rebalance
+    planner) should use to get a complete, always-classified view."""
+    import pandas as pd
+
+    trades = fetch_trades(conn=conn)
+    # dtype="object" is deliberate: pd.DataFrame({"Symbol": []}) built from a plain
+    # (possibly empty) Python list otherwise defaults to float64 when there are no
+    # trades yet, which then fails to merge against types["Symbol"] (object) below --
+    # the same empty-collection dtype-inference pitfall documented elsewhere in core/.
+    all_symbols = pd.DataFrame({"Symbol": pd.Series(sorted(trades["Symbol"].dropna().unique()), dtype="object")})
+
+    c, should_close = _with_connection(conn)
+    types = pd.read_sql_query("SELECT symbol, allocation_type FROM symbol_types", c)
+    if should_close:
+        c.close()
+    types = types.rename(columns={"symbol": "Symbol", "allocation_type": "Allocation Type"})
+
+    merged = all_symbols.merge(types, on="Symbol", how="left")
+    merged["Allocation Type"] = merged["Allocation Type"].fillna("Others")
+    return merged
 
 
 def fetch_unreconciled_trades(cutoff, conn=None):

@@ -28,6 +28,9 @@ pg = st.navigation({
         st.Page("app_pages/record_trade.py", title="Record Trade"),
         st.Page("app_pages/record_dividend.py", title="Record Dividend"),
     ],
-    "Tools": [st.Page("app_pages/reconciliation.py", title="Reconciliation")],
+    "Tools": [
+        st.Page("app_pages/reconciliation.py", title="Reconciliation"),
+        st.Page("app_pages/allocation_type.py", title="Allocation Type"),
+    ],
 })
 pg.run()

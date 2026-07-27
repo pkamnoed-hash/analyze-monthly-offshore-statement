@@ -1,5 +1,40 @@
 # Changelog
 
+## Allocation Type (v2.1): classify each symbol as Dividend or Growth
+
+Adds symbol-level tagging to the "Tools" nav section, matching how the user
+already tracks two parallel portfolios (Dividend / Growth) in a personal
+Excel workbook. Tagging only -- no target-%/rebalance math yet, that's a
+separately-deferred future feature this lays the groundwork for.
+
+- **`core/db.py`**: new `symbol_types` table (`symbol` PK, `allocation_type`
+  CHECK-constrained to `'Dividend'`/`'Growth'` -- `'Others'` is deliberately
+  never a stored value) + `set_symbol_type`/`clear_symbol_type`/
+  `fetch_symbol_types`. The fetch starts from every distinct symbol in
+  `trades` (not just symbols someone has tagged), left-joins the type table,
+  and fills missing rows with `"Others"` -- so a symbol that's been fully
+  bought and sold (44 of 96 real symbols today) still shows up, not just
+  current holdings.
+- **`app_pages/allocation_type.py`** (new page): a `st.data_editor` grid
+  covering every traded symbol, with two ways to classify -- bulk
+  checkbox-select + "Set N selected to Dividend/Growth/Others" buttons for
+  fast batch work, or edit a row's dropdown directly and click "Save
+  dropdown changes" for one-off tweaks. A type filter (All/Others/Dividend/
+  Growth) and a "Showing N of M" row count help work through a large
+  backlog.
+- **`app_pages/record_trade.py`**: an inline `Allocation Type` selectbox
+  appears only when the symbol being saved has never appeared in `trades`
+  before -- not merely "still Others" -- so the one-time bulk catch-up is
+  never re-triggered on a symbol's later trades. Optional, defaults to
+  Others, save proceeds either way.
+- **`app_pages/dashboard.py`**: By Symbol tab gets an `Allocation Type`
+  column; a new Dividend/Growth/Others metric row (Market Value + % of
+  holdings) sits under the existing "Current Allocation" pie chart.
+- Verified against real data: 96 traded symbols, all correctly defaulting
+  to Others before any tagging; after live use, 43 Dividend / 29 Growth /
+  23 Others, with the Dashboard's value-weighted breakdown (88.2% / 11.0% /
+  0.7%) closely tracking the real Excel's own 87.1%/12.9% actual split.
+
 ## Reconciliation (v2): verify live-logged activity against each new official statement
 
 Adds a **Reconciliation** page (new "Tools" nav section) that closes the

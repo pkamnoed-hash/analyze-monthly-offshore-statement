@@ -14,7 +14,9 @@ Code plan file is not durable -- it gets overwritten the next time Plan Mode
 is used for anything else. Every completed build's plan now lives here
 instead, permanently. See `CLAUDE.md` for the reminder to keep doing this.
 
-Both V1 and V2 below are **done** and merged into `main`.
+V1, V2, and V2.1 below are **done**. V1 and V2 are merged into `main`;
+V2.1 is built and verified on its own branch (`v2.1-allocation-type`, see
+`docs/VERSION_CONTROL.md`), pending merge.
 
 ## V1: Record Trade and View
 
@@ -551,11 +553,136 @@ confirmed the Gross/Withholding split, the fee-netting formula, and the
 whole-share/fractional-share leg pattern all match exactly what this
 feature expects.
 
+## V2.1: Symbol Allocation Type
+
+### Context
+
+The user manually tracks two parallel portfolios in a personal Excel
+workbook (`labs/วางแผนการเงิน_Financial Planning v1.0 (20260706bk).xlsx`): a
+`4.2.dividend (chaii)` sheet (income-focused holdings -- bond ETFs,
+covered-call ETFs: SHV, SGOV, VRIG, PFRL, ICLO, FLTR, JAAA, GOOY, QYLD,
+KLIP, RYLD) and a `4.2.growth (chaii)` sheet (capital-appreciation stocks:
+KO, PLTR, TSM, ARM, NDAQ, RKLB, AIQ, and others). A symbol lives in exactly
+one sheet -- that sheet membership *is* the allocation type. A third sheet
+(`4.4.sum (chaii)`) computes a full target-allocation tracker on top of
+this tagging (e.g. Dividend 87.1% actual vs. 80% target) -- that's the
+**Rebalance planner** already named-but-deferred below; this version is
+just the tagging foundation it will eventually need.
+
+Scoped, through conversation, to exactly three things: **just the tagging**
+(no target-%/rebalance math yet), **one tag per symbol** (not per trade --
+matches how the Excel sheets themselves work), and **three buckets --
+Dividend, Growth, Others** -- where Others is a catch-all default so no
+symbol is ever left in a blank/ambiguous state, not a real target-allocation
+type itself. Also decided on a **two-track classification** flow: a
+one-time bulk catch-up page for symbols that already existed before this
+shipped, plus an inline field in Record Trade that only fires on a symbol's
+very first-ever trade going forward -- confirmed against real prior art
+(`personal investment portfolio tool/NOTES.md`'s "Record box," which has a
+Portfolio (Dividend/Growth) field right in trade entry).
+
+### Data model
+
+```sql
+CREATE TABLE symbol_types (
+    symbol           TEXT PRIMARY KEY,
+    allocation_type  TEXT NOT NULL CHECK(allocation_type IN ('Dividend', 'Growth')),
+    updated_at       TEXT NOT NULL DEFAULT (datetime('now'))
+);
+```
+
+No stored "Others" value -- the CHECK constraint only allows the two
+*actively chosen* types; absence of a row means "Others," mirroring how
+`reconciled_month IS NULL` already means "not yet reconciled" elsewhere in
+this schema. Full coverage (every symbol always shows a type, never blank)
+is guaranteed at **fetch time** by `db.fetch_symbol_types()`, not by
+writing a row for every symbol: it starts from every distinct symbol in
+`trades` (not just tagged ones), left-joins `symbol_types`, and fills
+missing rows with `"Others"`. This keeps the table small while still
+satisfying "every stock always has a visible bucket" -- see
+`docs/DATA_MODEL.md` for the full column reference.
+
+### Implementation
+
+**`core/db.py`**: `set_symbol_type`/`clear_symbol_type`/`fetch_symbol_types`
+(described above), plus `TestSymbolTypes` in `tests/test_db.py` (9 tests,
+including a regression for a fully-sold-out symbol still appearing in the
+fetch -- real and common, not hypothetical: 44 of 96 traded symbols today
+have net zero position).
+
+**`app_pages/allocation_type.py`** (new page, under Tools nav alongside
+Reconciliation): a metric ("N of M symbols still in Others"), a type filter
+(`st.radio`: All/Others/Dividend/Growth) with a "Showing N of M" row count,
+and a `st.data_editor` grid with two independent input paths -- bulk
+checkbox-select + "Set N selected to Dividend/Growth/Others" buttons
+(applied immediately), or edit a row's dropdown directly + "Save dropdown
+changes" (diffs against prior state, only writes actual changes). The bulk
+buttons were added after the first version shipped, in response to real
+usage feedback that one-row-at-a-time dropdown editing was too slow for a
+~96-symbol backlog.
+
+**`app_pages/record_trade.py`**: `is_new_symbol = bool(symbol) and symbol
+not in known_symbols`, computed right after the outer Symbol widget (the
+same `known_symbols` list that already drives the Symbol autocomplete --
+no new query needed). When true, an `Allocation Type` selectbox appears
+(keyed by symbol, so a stale selection can't carry over to a different new
+symbol before submitting), defaulting to Others. On save, calls
+`db.set_symbol_type(symbol, allocation_type)` only if `is_new_symbol` and a
+real choice was made -- leaving it at Others is a no-op, already the
+default.
+
+**`app_pages/dashboard.py`**: `symbol_types`/`symbol_type_map` fetched once
+near the top (shared per-symbol aggregates section), merged into `by_symbol`
+as a new `Allocation Type` display column, plus a Dividend/Growth/Others
+`st.metric` row (Market Value + % of holdings) under the existing "Current
+Allocation" pie chart -- grouped the same way that chart's data already
+supports, just by allocation type instead of by symbol.
+
+### Testing and verification
+
+`tests/test_db.py`'s `TestSymbolTypes`: upsert behavior, the CHECK
+constraint rejecting both invalid strings and `"Others"` itself as a stored
+value, `clear_symbol_type` removing a row (unknown symbol = no-op), full
+coverage including a fully-sold-out symbol, and an empty-database edge case
+(caught a real bug -- see below). Full suite: 149/149 passing (9 new).
+
+Verified against real data at every step:
+- `fetch_symbol_types()` against the real `data/portfolio.db`: exactly 96
+  symbols, all "Others" before any tagging, including sold-out spot-check
+  symbols (AEE, BWB, CIBR).
+- Allocation Type page: `AppTest` confirms it renders with no exception
+  (96 of 96 symbols shown); `AppTest` doesn't support driving `st.data_editor`
+  interactively, so the edit-and-save click-through was verified live in the
+  browser instead (same pattern as Reconciliation's "Mark all" button).
+- Record Trade: `AppTest` confirms the field appears for a genuinely new
+  symbol (options `Others`/`Dividend`/`Growth`, default Others) and is
+  absent for an existing one -- both directions checked. The full
+  save-and-persist round trip hit an `AppTest` limitation (a
+  `st.selectbox(accept_new_options=True)` pre-seeded with an out-of-`options`
+  value resets to `None` on a second `.run()` call) and was deferred to a
+  real-browser check with a throwaway symbol.
+- Dashboard: By Symbol table has zero blank/NaN Allocation Type values
+  across 95 rows (43 Dividend / 29 Growth / 23 Others after live tagging);
+  the value-weighted metric row (88.2% / 11.0% / 0.7%) closely tracks the
+  real Excel's own 87.1%/12.9% actual split.
+- All 5 pages (Dashboard, Record Trade, Record Dividend, Reconciliation,
+  Allocation Type) smoke-tested clean via `AppTest` in one final pass.
+
+**Bug found and fixed**: `pd.DataFrame({"Symbol": []})` built from a plain
+empty Python list defaults to `float64` dtype, not `object` -- broke the
+merge against `symbol_types`' object-dtype `Symbol` column on an empty
+database. Fixed by explicitly constructing `pd.Series(..., dtype="object")`
+-- the same empty-collection dtype pitfall already hit twice elsewhere in
+this project (see `compute_fifo_realized_pl`'s `id` column, V1's "Bonus"
+section above).
+
 ## Deferred / future
 
 - **Rebalance planner** -- the dividend-reinvestment/rebalance screen from
-  `personal investment portfolio tool/NOTES.md` is good prior art, never
-  designed. Explicitly not selected when choosing what to build for V2.
+  `personal investment portfolio tool/NOTES.md` is good prior art. V2.1
+  above builds the tagging foundation (Dividend/Growth per symbol) it
+  needs; the target-%/actual-% math and delta indicator itself (like the
+  Excel workbook's `4.4.sum` sheet) is still not designed.
 - Specific-lot *selection* on sell (FIFO-only today) and any live
   market-price feed for true mark-to-market of post-cutoff positions.
 - **Record Dividend's Recent list is capped at `.head(20)`** -- an old
