@@ -1,6 +1,7 @@
 import os
 import sqlite3
 
+import pandas as pd
 import pytest
 
 from core import db
@@ -221,6 +222,78 @@ class TestDeleteDividend:
         db.delete_dividend(999999, conn=conn)
         remaining = [r[0] for r in conn.execute("SELECT symbol FROM dividends")]
         assert remaining == ["AAA"]
+
+
+class TestFetchUnreconciledTrades:
+    def test_excludes_rows_after_cutoff(self, conn):
+        db.insert_trade(trade_date="2026-01-05", side="buy", symbol="AAA", quantity=1, price=1.0, conn=conn)
+        db.insert_trade(trade_date="2026-02-05", side="buy", symbol="BBB", quantity=1, price=1.0, conn=conn)
+        df = db.fetch_unreconciled_trades(cutoff=pd.Timestamp("2026-01-31"), conn=conn)
+        assert list(df["Symbol"]) == ["AAA"]
+
+    def test_includes_rows_exactly_at_cutoff(self, conn):
+        db.insert_trade(trade_date="2026-01-31", side="buy", symbol="AAA", quantity=1, price=1.0, conn=conn)
+        df = db.fetch_unreconciled_trades(cutoff=pd.Timestamp("2026-01-31"), conn=conn)
+        assert list(df["Symbol"]) == ["AAA"]
+
+    def test_excludes_already_reconciled_rows(self, conn):
+        db.insert_trade(trade_date="2026-01-05", side="buy", symbol="AAA", quantity=1, price=1.0, conn=conn)
+        target_id = conn.execute("SELECT id FROM trades WHERE symbol='AAA'").fetchone()[0]
+        db.mark_reconciled("trades", target_id, "2026-01", conn=conn)
+        df = db.fetch_unreconciled_trades(cutoff=pd.Timestamp("2026-01-31"), conn=conn)
+        assert df.empty
+
+    def test_empty_table_returns_empty_frame_without_error(self, conn):
+        df = db.fetch_unreconciled_trades(cutoff=pd.Timestamp("2026-01-31"), conn=conn)
+        assert df.empty
+
+
+class TestFetchUnreconciledDividends:
+    def test_excludes_rows_after_cutoff_and_already_reconciled(self, conn):
+        db.insert_dividend(trade_date="2026-01-05", entry_type="Dividend", net_amount=1.0, symbol="AAA", conn=conn)
+        db.insert_dividend(trade_date="2026-02-05", entry_type="Dividend", net_amount=1.0, symbol="BBB", conn=conn)
+        db.insert_dividend(trade_date="2026-01-06", entry_type="Dividend", net_amount=1.0, symbol="CCC", conn=conn)
+        reconciled_id = conn.execute("SELECT id FROM dividends WHERE symbol='CCC'").fetchone()[0]
+        db.mark_reconciled("dividends", reconciled_id, "2026-01", conn=conn)
+        df = db.fetch_unreconciled_dividends(cutoff=pd.Timestamp("2026-01-31"), conn=conn)
+        assert list(df["Symbol"]) == ["AAA"]
+
+
+class TestMarkReconciled:
+    def test_sets_reconciled_month_on_only_the_given_row(self, conn):
+        db.insert_trade(trade_date="2026-01-05", side="buy", symbol="AAA", quantity=1, price=1.0, conn=conn)
+        db.insert_trade(trade_date="2026-01-06", side="buy", symbol="BBB", quantity=1, price=1.0, conn=conn)
+        target_id = conn.execute("SELECT id FROM trades WHERE symbol='AAA'").fetchone()[0]
+        db.mark_reconciled("trades", target_id, "2026-01", conn=conn)
+        rows = dict(conn.execute("SELECT symbol, reconciled_month FROM trades").fetchall())
+        assert rows == {"AAA": "2026-01", "BBB": None}
+
+    def test_unknown_id_is_a_noop(self, conn):
+        db.insert_trade(trade_date="2026-01-05", side="buy", symbol="AAA", quantity=1, price=1.0, conn=conn)
+        db.mark_reconciled("trades", 999999, "2026-01", conn=conn)
+        reconciled_month = conn.execute("SELECT reconciled_month FROM trades").fetchone()[0]
+        assert reconciled_month is None
+
+    def test_invalid_table_raises_value_error(self, conn):
+        with pytest.raises(ValueError):
+            db.mark_reconciled("not_a_table", 1, "2026-01", conn=conn)
+
+
+class TestMarkReconciledBulk:
+    def test_sets_reconciled_month_on_all_given_ids(self, conn):
+        db.insert_dividend(trade_date="2026-01-05", entry_type="Dividend", net_amount=1.0, symbol="AAA", conn=conn)
+        db.insert_dividend(trade_date="2026-01-06", entry_type="Dividend", net_amount=1.0, symbol="BBB", conn=conn)
+        db.insert_dividend(trade_date="2026-01-07", entry_type="Dividend", net_amount=1.0, symbol="CCC", conn=conn)
+        ids = [r[0] for r in conn.execute("SELECT id FROM dividends WHERE symbol IN ('AAA','BBB')")]
+        db.mark_reconciled_bulk("dividends", ids, "2026-01", conn=conn)
+        rows = dict(conn.execute("SELECT symbol, reconciled_month FROM dividends").fetchall())
+        assert rows == {"AAA": "2026-01", "BBB": "2026-01", "CCC": None}
+
+    def test_invalid_table_raises_value_error_before_touching_db(self, conn):
+        db.insert_trade(trade_date="2026-01-05", side="buy", symbol="AAA", quantity=1, price=1.0, conn=conn)
+        target_id = conn.execute("SELECT id FROM trades").fetchone()[0]
+        with pytest.raises(ValueError):
+            db.mark_reconciled_bulk("not_a_table", [target_id], "2026-01", conn=conn)
 
 
 class TestDeleteBySource:

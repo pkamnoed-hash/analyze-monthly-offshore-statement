@@ -226,3 +226,57 @@ bought, so this covers virtually every real case) via
 `st.column_config.SelectboxColumn`, which -- unlike Record Trade's Symbol
 field -- has no free-text escape hatch for a symbol that hasn't been traded
 yet in this app.
+
+## Reconciliation (Tools page)
+
+Once a new official statement replaces the "Since Last Statement" window
+described above (the `cutoff`), everything logged live through Record
+Trade/Record Dividend up to that new cutoff needs verifying against the
+newly-audited xlsx, not just trusted at face value. The Reconciliation page
+(`core/reconciliation.py`) does that matching and marks confirmed rows via
+the `reconciled_month` column -- present in the schema since Step 2, unused
+until this feature.
+
+**Matching keys** (exact, no fuzzy tolerance beyond the rounding noted):
+
+- **Trades**: `(Trade Date, Symbol, Quantity rounded 6dp, Price rounded
+  4dp)`. The rounding exists only because Record Trade's number input can't
+  accept more precision than that -- not fuzziness.
+- **Dividends**: xlsx Income rows for the same `(Trade Date, Symbol)` are
+  grouped and summed (the gross `Dividends` row + the negative `Div.
+  Adj(NRA Withheld)` row) and compared, rounded 2dp, against the logged net
+  amount. Entry Type wording is deliberately excluded from the key -- the
+  xlsx and SQLite vocabularies never line up 1:1 (Capital Distribution has
+  no xlsx equivalent and matches the same way a Dividend does).
+- **Interest**: matched on `(Trade Date, Net Amt rounded 2dp)` only -- xlsx
+  Symbol is deliberately ignored, since `scripts/seed_from_xlsx.py` always
+  stores Interest rows with a blank symbol regardless of what the xlsx
+  shows.
+
+Same-day, same-symbol, same-price rows with *different* quantities are real
+(a dollar-based buy order filled as a whole-share leg plus a
+fractional-share leg) and match independently -- confirmed on real data,
+e.g. VRIG 2026-06-29: 1.0 + 1.190429 shares, both legs at $25.07.
+
+**Three outcomes per candidate**:
+
+1. **Ready to confirm** -- matched; a "Mark as reconciled" action (per
+   statement month, or all at once) stamps `reconciled_month`, after which
+   the row is never re-checked.
+2. **Needs review** -- a logged row with no xlsx counterpart, almost always
+   a data-entry mistake. No in-place edit anywhere in this app -- fixed by
+   deleting and re-entering correctly in Record Trade/Record Dividend.
+3. **Official activity not yet logged** -- the reverse direction: an xlsx
+   row with no SQLite counterpart *at all*, checked against the full
+   trades/dividends tables rather than just unreconciled candidates, so an
+   already-reconciled row is correctly recognized as covered rather than
+   looking like a fresh gap. Arguably the highest-value check, since a
+   never-logged entry has no other surface in this app that would ever
+   mention it.
+
+The matching definitions above were cross-checked against this account's
+real Dime! slip/receipt screenshots (a buy confirmation, a sell
+confirmation, and a dividend activity receipt) -- confirming the
+Gross/Withholding split, the fee-netting formula, and the whole-share/
+fractional-share leg pattern all match exactly what this feature expects,
+not just an assumption about how the broker's data is shaped.
