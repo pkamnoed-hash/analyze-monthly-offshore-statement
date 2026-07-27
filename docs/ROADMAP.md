@@ -1,15 +1,24 @@
-# Unified Portfolio Web App — V1 build plan (completed)
+# Roadmap -- build history and design record
 
-This is the original planning document for the V1 build (`V1-record-trade-and-view`
-branch), reconstructed here as a permanent record after the live plan file
-(a Claude Code planning-session artifact outside this repo) was overwritten
-by a later, unrelated planning session. All of Steps 1-7 below are done and
-merged into this branch; see `CHANGELOG.md` and `docs/METHODOLOGY.md` for the
-user-facing changelog and the calculation/methodology detail respectively --
-this document is the *design record*, kept for how and why things were built
-the way they were, including the real bugs found along the way.
+The design record for this project's build history: how and why things were
+built the way they were, including the real bugs found along the way. See
+`CHANGELOG.md` and `docs/METHODOLOGY.md` for the user-facing changelog and
+the calculation/methodology detail respectively -- this document is the
+process/design side, not the user-facing side.
 
-## Context
+This file was originally `docs/V1_PLAN.md`, reconstructed as a permanent
+record after the live Claude Code plan file (a planning-session artifact
+outside this repo, at `~/.claude/plans/`) was overwritten once by a later,
+unrelated planning session. **Lesson learned from that incident**: a Claude
+Code plan file is not durable -- it gets overwritten the next time Plan Mode
+is used for anything else. Every completed build's plan now lives here
+instead, permanently. See `CLAUDE.md` for the reminder to keep doing this.
+
+Both V1 and V2 below are **done** and merged into `main`.
+
+## V1: Record Trade and View
+
+### Context
 
 Before this build, portfolio activity was split across three disconnected
 surfaces: the Streamlit dashboard (`analyze monthly offshore statement/`,
@@ -28,7 +37,7 @@ amount only** at the time this was planned (later revised during Step 6 --
 see below). Rebalance planning and formal monthly reconciliation against the
 official broker PDF were explicitly deferred to a later phase (v2).
 
-## Workflow overview
+### Workflow overview
 
 End-to-end process, phased. Phase 1 (v1) is what got built; Phase 2 (v2) is
 a reconciliation loop discussed but deferred, shown here so the full
@@ -78,7 +87,7 @@ flowchart TD
     I -.->|"rows in newly-covered range"| Q
 ```
 
-## Build steps (all DONE)
+### Build steps (all DONE)
 
 ```mermaid
 flowchart LR
@@ -233,7 +242,7 @@ post-move testing (not caused by the move's import-line changes themselves):
   `float64` regardless, since a genuinely empty result (e.g. an account with
   no sells yet) is a real, reachable state worth being robust to.
 
-## Storage schema
+### Storage schema
 
 SQLite file: `data/portfolio.db` (`core/db.py`, no Streamlit import, every
 function accepts an optional injected `conn` for testing).
@@ -253,7 +262,7 @@ CREATE TABLE trades (
     vat           REAL, reserved_fee REAL, fee_rebate REAL,
     order_id      TEXT, order_type TEXT,
     source        TEXT NOT NULL DEFAULT 'manual',          -- 'seed' | 'manual' | 'slip'
-    reconciled_month TEXT,                                 -- v2 hook, unused for now
+    reconciled_month TEXT,                                 -- set by V2 Reconciliation, see below
     notes         TEXT,
     created_at    TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -265,13 +274,13 @@ CREATE TABLE dividends (
     entry_type  TEXT NOT NULL CHECK(entry_type IN ('Dividend','Interest','Capital Distribution')),
     net_amount  REAL NOT NULL,
     source      TEXT NOT NULL DEFAULT 'manual',            -- 'seed' | 'manual'
-    reconciled_month TEXT,
+    reconciled_month TEXT,                                 -- set by V2 Reconciliation, see below
     notes       TEXT,
     created_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
 ```
 
-## Average-cost vs. FIFO -- decision
+### Average-cost vs. FIFO -- decision
 
 `compute_realized_pl` stays **untouched** for the frozen historical xlsx
 data (already audited, documented, reconciled -- don't move numbers that
@@ -281,7 +290,7 @@ granularity now exists to track specific lots the way the broker actually
 does. See `docs/METHODOLOGY.md` for the full writeup, including why a sell
 above average cost can still realize a loss.
 
-## Final file/module structure
+### File/module structure (as of end of V1)
 
 ```
 analyze monthly offshore statement/
@@ -310,18 +319,250 @@ analyze monthly offshore statement/
 ├── .streamlit/secrets.toml     # ANTHROPIC_API_KEY, APP_PASSWORD_SALT, APP_PASSWORD_HASH (gitignored)
 └── docs/
     ├── METHODOLOGY.md          # calculation/KPI reasoning
-    └── V1_PLAN.md               # this file
+    └── ROADMAP.md               # this file (then named V1_PLAN.md)
 ```
 
-## Explicitly deferred (v2, not designed here)
+See "V2: Reconciliation" below for what was added on top of this structure.
 
-- **Monthly reconciliation** against the next official PDF -- match
-  `trades`/`dividends` rows falling inside a newly-covered month against the
-  official `Transactions`/`Income` rows and mark them via the
-  `reconciled_month` column already present in the schema (added specifically
-  so this doesn't need a future migration).
+## V2: Reconciliation
+
+### Context
+
+V1 (above) blends two sources at a `cutoff` date: the audited xlsx statement
+for anything `<= cutoff`, live SQLite FIFO for anything after. Each time the
+xlsx gets manually updated with a new month (that update process itself is
+unchanged and out of scope here), the cutoff advances, and some SQLite rows
+that were previously "live/after cutoff" now fall inside the newly-official
+period. This feature verifies each such row actually matches an official
+xlsx row -- proving the live entry was accurate -- and marks it via the
+`reconciled_month` column (present in both `trades` and `dividends` schemas
+since Step 2, but never read or written by any code until now). Rows that
+don't match get flagged for manual review instead of silently ignored.
+
+Scope: self-contained to matching SQLite against whatever xlsx is currently
+live -- **does not** touch `scripts/reconcile.py` or
+`scripts/merge_into_workbook.py` (both confirmed broken/one-off during
+research, a separate concern). Shipped as a new **Reconciliation** page
+under a new "Tools" nav section, filling the placeholder left in V1's
+`dashboard_app.py`.
+
+### Research findings (verified against real data, not assumed)
+
+- **No unique ID exists on the xlsx side for trades.** The only usable key
+  is `(Trade Date, Symbol, Quantity, Price)` -- empirically unique across
+  all 902 historical rows, but same-day/same-symbol/same-price legs with
+  *different* quantities are real (whole-share + fractional-share fills), so
+  treat this as best-effort 1:1 pairing per `(date, symbol)` bucket, not a
+  guaranteed lookup. **Exact match only, no fuzzy/tolerance matching** --
+  except two *bounded* precision alignments that are really "match what the
+  UI can produce," not fuzziness: round Quantity to 6dp (Record Trade's
+  `number_input` format caps entry there; xlsx carries up to 9dp) and Price
+  to 4dp before comparing.
+- **Every real xlsx dividend is two Income rows** sharing `(Trade Date,
+  Symbol)` -- a `Dividends` row (gross) and a `Div. Adj(NRA Withheld)` row
+  (tax, negative). Must match against the **grouped sum**, exactly mirroring
+  `scripts/seed_from_xlsx.py::build_dividend_rows()`. Round `Net Amt` to 2dp
+  on both sides (unrounded float noise already sits in seeded data).
+- **Interest correction**: real xlsx `Credit/Margin Interest` rows *do* have
+  a real Symbol (e.g. `SHV`, `SGOV`) -- but `seed_from_xlsx.py` hardcodes
+  `symbol=None` on the SQLite side regardless. Interest matching must ignore
+  the xlsx Symbol column entirely and key on `(Trade Date, round(Net Amt,2))`
+  only, mirroring the seed script's actual behavior, not the literal xlsx
+  data. Same-day multi-symbol interest postings are real (e.g. `2024-04-05`:
+  SGOV 0.14 + SHV 0.72, two separate un-summed SQLite rows) -- pair
+  positionally, don't group/sum.
+- **Entry-type vocabulary is never normalized** between xlsx (`Dividends`/
+  `Div. Adj(NRA Withheld)`/`Credit/Margin Interest`) and SQLite (`Dividend`/
+  `Interest`/`Capital Distribution`, CHECK-constrained) -- match dividends on
+  `(date, symbol, amount)` only, never on entry_type, per the same
+  "widen filters at the consumption site" convention
+  `calculations.py::blended_dividends` already documents.
+- **`pd.merge` treats NaN as equal on join keys** -- relevant because one
+  real seed trade (a rights distribution) has `Price=NaN` on both sides.
+  Verified working correctly with no special-casing.
+- **First run surfaces the full history, not a trickle**: `reconciled_month`
+  had never been written before this feature, so the first run found all
+  902/902 trades and 895/895 dividend+interest rows unreconciled. The UI is
+  designed for "confirm ~900 rows grouped by month," not "review a handful."
+
+### Implementation
+
+**`core/reconciliation.py`** -- pure logic, no Streamlit import, no `conn`
+param (DataFrame-in/DataFrame-out except the xlsx loader):
+
+- `load_xlsx_for_reconciliation(path)` -- loads Summary/Transactions/Income,
+  parses Trade Date, computes `cutoff` the same way `app_pages/dashboard.py`
+  does inline (`Summary["Month"].max() + MonthEnd(0)`) -- a second
+  independent loader, same precedent as `seed_from_xlsx.py`'s own loader.
+- `_pair_1to1(left, right, key_cols)` -- generic duplicate-safe 1:1 pairing
+  via a shared `groupby(..., dropna=False).cumcount()` rank folded into the
+  join key, used by every matcher below so a duplicate on one side without a
+  duplicate counterpart on the other is correctly left unmatched rather than
+  fanning out to match twice. `dropna=False` matters: a NaN-valued key
+  column (the rights-distribution Price) still needs a real per-row rank,
+  not every NaN-key row collapsing into one group.
+- `match_trades(sqlite_trades, xlsx_transactions)` -- key: exact
+  `(Trade Date, Symbol, round(Quantity,6), round(Price,4))`. xlsx side
+  filtered to `Symbol.notna()` first.
+- `match_dividend_rows` / `match_interest_rows` / `match_dividends` -- the
+  non-Interest and Interest-only matchers described in Research findings
+  above, concatenated by `match_dividends` (`entry_type` is a strict
+  two-way partition, covers every input row once).
+- `unmatched_xlsx_trades` / `unmatched_xlsx_income` -- the reverse
+  direction: xlsx rows with no SQLite counterpart at all (official activity
+  never logged). Both take the **full** trades/dividends table, not just
+  unreconciled candidates -- otherwise a row a prior run already reconciled
+  looks like a fresh gap. `since` optionally scopes to `Trade Date >= since`
+  for speed.
+
+**`core/db.py`** additions -- `fetch_unreconciled_trades`/`_dividends`
+(candidates: `<= cutoff` and `reconciled_month IS NULL`),
+`mark_reconciled`/`_bulk` (`table` validated against a fixed allowlist since
+table names can't be parameterized via `?`; `month` is the xlsx statement
+month the row matched against, not the cutoff date; bulk version is one
+transaction, executemany + single commit, rollback on failure).
+
+**`app_pages/reconciliation.py`** -- new page, five things on it:
+
+1. Title + caption stating the cutoff date and what it means.
+2. Fetches candidates, runs `match_trades`/`match_dividends` against the
+   loaded xlsx.
+3. **"Ready to confirm"** (matched rows) -- `st.metric` totals, grouped by
+   `xlsx_month` into `st.expander`s (required at ~900-row first-run scale),
+   a "Mark all N as reconciled" button behind an `st.popover` confirm, plus
+   a smaller per-month "Mark just this month" button for steady-state use.
+4. **"Needs review"** (unmatched SQLite rows) -- plain read-only table, no
+   action buttons. Fix path is delete-and-re-enter in Record
+   Trade/Record Dividend, matching this app's established
+   mistake-correction model (see "Deferred / future" below for one gap this
+   surfaced).
+5. **"Official activity not yet logged"** (unmatched xlsx rows) -- defaults
+   to the newest statement month only for speed, checkbox to scan full
+   history. Read-only, informational. Arguably the highest-value check in
+   the whole feature, since a never-logged entry has no other surface in
+   the app that would ever mention it.
+
+Nav wiring in `dashboard_app.py`: the "Tools" section placeholder left in V1
+became `"Tools": [st.Page("app_pages/reconciliation.py", title="Reconciliation")]`.
+
+### Edge cases (all explicitly handled)
+
+| Case | Handling |
+|---|---|
+| Row never matched | Left-joins preserve every input row; unmatched ones surface with a `reason`, never dropped |
+| Duplicate entries on either side | `_pair_1to1`'s per-key rank enforces strict 1:1; excess duplicates flagged unmatched |
+| Already-reconciled rows reprocessed | Prevented structurally by the `reconciled_month IS NULL` filter in `fetch_unreconciled_*` |
+| Capital Distribution (no xlsx vocabulary) | Matched on (date, symbol, amount) only, entry_type never part of the key |
+| Interest Symbol mismatch | xlsx Symbol ignored entirely, matches seed script's actual (not literal-data) behavior |
+| Same-day multi-symbol interest | Positional pairing, not grouped/summed |
+| First-run ~900-row backlog | Grouped-by-month UI + bulk action, designed for from the start |
+| Unmatched-xlsx false positives | `unmatched_xlsx_*` require the *full* table, not unreconciled-only candidates |
+| Float precision | Quantity 6dp / Price 4dp (matches UI input ceilings) / dividend amounts 2dp |
+| NaN price (rights distribution) | Works via `pd.merge`'s NaN-equality |
+
+### Operational notes -- database/Excel effects and the cutoff relationship
+
+**Effect on database vs. Excel**: the only function in this feature that
+writes anything is `mark_reconciled_bulk()`, and it only ever sets
+`reconciled_month` on existing rows -- never deletes a row or changes any
+financial figure. The xlsx is never written to, under any button, ever --
+every function only reads it. The write goes straight to the SQLite file on
+disk (not session state), so it survives page refresh/`st.rerun()`/server
+restart; only an explicit `reconciled_month = NULL` update or a restored
+file backup undoes it.
+
+**Relation between `cutoff` and reconciliation**: the Dashboard blends at
+`cutoff` (`<= cutoff` = official xlsx figures, `> cutoff` = live SQLite data
+in the "Since Last Statement" panel). Reconciliation only ever looks at
+`<= cutoff` rows not yet reconciled. Rows in "Since Last Statement" are
+**not** reconciliation candidates yet -- they only become candidates once
+the xlsx is updated with a new statement and `cutoff` advances past their
+date. This is also why the first-ever run has a large backlog:
+`reconciled_month` was never written before this feature existed, so all
+seeded history through the cutoff counted as "unverified" even though it
+was correct. Going forward, each new statement only adds the small batch
+logged live since the previous one.
+
+**If a reviewed row turns out to be wrong**: this app has no in-place edit,
+by design -- the fix is always delete-then-re-enter on the page that owns
+it (Record Trade for trades, Record Dividend for dividends/interest,
+"Recent list" view). `reconciled_month` does not lock or protect a row from
+that delete button.
+
+### Reconciliation flow diagram
+
+```mermaid
+flowchart TD
+    A[Broker issues new monthly statement] --> B[xlsx file updated with new month]
+    B --> C["cutoff advances to the new<br/>statement's month-end date"]
+
+    D["Trade / dividend logged live<br/>(Record Trade / Record Dividend)"] --> E[("SQLite row saved<br/>reconciled_month = NULL")]
+
+    C --> F{"Row date on or before<br/>the current cutoff?"}
+    E --> F
+    F -->|No| G["Not a candidate yet --<br/>shown in Dashboard's<br/>'Since Last Statement' panel"]
+    G -.->|waits for the next statement| F
+
+    F -->|"Yes, not yet reconciled"| H["Reconciliation page:<br/>fetched as a candidate"]
+    H --> I{"match_trades / match_dividends:<br/>exact xlsx counterpart found?"}
+
+    I -->|Yes| J["Ready to confirm"]
+    J --> K["User clicks<br/>'Mark as reconciled'"]
+    K --> L[("reconciled_month set --<br/>cleared from candidates")]
+
+    I -->|No| M["Needs review"]
+    M --> N["Delete the row<br/>(Record Trade / Record Dividend)"]
+    N --> O["Re-enter it correctly"]
+    O --> E
+
+    C --> P["unmatched_xlsx_trades / _income:<br/>scan xlsx rows for the period"]
+    P --> Q{"Any SQLite row at all<br/>(reconciled or not) matches?"}
+    Q -->|No| R["Official activity<br/>not yet logged"]
+    R --> S["Log it fresh via<br/>Record Trade / Record Dividend"]
+    S --> E
+    Q -->|Yes| T["Already covered --<br/>no action needed"]
+```
+
+### Testing
+
+`tests/test_reconciliation.py` -- synthetic-DataFrame style matching
+`tests/test_calculations.py`: exact-match happy path, no-match, price/
+quantity mismatch (no tolerance), same-day different-quantity legs, duplicate
+handling, `Symbol.notna()` filtering, 6dp/4dp precision, NaN-price
+regression, grouped dividend sum matching, Capital Distribution vocabulary
+mismatch, interest ignoring xlsx Symbol, same-day multi-interest positional
+pairing, unmatched-xlsx-row detection, already-reconciled rows not
+re-flagged, `since` filtering. Plus `tests/test_db.py` additions for
+`fetch_unreconciled_*`/`mark_reconciled*`.
+
+### Verification (results from the real first run)
+
+Against the real `data/portfolio.db`/xlsx: **902/902 trades and 895/895
+dividend+interest rows matched**, 0 rows needing review, 0 gaps found --
+confirming the audited xlsx and the live-logged data had agreed the whole
+time. All four app pages (Dashboard, Record Trade, Record Dividend,
+Reconciliation) verified via Streamlit's `AppTest` headless harness with no
+exceptions. Full test suite: 140/140 passing.
+
+Matching definitions were independently cross-checked against this
+account's real Dime! slip/receipt screenshots in `labs/` (a buy
+confirmation, a sell confirmation, a dividend activity receipt) --
+confirmed the Gross/Withholding split, the fee-netting formula, and the
+whole-share/fractional-share leg pattern all match exactly what this
+feature expects.
+
+## Deferred / future
+
 - **Rebalance planner** -- the dividend-reinvestment/rebalance screen from
-  `personal investment portfolio tool/NOTES.md` is good prior art, not
-  designed here.
-- Specific-lot *selection* on sell (FIFO-only for v1) and any live
+  `personal investment portfolio tool/NOTES.md` is good prior art, never
+  designed. Explicitly not selected when choosing what to build for V2.
+- Specific-lot *selection* on sell (FIFO-only today) and any live
   market-price feed for true mark-to-market of post-cutoff positions.
+- **Record Dividend's Recent list is capped at `.head(20)`** -- an old
+  flagged row from Reconciliation's "Needs review" section might not be
+  reachable to delete there. Noted during V2 Step 6 testing, not fixed.
+- **Seed rows (`source='seed'`) have no delete path** -- both Record
+  Trade's and Record Dividend's Recent lists only show `source='manual'`
+  rows, by design (protects seeded historical data from accidental
+  deletion) -- but this means a wrong seed row can't currently be corrected
+  through either page's UI. Noted during V2 testing, not fixed.
