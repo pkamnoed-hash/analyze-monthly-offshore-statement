@@ -320,3 +320,57 @@ class TestDeleteBySource:
         db.delete_trades_by_source("slip", conn=conn)  # nothing with this source exists
         remaining = [r[0] for r in conn.execute("SELECT symbol FROM trades")]
         assert remaining == ["AAA"]
+
+
+class TestSymbolTypes:
+    def test_set_symbol_type_inserts(self, conn):
+        db.set_symbol_type("VRIG", "Dividend", conn=conn)
+        row = conn.execute("SELECT allocation_type FROM symbol_types WHERE symbol='VRIG'").fetchone()
+        assert row == ("Dividend",)
+
+    def test_set_symbol_type_upserts_an_existing_symbol(self, conn):
+        db.set_symbol_type("PLTR", "Dividend", conn=conn)
+        db.set_symbol_type("PLTR", "Growth", conn=conn)
+        rows = conn.execute("SELECT allocation_type FROM symbol_types WHERE symbol='PLTR'").fetchall()
+        assert rows == [("Growth",)]  # exactly one row, updated in place -- not a duplicate insert
+
+    def test_invalid_allocation_type_is_rejected_by_check_constraint(self, conn):
+        with pytest.raises(sqlite3.IntegrityError):
+            db.set_symbol_type("VRIG", "Speculative", conn=conn)
+
+    def test_others_itself_is_rejected_as_a_stored_value(self, conn):
+        # "Others" is the absence-of-a-row default, never a value actually
+        # written to the table -- confirms the CHECK constraint enforces that.
+        with pytest.raises(sqlite3.IntegrityError):
+            db.set_symbol_type("VRIG", "Others", conn=conn)
+
+    def test_clear_symbol_type_removes_the_row(self, conn):
+        db.set_symbol_type("VRIG", "Dividend", conn=conn)
+        db.clear_symbol_type("VRIG", conn=conn)
+        row = conn.execute("SELECT * FROM symbol_types WHERE symbol='VRIG'").fetchone()
+        assert row is None
+
+    def test_clear_symbol_type_on_unknown_symbol_is_a_noop(self, conn):
+        db.clear_symbol_type("NOPE", conn=conn)  # never existed -- should not raise
+
+    def test_fetch_symbol_types_covers_every_traded_symbol(self, conn):
+        db.insert_trade(trade_date="2026-01-05", side="buy", symbol="AAA", quantity=1, price=1.0, conn=conn)
+        db.insert_trade(trade_date="2026-01-06", side="buy", symbol="BBB", quantity=1, price=1.0, conn=conn)
+        db.set_symbol_type("AAA", "Dividend", conn=conn)
+        result = db.fetch_symbol_types(conn=conn)
+        assert dict(zip(result["Symbol"], result["Allocation Type"])) == {"AAA": "Dividend", "BBB": "Others"}
+
+    def test_fetch_symbol_types_includes_a_fully_sold_out_symbol(self, conn):
+        # Real-data-shaped regression: 44 of this account's 96 traded symbols
+        # are fully bought-and-sold (net position zero) today -- a coverage
+        # query accidentally scoped to "current holdings" instead of
+        # "everything in trades" would silently drop ~46% of symbols.
+        db.insert_trade(trade_date="2026-01-05", side="buy", symbol="AAA", quantity=10, price=1.0, conn=conn)
+        db.insert_trade(trade_date="2026-01-06", side="sell", symbol="AAA", quantity=10, price=1.0, conn=conn)
+        result = db.fetch_symbol_types(conn=conn)
+        assert "AAA" in set(result["Symbol"])
+
+    def test_fetch_symbol_types_returns_empty_frame_without_error_when_no_trades(self, conn):
+        result = db.fetch_symbol_types(conn=conn)
+        assert result.empty
+        assert list(result.columns) == ["Symbol", "Allocation Type"]

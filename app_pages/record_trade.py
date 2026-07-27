@@ -175,6 +175,21 @@ with oc4:
         "Executed Price", min_value=0.0, value=None, placeholder="0.0000", format="%.4f", key="record_trade_price"
     ) or 0.0
 
+# Only ever shown for a symbol that's never appeared in trades before -- an existing
+# symbol (even one still sitting in "Others" from the one-time backfill) is never
+# re-prompted here; that's Tools -> Allocation Type's job. Keyed by symbol so switching
+# to a different new symbol before submitting doesn't carry over a stale selection --
+# same reasoning as the confirm_oversell checkbox above.
+is_new_symbol = bool(symbol) and symbol not in known_symbols
+allocation_type = "Others"
+if is_new_symbol:
+    allocation_type = st.selectbox(
+        "Allocation Type (first trade of this symbol)", ["Others", "Dividend", "Growth"],
+        index=0, key=f"record_trade_allocation_type_{symbol}",
+        help="Optional -- classify Dividend/Growth now, or leave as Others and set it later "
+             "under Tools -> Allocation Type.",
+    )
+
 is_oversell = False
 confirm_oversell = False
 if symbol:
@@ -233,6 +248,8 @@ with tab_upload:
         )
         if result:
             db.insert_trade(**result, source="slip")
+            if is_new_symbol and allocation_type != "Others":
+                db.set_symbol_type(symbol, allocation_type)
             del st.session_state["parsed_slip"]
             st.success(f"Saved: {result['side']} {result['quantity']:g} {result['symbol']} @ ${result['price']:,.4f}")
             st.rerun()
@@ -243,6 +260,8 @@ with tab_manual:
     result = render_trade_form(symbol, side, quantity, price, form_key="manual_trade", oversell_blocked=oversell_blocked)
     if result:
         db.insert_trade(**result, source="manual")
+        if is_new_symbol and allocation_type != "Others":
+            db.set_symbol_type(symbol, allocation_type)
         st.success(f"Saved: {result['side']} {result['quantity']:g} {result['symbol']} @ ${result['price']:,.4f}")
         st.rerun()
 
