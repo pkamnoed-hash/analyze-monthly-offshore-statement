@@ -1,5 +1,46 @@
 # Changelog
 
+## Rebalance & Reallocate Investment (v2.4): decide where new dividend cash goes
+
+Adds a **Rebalance & Reallocate** page (Tools nav) for splitting new cash
+across your Dividend-classified holdings -- rebuilt from scratch after an
+earlier attempt was discarded, per your own explicit call, with a fresh
+wireframe/flow worked out through direct discussion rather than reusing
+any of the discarded design.
+
+- **`core/rebalance.py`** (new): `get_dividend_holdings()` merges your
+  Dividend-tagged, currently-held symbols with live price/dividend data
+  and computes `Current Value`, `Current Cat Weight %`, `Current
+  Unrealized $/%`, `Current Expected Div/Yr/Mo`, and `Current Div Contrib
+  %`; `apply_allocation()` adds the `New-*` counterparts for a proposed $
+  amount split across per-symbol %s, buying at each symbol's own live
+  price; `sector_breakdown()` groups by sector/asset class.
+- **`core/db.py` additions**: `rebalance_plans`/`rebalance_plan_items`
+  tables (in the same `portfolio.db`, so System Backup already covers
+  them) persist your in-progress plan across visits -- amount, per-stock
+  %, and which rows you've ticked Bought. Auto-completes and clears once
+  every row is ticked; a "Reset plan" button can abandon it early.
+- **`app_pages/rebalance.py`** (new page, Tools nav): a Summary section
+  (existing-vs-new pies for basket composition and sector mix), an
+  Amount-to-invest input, `% allocated`/`% remaining` and KPI numbers
+  (Expected Div/Mo, Unrealized %, blended dividend yield), and an
+  editable per-stock table (`% Reinvest`, `Invest $`, `Div Contrib %`/`New
+  Contrib %`, and a `Bought?` reminder checkbox) with a "Save changes"
+  button.
+- Two real bugs were found and fixed during your own live testing: the
+  table's row position/scroll was resetting on every `%` edit (fixed by
+  freezing the table's data until Save, instead of rebuilding it on every
+  keystroke), and saving a `%` edit alone (without also touching
+  `Bought?`) sometimes didn't take effect (fixed by wrapping the table
+  and Save button in a real `st.form`, Streamlit's own mechanism for
+  reliably capturing an in-progress, not-yet-committed edit).
+- Small unrelated fix along the way: the login page now submits on Enter,
+  not just on clicking "Log in."
+- Verified against your real 26 dividend holdings throughout, including a
+  real-data sanity check before any UI existed. Full test suite:
+  217/217 passing (28 new across `tests/test_rebalance.py` and
+  `tests/test_db.py`).
+
 ## System Backup (v2.3): manual, on-demand safety net for your live data
 
 Adds a **System Backup** page (Tools nav) for the two files most at risk

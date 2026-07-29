@@ -13,7 +13,7 @@ not an aspirational process, a record of what's been done.
 | `v2.1-allocation-type` | V2.1 feature branch (Dividend/Growth/Others symbol classification, plus first-entry tagging in Record Trade). A minor version off `main` rather than a new whole version, since it's a smaller, additive feature building on top of V2 rather than a major build phase. |
 | `v2.2-monitor-stocks` | V2.2 feature branch (Monitor Stocks page -- live `yfinance` market data for current holdings). Minor version off `main`, same rationale as v2.1. Merged into `main`. |
 | `v2.3-system-backup` | V2.3 feature branch (System Backup page -- manual, on-demand backups of `data/portfolio.db` and the official Statement xlsx). Cut from `main` after v2.2 was merged in. Pulled forward ahead of Rebalance/Reallocate, which shifts to v2.4 (see "My version quick note" below) -- repurposed from an earlier `v2.3.1-rebalance-reallocate` branch that had no real code on it yet. Merged into `main`. |
-| `v2.4-rebalance-reallocate` | V2.4 feature branch (Rebalance / Reallocate Investment). Cut from `main` after v2.3 was merged in. Fresh branch, no `.1` suffix needed -- the design worked out under the earlier discarded `v2.3-rebalance-reallocate`/`v2.3.1-rebalance-reallocate` attempts carries over, but this is a clean start once System Backup cleared the slot. |
+| `v2.4-rebalance-reallocate` | V2.4 feature branch (Rebalance / Reallocate Investment -- decide where new cash goes across Dividend-classified holdings). Cut from `main` after v2.3 was merged in. Rebuilt from scratch, per the user's explicit choice -- none of the earlier discarded `v2.3-rebalance-reallocate`/`v2.3.1-rebalance-reallocate` design was reused; wireframe and flow were re-derived through fresh discussion. Merged into `main`. |
 
 Naming convention: `vN-short-description` (or `vN.M-short-description` for a
 smaller, additive feature that doesn't warrant a new whole version number),
@@ -68,7 +68,6 @@ still useful as a labeled reference point (`V1-record-trade-and-view`,
 
 ## Current status (as of `v2.4-rebalance-reallocate`)
 
-`main` has V1, V2, V2.1, V2.2, and V2.3 merged in (`v2.3-system-backup`
-merged via `git merge --no-ff`, 189/189 passing on `main` post-merge).
-Work has started on `v2.4-rebalance-reallocate`, cut from that updated
-`main`.
+`main` has V1, V2, V2.1, V2.2, V2.3, and V2.4 merged in (`v2.4-rebalance-reallocate`
+merged via `git merge --no-ff`, 217/217 passing on `main` post-merge).
+Next up per "My version quick note" above: v2.5, simplify UX/UI.
