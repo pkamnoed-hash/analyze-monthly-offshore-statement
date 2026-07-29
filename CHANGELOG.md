@@ -1,5 +1,39 @@
 # Changelog
 
+## System Backup (v2.3): manual, on-demand safety net for your live data
+
+Adds a **System Backup** page (Tools nav) for the two files most at risk
+from an accident -- `data/portfolio.db` and the official Statement
+workbook -- pulled forward ahead of Rebalance/Reallocate Investment
+(shifted to v2.4) at the user's own priority call, right after discarding
+and restarting the Rebalance build once already this session.
+
+- **`core/version.py`** (new): `current_app_version()` derives a version
+  label from the current git branch (e.g. `v2.3-system-backup` ->
+  `v2.3`), falling back to the nearest tag, then `"unknown"` -- never
+  hand-maintained, so it can't go stale. Also shown at the bottom of the
+  sidebar on every page.
+- **`core/backup.py`** (new): `backup_database()` uses SQLite's own
+  online-backup API (not a raw file copy) reading the live db read-only,
+  guaranteeing a consistent snapshot; `backup_statement_file()` matches
+  the official Statement xlsx by glob pattern (not a hardcoded filename),
+  since that file is periodically replaced with a new date-range name.
+  Both embed the version label and a timestamp in the resulting filename;
+  an optional free-text note is recorded in a `manifest.json` sidecar,
+  not the filename itself. `delete_backup()` removes a file and its note
+  together.
+- **`app_pages/backup.py`** (new page, Tools nav): current-status section,
+  two backup buttons each with an optional note field, and a backup-
+  history table (All/Database/Statement filter) where every row carries
+  its own Delete-with-confirm popover -- the same pattern
+  `record_trade.py` already uses for deleting a logged trade.
+  `data/backups/` is `.gitignore`'d immediately.
+- Verified against the real `data/portfolio.db` and Statement file
+  throughout: a database backup reproduced identical row counts (902
+  trades, 895 dividends) to the live db; the Statement backup byte-
+  matched the source exactly. Full test suite: 189/189 passing (25 new
+  across `tests/test_version.py` and `tests/test_backup.py`).
+
 ## Monitor Stocks (v2.2): live market data for every current holding
 
 Adds a **Monitor Stocks** page (Overview nav, alongside Dashboard) showing
