@@ -328,3 +328,78 @@ that chart's data already supports, just by allocation type instead of by
 symbol. A large Others total there is expected right after this feature
 first ships -- it's the visible prompt to go classify more via the Tools
 page, not a bug.
+
+## Monitor Stocks (Overview page)
+
+Live per-symbol table for current holdings only, via `core/market_data.py`
+(`yfinance`, cached `@st.cache_data(ttl=300)`, "Refresh now" busts the
+cache on demand). See `docs/ROADMAP.md`'s V2.2 section for the full build
+history and real-data findings; this section is the calculation reference.
+
+**Weight % vs. Category Weight %**: `Weight %` is each symbol's share of
+the *entire* current portfolio's market value; `Category Weight %` is its
+share of just its own Dividend/Growth/Others group's market value. Both
+use `Quantity x Latest Price` (`Position Value`) as the underlying $ figure
+-- not Cost Basis, since these describe current allocation, not money in.
+
+**Unrealized / Unrealized %**: `Position Value - Cost Basis` and
+`(Position Value - Cost Basis) / Cost Basis * 100`. Live and FIFO-based
+(via `calculations.compute_current_positions()`), computed from the same
+lot book as Record Trade's current-position display -- a different,
+live number from Dashboard's own `Unrealized`, which stays pinned to the
+last official statement's snapshot values. The % version returns NaN
+(not a crash) when Cost Basis is 0 or negative.
+
+**Dividend figures are net of the 15% Thai (NRA) withholding tax** --
+`WITHHOLDING_TAX_RATE = 0.15` in `app_pages/monitor_stocks.py`, matching
+Dashboard's own Dividends/Avg. Monthly Dividend KPIs (which are net
+because the broker's recorded amount already is; here the deduction is
+applied explicitly since yfinance's dividend yield is gross). `% Div per
+Year` stays gross -- yields are conventionally quoted pre-tax; only the
+dollar figures below are adjusted:
+
+```
+Expected Div per Year  = Total Market Value x (% Div per Year / 100) x 0.85
+Expected Div per Month = Expected Div per Year / 12
+```
+
+Worked example (CLOZ, a real holding): 39.2122 shares x $26.4050 = $1,035.40
+Total Market Value; $1.9280/share paid over the trailing 365 days = 7.30%
+gross yield; $1,035.40 x 0.0730 x 0.85 = **$64.26**/year net, **$5.36**/month.
+
+**Div Return Contribution %** applies the standard portfolio-return formula
+(Portfolio Return = Σ(wi × ri), wi = asset value ÷ total value) to
+dividends specifically, at the category level:
+
+```
+Div Return Contribution % = (Category Weight % / 100) x % Div per Year x 0.85
+```
+
+Summing this column across every symbol in one category reproduces that
+category's blended dividend yield exactly -- proven algebraically (`wi` is
+already normalized to sum to 100% within its own category) and confirmed
+real: SHV (15.97% of the Dividend category, 3.78% yield) contributes
+0.5127%; summed across all Dividend holdings, 8.3564%, matching a direct
+`Total Div/Yr ÷ Total Market Value` calculation exactly. This equivalence
+holds for any single category but **not** for summing across categories to
+get a portfolio-wide figure (each category's own weights already sum to
+its own 100%, so a raw cross-category sum would ignore relative category
+sizes) -- the Category Summary's "Expected Div Return %" KPI is therefore
+computed directly as `Total Div/Yr ÷ Total Market Value` for every row
+including "All", not by summing the per-symbol column.
+
+**Category Summary KPIs**: Total Cost sums every symbol in a category
+(always known). Total Market Value, Unrealized, Unrealized %, Total Div/Yr,
+and Expected Div Return % all sum **resolved symbols only** (symbols
+yfinance could fetch a live price for) -- a category containing an
+unresolved symbol shows a caption naming it and excluding it from those
+figures, rather than a silently wrong number (a naive calculation that
+divided a resolved-only $0 market value by an all-symbol cost once
+produced a nonsensical -100% for a single unresolved options-contract
+holding).
+
+**Beta/Sector/Industry ETF fallbacks**: see `core/market_data.py`'s own
+docstring -- yfinance's equity-oriented fields (`sector`/`industry`/`beta`)
+are blank for most ETFs; `fundFamily`/`category`/`beta3Year` fill in as
+fallbacks only when the equity-specific field is blank, so equities are
+never affected.

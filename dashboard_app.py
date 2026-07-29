@@ -23,7 +23,10 @@ if st.sidebar.button("Log out"):
 init_db()
 
 pg = st.navigation({
-    "Overview": [st.Page("app_pages/dashboard.py", title="Dashboard", default=True)],
+    "Overview": [
+        st.Page("app_pages/dashboard.py", title="Dashboard", default=True),
+        st.Page("app_pages/monitor_stocks.py", title="Monitor Stocks"),
+    ],
     "Input": [
         st.Page("app_pages/record_trade.py", title="Record Trade"),
         st.Page("app_pages/record_dividend.py", title="Record Dividend"),

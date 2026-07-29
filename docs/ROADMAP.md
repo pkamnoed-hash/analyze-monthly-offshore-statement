@@ -676,6 +676,180 @@ database. Fixed by explicitly constructing `pd.Series(..., dtype="object")`
 this project (see `compute_fifo_realized_pl`'s `id` column, V1's "Bonus"
 section above).
 
+## V2.2: Monitor Stocks
+
+### Context
+
+The user wanted one table showing every currently-held symbol, filterable
+by Allocation Type (Dividend/Growth/Others, from v2.1), enriched with
+**live market data** -- replacing the manual process from their Excel
+workbook, where "live" price/change columns were actually frozen
+`GOOGLEFINANCE()` values (Excel can't execute Google Sheets functions) plus
+HTML-scraping of finviz.com/stockanalysis.com for supplementary fields,
+several already broken (`"Loading..."` literal values) in the user's own
+source spreadsheet -- the reason a proper free market-data library was used
+instead of replicating either approach.
+
+Scoped through conversation: **current holdings only** (not every symbol
+ever traded -- a live-price monitor is for what's actually owned today),
+and an **incremental column rollout** -- rather than build every column at
+once, each addition below was tested with real data and shown in chat
+*before* being implemented, then verified against real holdings afterward.
+That request-by-request pattern is why this section reads as a sequence of
+small, independently-motivated additions rather than one upfront design.
+
+### Data source decision: `yfinance`
+
+Google Finance has no server-usable API outside the Sheets-only
+`GOOGLEFINANCE()` formula. Scraping is proven fragile (already broken in
+the user's own data). `yfinance` (unofficial Yahoo Finance wrapper, free,
+no API key) is the standard Python choice for this. First non-Claude
+external network call in this project -- `yfinance==1.5.2` pinned in
+`requirements.txt`.
+
+**Market price is kept in-memory only** (`@st.cache_data(ttl=300)`), never
+persisted to `data/portfolio.db` -- every other table in that database
+holds data the user actually owns/entered; a `market_data` table would be
+the first one holding a third party's cached data, and a "monitor" should
+show what's fresh (within the TTL) or visibly being refetched, not a
+number that's silently stale after a restart.
+
+### Implementation
+
+**`core/market_data.py`** (new module, no Streamlit import, mirrors
+`slip_parser.py`'s dependency-injection test pattern -- `yf_module` can be
+swapped for a fake in tests). `fetch_stock_profile(symbols)` batches, per
+symbol, inside one `try`/`except` so a bad symbol never aborts the batch:
+
+- **Description, Sector/Industry, Beta, Quote Type** from yfinance's
+  `info` dict, plus **daily closes over the trailing 90 calendar days**
+  (`History90D`) for the sparkline and as the latest-close price source
+  (yfinance's `currentPrice`/`regularMarketPrice` fields were found
+  inconsistent across symbol types during feasibility testing -- present
+  for an equity, `None` for a short-duration bond ETF).
+- **Explicit `start`/`end` dates, not `period="90d"`** -- confirmed by
+  direct comparison that the shorthand returns 90 *trading* days (~131
+  calendar days), silently diverging from the user's own reference formula
+  (`GOOGLEFINANCE(symbol,"Price",TODAY()-90,TODAY())`, calendar-day
+  arithmetic). A regression test asserts the requested span is exactly 91
+  days (90 back + 1, since `end` is exclusive).
+- **ETF fallbacks for two equity-only concepts**, same shape both times --
+  yfinance leaves a field blank for funds, but a fund-appropriate field
+  exists in the same `info` dict:
+  - Sector/Industry blank for 28 of 52 real holdings (almost all ETFs) ->
+    fall back to `fundFamily`/`category` (issuer / Morningstar-style fund
+    classification) when the equity field is blank.
+  - Beta (`beta`, Yahoo's 5-year-monthly figure) blank for 29 of 52 ->
+    fall back to `beta3Year` (the 3-year-monthly figure funds are
+    conventionally reported under) -- confirmed to exactly match
+    finviz.com's own displayed ETF Beta for a real holding (SHV: 0.01 both
+    ways). Confirmed no equity ever has `beta3Year` populated, so the
+    fallback can't override a real equity beta.
+- **Dividends**: yfinance's `dividendRate`/`trailingAnnualDividendRate`
+  fields are blank/`$0.00` for ETFs despite real payouts (confirmed: SHV,
+  SCHD). Fixed differently from the fallbacks above -- computed directly
+  from `Ticker.dividends` (the actual per-share payout history with real
+  dates), summed over the trailing 365 calendar days, which works for both
+  equities and ETFs. Returns `Dividend Per Year` ($/share), `Dividend
+  Yield %` (`= Dividend Per Year / Latest Price * 100`, computed here
+  rather than using yfinance's own `dividendYield` field since that one
+  doesn't always reconcile exactly to price/share), and `Dividend
+  Frequency` (a label from the trailing payout count: 0->None,
+  1->Annual, 2->Semi-Annual, 4->Quarterly, 12->Monthly, else->"Irregular
+  (N/yr)"). A non-payer (confirmed real: ARM) gets `0.0`/`0.0`/"None" --
+  valid data, distinct from an unresolvable symbol's NaN/NaN/None.
+
+**`app_pages/monitor_stocks.py`** (new page, under **Overview** nav
+alongside Dashboard -- it's a read-only view, not data entry or a
+maintenance tool). Merges `calculations.compute_current_positions()`
+(already excludes sold-out symbols) + `db.fetch_symbol_types()` (renamed
+`Category` on this page) + a `@st.cache_data(ttl=300)`-wrapped
+`fetch_stock_profile()`, with a **Refresh now** button that clears the
+cache on demand and a **Last refreshed** timestamp (`dd/mm/yyyy HH:MM`,
+captured inside the cached function at cache-miss time, not recomputed
+every rerun).
+
+Page-level computed columns (all derived, not fetched -- built from the
+merged frame since they need `Quantity` from `compute_current_positions()`
+alongside `Latest Price` from the profile fetch):
+- **Total Market Value / Unrealized / Unrealized %** -- `Quantity x Latest
+  Price`; `Position Value - Cost Basis`; the % version guarded against
+  `Cost Basis > 0` (NaN otherwise, not a divide-by-zero crash).
+- **Weight % / Category Weight %** -- share of the whole portfolio vs.
+  share of just the symbol's own Dividend/Growth/Others group.
+- **Expected Div per Year/Month** -- `Total Market Value x (Dividend
+  Yield % / 100) x 0.85`, net of the 15% Thai (NRA) withholding tax
+  (`WITHHOLDING_TAX_RATE`), matching how Dashboard's own Dividends KPI is
+  already net (there because the broker's recorded amount already is;
+  here applied explicitly since yfinance's yield is gross). `% Div per
+  Year` itself stays gross -- a fund's advertised yield is conventionally
+  quoted pre-tax. A permanent `help=` tooltip on every tax-adjusted figure
+  states the deduction, not just a mention in the page caption.
+- **Div Return Contribution %** -- applies the user-supplied Portfolio
+  Return formula (`Sigma(wi x ri)`) to dividends: `wi` = `Category Weight
+  %`, `ri` = `Dividend Yield %`, net of tax. Summing this column within
+  one category reproduces that category's blended yield exactly (proven
+  algebraically and confirmed real: 8.3564% both ways for the Dividend
+  category).
+- **Category Summary** -- a KPI-card row (`st.metric`, matching
+  Dashboard's own visual style) per category (All/Others/Dividend/Growth):
+  Holdings (count), Total Cost, Total Market Value (delta: % of
+  portfolio), Unrealized % (delta: $ amount), Total Div/Yr, Total Div/Mth,
+  Expected Div Return %. A real correctness bug was found and fixed here:
+  Total Cost sums *every* symbol (Cost Basis is always known, sourced
+  from live trade history, never from yfinance), but Total Market
+  Value/Unrealized/Total Div/Yr sum **resolved symbols only** -- pairing
+  Unrealized %'s numerator and denominator from that same resolved-only
+  subset is what avoids a nonsensical **-100%** for a category holding
+  only one unresolvable symbol (naively dividing $0 resolved value by the
+  all-symbol cost). A caption lists any excluded symbols by name when
+  nonzero.
+- Two **pie charts** (top-10-plus-"Other" grouping, shared
+  `_grouped_pie()` helper): by Symbol, and by a blended Classification
+  (Sector for equities, Asset Class for ETFs/unresolved symbols).
+
+**Column labels/order** were abbreviated and reordered per the user's own
+annotated proposal once the table reached 21 columns (Symbol, Desc., Cat.,
+90D Trend, Asset Class, Port. Group, Weight %, Cat. Weight %, Shares,
+Cost/Sh, Mkt. Price, Tot. Cost, Tot. Mkt., Unreal., Unreal. %, Div Yield
+%, Freq., Expt. Div/Yr, Expt. Div/Mth, Beta, Div Contrib %) -- full names
+kept as hover tooltips on every column so nothing is lost.
+
+### Testing and verification
+
+`tests/test_market_data.py`: 16 tests, injected `FakeYfModule`/`FakeTicker`
+doubles (happy path, ETF Sector/Beta fallback + equity-not-overridden
+pairs, dividend happy path + 365-day-window exclusion + non-payer,
+90-calendar-day regression, unresolvable symbol, exception mid-fetch,
+empty history, empty symbol list). Full suite: **164/164 passing**.
+
+Verified against all 52 real current holdings at every step (not just the
+first pass) -- ETF fallback coverage (Sector/Industry blank dropped from
+28 to 1 of 52; Beta blank dropped from 29 to 2 of 52, the remainder
+genuinely missing in both fields), the 90-day window fix (61 rows per
+symbol instead of the previous ~90), and every derived column
+cross-checked by reconstructing it independently (e.g. `Quantity x Avg
+Cost == Cost Basis` for all 52 rows; `Expected Div per Year` for two real
+holdings, CLOZ and SHV, reproduced by hand in chat before implementing and
+matched exactly afterward: $64.26 and $216.13 net of tax). One live check
+caught a real, naturally-occurring second failure mode: a transient Yahoo
+timeseries error for a *different* symbol (HDV) than the already-known
+unresolvable one, confirming the resolved/unresolved split handles an
+arbitrary, changing set of failures, not just the one case already known
+about. `AppTest` smoke-tested clean throughout; all 6 pages (Dashboard,
+Monitor Stocks, Record Trade, Record Dividend, Reconciliation, Allocation
+Type) verified together in a final pass.
+
+**Considered and explicitly deferred**: an externally-sourced "Unified
+Portfolio Category" proposal (5-6 functional buckets like Growth Equity/
+Fixed Income/Cash Equivalents) -- flagged two concerns before declining to
+bundle it in: its own example table referenced a symbol that doesn't match
+any real holding (suggesting it wasn't checked against real portfolio
+data, unlike everything else in this section), and it would be a *third*
+classification axis requiring the same scale of build as v2.1's Allocation
+Type (new table, new tagging page). Not rejected -- deferred to its own
+properly-scoped pass later if wanted.
+
 ## Deferred / future
 
 - **Rebalance planner** -- the dividend-reinvestment/rebalance screen from
@@ -683,8 +857,13 @@ section above).
   above builds the tagging foundation (Dividend/Growth per symbol) it
   needs; the target-%/actual-% math and delta indicator itself (like the
   Excel workbook's `4.4.sum` sheet) is still not designed.
-- Specific-lot *selection* on sell (FIFO-only today) and any live
-  market-price feed for true mark-to-market of post-cutoff positions.
+- Specific-lot *selection* on sell (FIFO-only today). (Live market-price
+  feed for mark-to-market -- the other half of this deferred item -- is
+  now done, see V2.2 above; it's scoped to Monitor Stocks only, not yet
+  wired into Dashboard's own Portfolio Value/Unrealized P/L KPIs, which
+  still stay pinned to the last official statement by design.)
+- **Unified Portfolio Category** -- see V2.2's "Considered and explicitly
+  deferred" note above.
 - **Record Dividend's Recent list is capped at `.head(20)`** -- an old
   flagged row from Reconciliation's "Needs review" section might not be
   reachable to delete there. Noted during V2 Step 6 testing, not fixed.

@@ -1,5 +1,47 @@
 # Changelog
 
+## Monitor Stocks (v2.2): live market data for every current holding
+
+Adds a **Monitor Stocks** page (Overview nav, alongside Dashboard) showing
+every currently-held symbol in one table, filterable by Category (from
+v2.1), enriched with live data from `yfinance` -- this project's first
+non-Claude external network call.
+
+- **`core/market_data.py`** (new): `fetch_stock_profile()` batches
+  Description, Sector/Industry, Beta, Quote Type, and a 90-*calendar*-day
+  price history per symbol (explicit `start`/`end` dates -- yfinance's
+  `period="90d"` shorthand actually returns 90 *trading* days, ~131
+  calendar days, confirmed by direct comparison). ETF fallbacks for two
+  equity-only concepts yfinance otherwise leaves blank: Sector/Industry
+  falls back to `fundFamily`/`category`; Beta falls back to `beta3Year`
+  (confirmed to exactly match finviz.com's own displayed ETF Beta).
+  Dividend figures (`Dividend Per Year`, `Dividend Yield %`, `Dividend
+  Frequency`) are computed from `Ticker.dividends`' actual payout history
+  rather than yfinance's `dividendRate` field, which is blank/$0 for ETFs
+  despite real payouts. A bad/unresolvable symbol gets a NaN row rather
+  than aborting the whole batch.
+- **`app_pages/monitor_stocks.py`** (new): merges live holdings, Category,
+  and market data; a **Refresh now** button + **Last refreshed** timestamp
+  control the 5-minute cache. Per-symbol columns include Total Market
+  Value, Unrealized/Unrealized %, Expected Div per Year/Month (net of the
+  15% Thai withholding tax, matching Dashboard's own Dividends KPI
+  convention), and Div Return Contribution % (applies the user's own
+  Σ(wi × ri) portfolio-return formula to dividends, weighted by each
+  symbol's share within its own category). A **Category Summary** KPI-card
+  row (Holdings, Total Cost, Total Market Value, Unrealized %, Total
+  Div/Yr, Total Div/Mth, Expected Div Return %) covers All/Others/
+  Dividend/Growth at a glance, with resolved-symbols-only aggregation so
+  one unresolvable holding can't produce a nonsensical percentage. Two
+  pie charts (by Symbol, by blended Sector/Asset Class). Column labels
+  abbreviated with full names kept as hover tooltips once the table grew
+  past 20 columns.
+- Verified against all 52 real current holdings throughout: ETF
+  Sector/Industry blank count dropped from 28 to 1 of 52, Beta blank from
+  29 to 2; every derived figure cross-checked by independent
+  reconstruction (e.g. `Quantity x Avg Cost == Cost Basis` for all 52
+  rows). Full test suite: 164/164 passing (16 new in
+  `tests/test_market_data.py`).
+
 ## Allocation Type (v2.1): classify each symbol as Dividend or Growth
 
 Adds symbol-level tagging to the "Tools" nav section, matching how the user
