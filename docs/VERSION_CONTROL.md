@@ -11,10 +11,22 @@ not an aspirational process, a record of what's been done.
 | `V1-record-trade-and-view` | V1 feature branch (login, storage, Record Trade, Record Dividend, blended Dashboard). Merged into `main`, kept around afterward rather than deleted. |
 | `v2-Reconciliation` | V2 feature branch (Reconciliation page). Branched from `main` *after* V1 was merged in, not from the V1 branch directly -- keeps each version's diff clean and reviewable on its own. |
 | `v2.1-allocation-type` | V2.1 feature branch (Dividend/Growth/Others symbol classification, plus first-entry tagging in Record Trade). A minor version off `main` rather than a new whole version, since it's a smaller, additive feature building on top of V2 rather than a major build phase. |
+| `v2.2-monitor-stocks` | V2.2 feature branch (Monitor Stocks page -- live `yfinance` market data for current holdings). Minor version off `main`, same rationale as v2.1. |
 
 Naming convention: `vN-short-description` (or `vN.M-short-description` for a
 smaller, additive feature that doesn't warrant a new whole version number),
 capital V on whole versions, hyphen-separated.
+
+## My version quick note
+Version planning
+	• 1 - basic "record trade and dividend"
+	• 2 - intermediate "reconciliation", "tools v1"
+		○ 2.1 Classification dividend and growth
+		○ 2.2 Monitor connect market price | retrieve these data symbol description, 90 day trend, adding asset class, portfolio group, beta, weight %
+    ○ 2.3 rebalance and label version in the web application
+  • 3 - advance "dashhboard, tools v2, intetration" 
+	• 4 - cosmetic
+  • 5 - tax management
 
 ## Merge strategy
 
@@ -50,9 +62,9 @@ tip commit was already an ancestor of `main`). Feature branches that are
 still useful as a labeled reference point (`V1-record-trade-and-view`,
 `v2-Reconciliation`) are kept rather than deleted by default.
 
-## Current status (as of `v2.1-allocation-type`)
+## Current status (as of `v2.2-monitor-stocks`)
 
-`main` has V1 and V2 merged in. `v2.1-allocation-type` is in progress --
-plan finalized (see `docs/ROADMAP.md` once this version ships; until then
-the working plan lives at `~/.claude/plans/`, per the durability reminder
-in `CLAUDE.md`).
+`main` has V1, V2, and V2.1 merged in. `v2.2-monitor-stocks` is built,
+tested (164/164), and verified end-to-end against real holdings -- see
+`docs/ROADMAP.md`'s V2.2 section for the full build record. Not yet merged
+into `main`.
