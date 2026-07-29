@@ -12,7 +12,7 @@ not an aspirational process, a record of what's been done.
 | `v2-Reconciliation` | V2 feature branch (Reconciliation page). Branched from `main` *after* V1 was merged in, not from the V1 branch directly -- keeps each version's diff clean and reviewable on its own. |
 | `v2.1-allocation-type` | V2.1 feature branch (Dividend/Growth/Others symbol classification, plus first-entry tagging in Record Trade). A minor version off `main` rather than a new whole version, since it's a smaller, additive feature building on top of V2 rather than a major build phase. |
 | `v2.2-monitor-stocks` | V2.2 feature branch (Monitor Stocks page -- live `yfinance` market data for current holdings). Minor version off `main`, same rationale as v2.1. Merged into `main`. |
-| `v2.3.1-rebalance-reallocate` | Rebalance / Reallocate Investment feature branch. Cut from `main` after v2.2 was merged in. Restarted from scratch under this name after an initial `v2.3-rebalance-reallocate` attempt (Steps 1-4 built and tested, but never committed to git) was discarded and rebuilt as v2.3.1 per the user's own version-numbering choice. |
+| `v2.3-system-backup` | V2.3 feature branch (System Backup page -- manual, on-demand backups of `data/portfolio.db` and the official Statement xlsx). Cut from `main` after v2.2 was merged in. Pulled forward ahead of Rebalance/Reallocate, which shifts to v2.4 (see "My version quick note" below) -- repurposed from an earlier `v2.3.1-rebalance-reallocate` branch that had no real code on it yet. |
 
 Naming convention: `vN-short-description` (or `vN.M-short-description` for a
 smaller, additive feature that doesn't warrant a new whole version number),
@@ -24,9 +24,9 @@ Version planning
 - 2 - intermediate "reconciliation", "tools v1"
 	○ 2.1 Classification dividend and growth
 	○ 2.2 Monitor connect market price | retrieve these data symbol description, 90 day trend, adding asset class, portfolio group, beta, weight %
-  ○ 2.3 rebalance and label version in the web application
-  ○ 2.4 simplify UXUI for usage (e.g., adding, updating, etc)
-  ○ 2.5 add backing up data feature
+  ○ 2.3 system backup page (backup db + official statement xlsx)
+  ○ 2.4 rebalance and label version in the web application
+  ○ 2.5 simplify UXUI for usage (e.g., adding, updating, etc)
 - 3 - advance "dashhboard, tools v2, intetration" 
 - 4 - cosmetic
 - 5 - tax management
@@ -65,8 +65,9 @@ tip commit was already an ancestor of `main`). Feature branches that are
 still useful as a labeled reference point (`V1-record-trade-and-view`,
 `v2-Reconciliation`) are kept rather than deleted by default.
 
-## Current status (as of `v2.3.1-rebalance-reallocate`)
+## Current status (as of `v2.3-system-backup`)
 
 `main` has V1, V2, V2.1, and V2.2 merged in (`v2.2-monitor-stocks` merged
 via `git merge --no-ff`, 164/164 passing on `main` post-merge). Work has
-restarted on `v2.3.1-rebalance-reallocate`, cut from that updated `main`.
+started on `v2.3-system-backup`, cut from that updated `main`. Rebalance /
+Reallocate Investment has shifted to v2.4, to be built after v2.3 merges.
