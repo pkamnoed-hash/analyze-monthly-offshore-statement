@@ -403,3 +403,40 @@ docstring -- yfinance's equity-oriented fields (`sector`/`industry`/`beta`)
 are blank for most ETFs; `fundFamily`/`category`/`beta3Year` fill in as
 fallbacks only when the equity-specific field is blank, so equities are
 never affected.
+
+## System Backup (Tools page)
+
+Manual, on-demand backups only -- see `docs/ROADMAP.md`'s V2.3 section for
+the full build history. This section is the format/logic reference.
+
+**Filename format**: `bk-<type>-<version>-[<date range>-]<ddmmyy>-<hhmm>.<ext>`
+- Database: `bk-portfolio-v2.3-290726-1430.db`
+- Statement: `bk-statements-v2.3-2023-01_to_2026-06-290726-1430.xlsx` (the
+  date range is copied verbatim from the source file's own name -- that
+  range is the file's real identity, distinct from the app version)
+
+**Version label** comes from `core/version.py`'s `current_app_version()`
+-- the current git branch's leading `vN.M`/`vN` prefix (e.g.
+`v2.3-system-backup` -> `v2.3`), falling back to the nearest tag for a
+branch without a version prefix (e.g. `main`), falling back to `"unknown"`
+if git itself is unavailable. Never hand-maintained, so it can't drift out
+of sync the way a manually-bumped constant could -- also shown at the
+bottom of the sidebar on every page.
+
+**Database backups use `sqlite3.Connection.backup()`** (the stdlib's own
+online-backup API), reading the source with a read-only connection
+(`mode=ro`) -- guarantees a consistent snapshot even while the app has the
+db open, and guarantees backing up can never itself write to the live db.
+A plain `shutil.copy` can grab a torn, mid-write read if something else
+has the file open; the backup API can't.
+
+**Statement backups match `data/Offshore_Statements_*.xlsx` by glob**, not
+a hardcoded filename -- this file is periodically replaced with a new
+date-range name whenever a new month's official statement arrives.
+Raises clearly (not a silent guess) if zero or more than one file matches.
+
+**Notes** are stored in a `manifest.json` sidecar inside `data/backups/`
+(`{filename: note}`), not embedded in the filename -- free text isn't safe
+to fold into a filename that already carries type/version/date-range/
+timestamp fields. A missing or corrupt manifest is treated as empty, never
+an error.

@@ -850,8 +850,124 @@ classification axis requiring the same scale of build as v2.1's Allocation
 Type (new table, new tagging page). Not rejected -- deferred to its own
 properly-scoped pass later if wanted.
 
+## V2.3: System Backup
+
+### Context
+
+Right after discarding and rebuilding the Rebalance branch (see
+`docs/VERSION_CONTROL.md`'s branch history), the user wanted a safety net
+before continuing further feature work: manual, on-demand backups of the
+two files most at risk from an accident -- `data/portfolio.db` (live
+trade/dividend data) and the official Statement xlsx (actively read by
+Dashboard and Reconciliation, periodically replaced with a new date-range
+file whenever a new month's statement arrives). Pulled forward ahead of
+Rebalance/Reallocate Investment, which shifted from v2.3 to v2.4 as a
+result -- and "simplify UX/UI," which shifted from v2.4 to v2.5.
+
+Scoped through conversation: **backup-only for this pass** -- restoring
+from a backup is a natural, separate follow-up once backup itself is built
+and trusted, matching this project's incremental-rollout pattern. Two
+pieces of user feedback after the first working version expanded the
+scope mid-build: a free-text note per backup, and delete-with-confirm plus
+a type filter on the history table.
+
+### Design decisions
+
+**Version label, not hand-maintained**: this project already identifies
+each version by its branch name (`v2.3-system-backup`,
+`v2.2-monitor-stocks`, etc. -- `docs/VERSION_CONTROL.md`'s own Branches
+table). A manually-set `APP_VERSION` constant would risk quietly going
+stale if a bump were ever forgotten, so `core/version.py`'s
+`current_app_version()` instead reads the current git branch
+(`git rev-parse --abbrev-ref HEAD`) and extracts its leading `vN.M`/`vN`
+prefix; falls back to the nearest tag (`git describe --tags --always`) for
+a branch without one (e.g. `main`); falls back to `"unknown"` if git
+itself is unavailable -- this label is a convenience for filenames/the
+sidebar and must never block a backup or crash the app shell. Also shown
+in the sidebar (`st.sidebar.caption`, placed *after* `pg.run()` in
+`dashboard_app.py` so it renders below the nav's page list).
+
+**Database backup uses SQLite's own online-backup API**
+(`sqlite3.Connection.backup()`), not a raw file copy -- guarantees a
+consistent snapshot even if the app has the database open elsewhere,
+unlike `shutil.copy` which can grab a torn, mid-write read. The source
+connection is opened read-only (`mode=ro`) so backing up can never itself
+write to the live db.
+
+**Statement backup matches by glob pattern**
+(`data/Offshore_Statements_*.xlsx`), not a hardcoded filename -- this file
+is periodically replaced with a new date-range name whenever a new
+month's official statement arrives (unlike `dashboard.py`/
+`reconciliation.py`, which do hardcode the exact current filename and
+need a matching edit each time it's renamed). Raises clearly if zero or
+more than one file matches, rather than guessing.
+
+**Notes live in a `manifest.json` sidecar**, not embedded in the backup
+filename -- arbitrary user text isn't safe/parseable as part of a
+filename already carrying type/version/date-range/timestamp fields.
+`{filename: note}`, a missing or corrupt manifest treated as empty (a note
+is a convenience, never load-bearing).
+
+**`data/backups/` is `.gitignore`'d immediately** -- otherwise this
+recreates the exact "binary files piling up in git" issue already present
+for `portfolio.db`/the Statement xlsx themselves, at a new path.
+
+### Implementation
+
+**`core/version.py`** (new, standalone -- not backup-specific, since it's
+used by both backup filenames and the sidebar): `current_app_version()` as
+described above.
+
+**`core/backup.py`** (new, pure logic, no Streamlit): `backup_database()`,
+`backup_statement_file()`, `list_backups()` (Filename/Type/Version/
+Created/Size/Note, sorted newest first, empty frame if the backup dir
+doesn't exist yet, silently skips any stray file that doesn't match this
+module's own naming shape), `delete_backup()` (removes the file and its
+manifest entry together).
+
+**`app_pages/backup.py`** (new page, under **Tools** nav): current-status
+section (db/statement size, last-modified, last backup taken), two
+buttons with an optional free-text note field each, and a backup-history
+section with an **All/Database/Statement** type filter (same radio
+pattern as Monitor Stocks/Allocation Type/Rebalance) and a manual per-row
+layout (not `st.dataframe`) so each row can carry its own **Delete**
+popover-with-confirm -- the exact same pattern `record_trade.py`'s
+"Recent Trades" list already uses for deleting a logged trade.
+
+### Testing and verification
+
+`tests/test_version.py` (6 tests) and `tests/test_backup.py` (19 tests),
+all against an injected fake git module or a `tmp_path`-based temp
+directory -- never the real `data/` files or real git state. Full suite:
+**189/189 passing**.
+
+Verified against the real files throughout: `backup_database()` against
+the actual `data/portfolio.db` reproduced identical row counts (902
+trades, 895 dividends) between the live db and the backup; the Statement
+backup byte-matched the source exactly (193,181 bytes); `current_app_version()`
+against the real repo correctly returned `"v2.3"` on this branch. The
+delete flow was verified end to end via a real button click: file removed
+from disk, its manifest entry removed, other backups undisturbed.
+
+One anomaly observed twice during manual testing, unexplained: files in
+`data/backups/` disappeared between sessions without any corresponding
+action in this build (not a `delete_backup()` call, not a git operation)
+-- possibly OneDrive sync interference, since the project lives under
+`OneDrive\Desktop\...`. Flagged to the user, not resolved.
+
+### Considered and explicitly deferred
+
+**Restore from a backup** -- a natural next step once backup itself is
+trusted, but meaningfully riskier (needs careful handling of "the app may
+have an open connection to the file being replaced") and wasn't asked for
+in this first pass. **Retention/cleanup of old backups** -- not a real
+problem at today's file sizes (~190-370 KB each); no expiry or "keep last
+N" logic built yet.
+
 ## Deferred / future
 
+- **Restore from a backup** -- see V2.3's "Considered and explicitly
+  deferred" note above.
 - **Rebalance planner** -- the dividend-reinvestment/rebalance screen from
   `personal investment portfolio tool/NOTES.md` is good prior art. V2.1
   above builds the tagging foundation (Dividend/Growth per symbol) it

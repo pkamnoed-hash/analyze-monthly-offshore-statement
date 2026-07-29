@@ -2,6 +2,7 @@ import streamlit as st
 
 from core.auth import verify_password
 from core.db import init_db
+from core.version import current_app_version
 
 st.set_page_config(page_title="Financial Summary Dashboard", layout="wide")
 
@@ -34,6 +35,12 @@ pg = st.navigation({
     "Tools": [
         st.Page("app_pages/reconciliation.py", title="Reconciliation"),
         st.Page("app_pages/allocation_type.py", title="Allocation Type"),
+        st.Page("app_pages/backup.py", title="System Backup"),
     ],
 })
 pg.run()
+
+# Placed after pg.run() deliberately -- Streamlit renders the nav's page list as part of
+# pg.run() executing, so anything appended to the sidebar after that call lands below it,
+# at the bottom of the left menu.
+st.sidebar.caption(f"Version {current_app_version()}")
