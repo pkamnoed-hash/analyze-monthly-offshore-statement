@@ -374,3 +374,86 @@ class TestSymbolTypes:
         result = db.fetch_symbol_types(conn=conn)
         assert result.empty
         assert list(result.columns) == ["Symbol", "Allocation Type"]
+
+
+class TestRebalancePlan:
+    def test_get_active_rebalance_plan_returns_none_when_none_exists(self, conn):
+        assert db.get_active_rebalance_plan(conn=conn) is None
+
+    def test_start_rebalance_plan_creates_plan_with_zeroed_items(self, conn):
+        plan_id = db.start_rebalance_plan(["AAA", "BBB"], conn=conn)
+        plan = db.get_active_rebalance_plan(conn=conn)
+        assert plan == {
+            "id": plan_id,
+            "amount": 0,
+            "items": {
+                "AAA": {"pct": 0, "bought": False},
+                "BBB": {"pct": 0, "bought": False},
+            },
+        }
+
+    def test_update_rebalance_plan_amount(self, conn):
+        plan_id = db.start_rebalance_plan(["AAA"], conn=conn)
+        db.update_rebalance_plan_amount(plan_id, 1000.0, conn=conn)
+        plan = db.get_active_rebalance_plan(conn=conn)
+        assert plan["amount"] == 1000.0
+
+    def test_update_rebalance_plan_item_pct_only(self, conn):
+        plan_id = db.start_rebalance_plan(["AAA", "BBB"], conn=conn)
+        db.update_rebalance_plan_item(plan_id, "AAA", pct=40, conn=conn)
+        plan = db.get_active_rebalance_plan(conn=conn)
+        assert plan["items"]["AAA"] == {"pct": 40, "bought": False}
+        assert plan["items"]["BBB"] == {"pct": 0, "bought": False}  # untouched
+
+    def test_update_rebalance_plan_item_bought_only(self, conn):
+        plan_id = db.start_rebalance_plan(["AAA", "BBB"], conn=conn)
+        db.update_rebalance_plan_item(plan_id, "AAA", bought=True, conn=conn)
+        plan = db.get_active_rebalance_plan(conn=conn)
+        assert plan["items"]["AAA"]["bought"] is True
+
+    def test_ticking_bought_does_not_reset_pct(self, conn):
+        # The "Bought?" checkbox is a separate remark, not a lock -- setting
+        # it must not clobber a previously-entered pct. Two items so the
+        # plan doesn't auto-complete (and vanish) the moment AAA is ticked.
+        plan_id = db.start_rebalance_plan(["AAA", "BBB"], conn=conn)
+        db.update_rebalance_plan_item(plan_id, "AAA", pct=25, conn=conn)
+        db.update_rebalance_plan_item(plan_id, "AAA", bought=True, conn=conn)
+        plan = db.get_active_rebalance_plan(conn=conn)
+        assert plan["items"]["AAA"] == {"pct": 25, "bought": True}
+
+    def test_pct_stays_editable_after_being_marked_bought(self, conn):
+        # Confirms the "doesn't lock the row" requirement at the data layer.
+        # Two items so the plan stays active after AAA is ticked bought.
+        plan_id = db.start_rebalance_plan(["AAA", "BBB"], conn=conn)
+        db.update_rebalance_plan_item(plan_id, "AAA", bought=True, conn=conn)
+        db.update_rebalance_plan_item(plan_id, "AAA", pct=60, conn=conn)
+        plan = db.get_active_rebalance_plan(conn=conn)
+        assert plan["items"]["AAA"] == {"pct": 60, "bought": True}
+
+    def test_plan_auto_completes_when_all_items_ticked_bought(self, conn):
+        plan_id = db.start_rebalance_plan(["AAA", "BBB"], conn=conn)
+        db.update_rebalance_plan_item(plan_id, "AAA", bought=True, conn=conn)
+        assert db.get_active_rebalance_plan(conn=conn) is not None  # BBB still unticked
+        db.update_rebalance_plan_item(plan_id, "BBB", bought=True, conn=conn)
+        assert db.get_active_rebalance_plan(conn=conn) is None  # now cleared
+
+    def test_new_plan_starts_after_previous_one_auto_completes(self, conn):
+        first_id = db.start_rebalance_plan(["AAA"], conn=conn)
+        db.update_rebalance_plan_item(first_id, "AAA", bought=True, conn=conn)
+        assert db.get_active_rebalance_plan(conn=conn) is None
+        second_id = db.start_rebalance_plan(["AAA", "BBB"], conn=conn)
+        assert second_id != first_id
+        plan = db.get_active_rebalance_plan(conn=conn)
+        assert plan["id"] == second_id
+        assert set(plan["items"]) == {"AAA", "BBB"}
+
+    def test_reset_rebalance_plan_clears_without_requiring_all_bought(self, conn):
+        plan_id = db.start_rebalance_plan(["AAA", "BBB"], conn=conn)
+        db.update_rebalance_plan_item(plan_id, "AAA", pct=50, conn=conn)  # BBB untouched
+        db.reset_rebalance_plan(plan_id, conn=conn)
+        assert db.get_active_rebalance_plan(conn=conn) is None
+
+    def test_start_rebalance_plan_with_no_symbols_creates_empty_plan(self, conn):
+        plan_id = db.start_rebalance_plan([], conn=conn)
+        plan = db.get_active_rebalance_plan(conn=conn)
+        assert plan == {"id": plan_id, "amount": 0, "items": {}}

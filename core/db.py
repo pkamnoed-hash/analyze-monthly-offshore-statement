@@ -53,6 +53,21 @@ CREATE TABLE IF NOT EXISTS symbol_types (
     allocation_type  TEXT NOT NULL CHECK(allocation_type IN ('Dividend', 'Growth')),
     updated_at       TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+CREATE TABLE IF NOT EXISTS rebalance_plans (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    amount        REAL NOT NULL DEFAULT 0,
+    created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    completed_at  TEXT
+);
+
+CREATE TABLE IF NOT EXISTS rebalance_plan_items (
+    plan_id  INTEGER NOT NULL REFERENCES rebalance_plans(id),
+    symbol   TEXT NOT NULL,
+    pct      REAL NOT NULL DEFAULT 0,
+    bought   INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (plan_id, symbol)
+);
 """
 
 TRADE_COLUMNS = [
@@ -377,6 +392,110 @@ def delete_trades_by_source(source, conn=None):
 def delete_dividends_by_source(source, conn=None):
     c, should_close = _with_connection(conn)
     c.execute("DELETE FROM dividends WHERE source=?", (source,))
+    c.commit()
+    if should_close:
+        c.close()
+
+
+def get_active_rebalance_plan(conn=None):
+    """Returns the current in-progress plan (completed_at IS NULL) as
+    {id, amount, items: {symbol: {pct, bought}}}, or None if no plan is
+    active -- either never started, or the previous one was fully
+    completed/reset. Callers use None as the signal to start a fresh one
+    via start_rebalance_plan()."""
+    c, should_close = _with_connection(conn)
+    plan_row = c.execute(
+        "SELECT id, amount FROM rebalance_plans WHERE completed_at IS NULL ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    if plan_row is None:
+        if should_close:
+            c.close()
+        return None
+    plan_id, amount = plan_row
+    items = c.execute(
+        "SELECT symbol, pct, bought FROM rebalance_plan_items WHERE plan_id=?", (plan_id,)
+    ).fetchall()
+    if should_close:
+        c.close()
+    return {
+        "id": plan_id,
+        "amount": amount,
+        "items": {symbol: {"pct": pct, "bought": bool(bought)} for symbol, pct, bought in items},
+    }
+
+
+def start_rebalance_plan(symbols, conn=None):
+    """Creates a new active plan (amount=0) with one item row per symbol
+    (pct=0, bought=0). Caller is responsible for only invoking this when
+    get_active_rebalance_plan() returned None -- this function doesn't
+    check that itself, so calling it while a plan is already active would
+    create two concurrently-active plans and break the "one active plan"
+    assumption get_active_rebalance_plan() relies on. Returns the new
+    plan's id."""
+    c, should_close = _with_connection(conn)
+    try:
+        cur = c.execute("INSERT INTO rebalance_plans (amount, created_at) VALUES (0, datetime('now'))")
+        plan_id = cur.lastrowid
+        c.executemany(
+            "INSERT INTO rebalance_plan_items (plan_id, symbol, pct, bought) VALUES (?, ?, 0, 0)",
+            [(plan_id, s) for s in symbols],
+        )
+        c.commit()
+    except Exception:
+        c.rollback()
+        raise
+    finally:
+        if should_close:
+            c.close()
+    return plan_id
+
+
+def update_rebalance_plan_amount(plan_id, amount, conn=None):
+    c, should_close = _with_connection(conn)
+    c.execute("UPDATE rebalance_plans SET amount=? WHERE id=?", (amount, plan_id))
+    c.commit()
+    if should_close:
+        c.close()
+
+
+def update_rebalance_plan_item(plan_id, symbol, *, pct=None, bought=None, conn=None):
+    """Partial update -- only the given field(s) change. After writing,
+    checks whether every item on this plan is now bought, and if so stamps
+    completed_at (auto-complete, matching the "plan clears once everything's
+    ticked" requirement) -- ticking the last box is itself what retires the
+    plan, no separate finish action needed. A plan with zero items never
+    auto-completes this way (nothing to trigger the check), which is fine:
+    an empty plan (no Dividend-classified holdings yet) just sits idle
+    until reset_rebalance_plan() or real holdings appear."""
+    c, should_close = _with_connection(conn)
+    try:
+        if pct is not None:
+            c.execute("UPDATE rebalance_plan_items SET pct=? WHERE plan_id=? AND symbol=?", (pct, plan_id, symbol))
+        if bought is not None:
+            c.execute(
+                "UPDATE rebalance_plan_items SET bought=? WHERE plan_id=? AND symbol=?",
+                (1 if bought else 0, plan_id, symbol),
+            )
+        remaining = c.execute(
+            "SELECT COUNT(*) FROM rebalance_plan_items WHERE plan_id=? AND bought=0", (plan_id,)
+        ).fetchone()[0]
+        if remaining == 0:
+            c.execute("UPDATE rebalance_plans SET completed_at=datetime('now') WHERE id=?", (plan_id,))
+        c.commit()
+    except Exception:
+        c.rollback()
+        raise
+    finally:
+        if should_close:
+            c.close()
+
+
+def reset_rebalance_plan(plan_id, conn=None):
+    """Manually abandons a plan (stamps completed_at) without requiring
+    every item to be bought first -- the "Reset plan" button's code path,
+    distinct from update_rebalance_plan_item()'s auto-complete-on-all-bought."""
+    c, should_close = _with_connection(conn)
+    c.execute("UPDATE rebalance_plans SET completed_at=datetime('now') WHERE id=?", (plan_id,))
     c.commit()
     if should_close:
         c.close()

@@ -8,8 +8,14 @@ st.set_page_config(page_title="Financial Summary Dashboard", layout="wide")
 
 if not st.session_state.get("authenticated"):
     st.title("Financial Summary Dashboard")
-    pw = st.text_input("Password", type="password")
-    if st.button("Log in"):
+    # st.form so pressing Enter in the password field submits -- a bare st.text_input +
+    # st.button pair doesn't do this in Streamlit; Enter only commits the text_input's
+    # own value, it doesn't trigger a separate button below it. Enter inside a form
+    # triggers that form's submit button instead.
+    with st.form("login_form"):
+        pw = st.text_input("Password", type="password")
+        submitted = st.form_submit_button("Log in")
+    if submitted:
         if verify_password(pw, st.secrets["APP_PASSWORD_SALT"], st.secrets["APP_PASSWORD_HASH"]):
             st.session_state["authenticated"] = True
             st.rerun()
@@ -36,6 +42,7 @@ pg = st.navigation({
         st.Page("app_pages/reconciliation.py", title="Reconciliation"),
         st.Page("app_pages/allocation_type.py", title="Allocation Type"),
         st.Page("app_pages/backup.py", title="System Backup"),
+        st.Page("app_pages/rebalance.py", title="Rebalance & Reallocate"),
     ],
 })
 pg.run()

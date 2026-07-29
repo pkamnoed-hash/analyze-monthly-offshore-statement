@@ -964,15 +964,148 @@ in this first pass. **Retention/cleanup of old backups** -- not a real
 problem at today's file sizes (~190-370 KB each); no expiry or "keep last
 N" logic built yet.
 
+## V2.4: Rebalance & Reallocate Investment
+
+### Context
+
+Rebuilt from scratch after the earlier attempt was discarded (see
+`docs/VERSION_CONTROL.md`'s branch history) -- per the user's explicit
+choice, none of the discarded design was reused; the wireframe and user
+flow were re-derived through fresh discussion (a hand-drawn sketch plus
+Q&A), independent of what came before.
+
+**The actual use case**: the user regularly has new cash to invest and
+wants to decide how to split it across their existing Dividend-classified
+holdings -- a "where does new money go" tool, not a full buy/sell
+rebalance of the whole portfolio. No selling of overweight positions is
+in scope, matching the user's own described flow exactly.
+
+### Design decisions
+
+**Universe is Dividend-classified stocks currently held** (`quantity >
+0`), from `db.fetch_symbol_types()` -- a Dividend-tagged symbol fully
+sold out of doesn't appear.
+
+**Both pies are scoped to the dividend basket itself, not the whole
+portfolio**: Pie 1's slices are individual dividend symbols (their
+relative weights within the basket, existing vs new); Pie 2 is sector/
+asset-class mix, also among dividend holdings only. Confirmed explicitly
+with the user -- the more obvious reading (portfolio-level Dividend/
+Growth/Others split) was considered and rejected.
+
+**"Bought?" is a visual reminder only** -- ticking it does not insert a
+trade record (the user records the real purchase separately via Record
+Trade) and does not lock the row; `% Reinvest` stays editable either way.
+
+**Plan persistence lives in `portfolio.db` itself**, not a separate file
+-- two new tables (`rebalance_plans`, `rebalance_plan_items`), same
+pattern as `symbol_types`/`trades`. Means the in-progress plan is
+automatically covered by the System Backup feature (V2.3) with zero extra
+work, and stays consistent with this project's "one database, `core/db.py`
+owns it" convention. Only one plan is ever active at a time; it
+auto-completes and clears once every row is ticked Bought, or can be
+abandoned early via a manual "Reset plan" button.
+
+**`Div Contrib %` / `New Contrib %` columns + a blended-yield summary
+metric**, added mid-build at the user's request -- mirrors
+`app_pages/monitor_stocks.py`'s existing `Div Return Contribution %`
+column and its algebraic property (summed across every row, reproduces
+the whole basket's blended yield). Purpose: `Cat Weight %` alone can hide
+that a small, high-yield holding contributes as much to actual dividend
+income as a much larger, low-yield one.
+
+**`% Reinvest`/`Bought?` edits are collected in the table and only
+persisted via a "Save changes" button inside a real `st.form`** -- not
+written through per keystroke. Two real, user-reported bugs drove this
+change, both root-caused during live testing:
+1. Rebuilding the table's underlying data fresh on every render (needed
+   so the `New-*` columns can recompute) reset the `data_editor` widget's
+   own scroll/selected-row position on every single edit -- and in an
+   earlier version, before a fix landed, even reverted the just-typed
+   value back to its old one.
+2. A plain `st.button` *outside* the grid didn't reliably capture an
+   in-progress cell edit that hadn't been explicitly committed (Tab/
+   Enter/clicking another grid cell) -- confirmed by the user
+   (`% Reinvest` alone + Save did nothing; also touching `Bought?` first
+   made it work, since that click, being *inside* the same grid, forced
+   the pending edit to commit as a side effect). `st.form` fixes this at
+   the root: form submission is Streamlit's own purpose-built mechanism
+   for flushing in-progress field state, regardless of what triggered it.
+
+Trade-off accepted by the user: un-saved edits are lost if you navigate
+away before clicking Save (no longer saved on every keystroke); and
+`% allocated`/`% remaining` no longer update live while typing (forms
+don't rerun on individual widget interactions) -- both now update
+together with everything else, on Save.
+
+**`st.fragment` scoping** (`st.rerun(scope="fragment")` for Amount/Save/
+Reset) confines redraws to the Rebalance page's own body rather than the
+whole app -- a plain `st.rerun()` was found to reset browser scroll to
+the top of the page on every action, which read as the page "jumping."
+
+### Implementation
+
+**`core/rebalance.py`** (new, pure logic, no Streamlit): `get_dividend_holdings()`
+(merges `fetch_symbol_types()`, `calculations.compute_current_positions()`,
+`market_data.fetch_stock_profile()`; adds `Current Value`, `Current Cat
+Weight %`, `Current Unrealized $/%`, `Current Expected Div/Yr/Mo`, `Current
+Div Contrib %`), `apply_allocation()` (adds the `New-*` counterparts plus
+`Invest $`, buying the extra shares at each symbol's own `Latest Price`),
+`sector_breakdown()` (groups by the same blended Sector/Industry
+`Classification` field Monitor Stocks uses).
+
+**`core/db.py` additions**: `rebalance_plans`/`rebalance_plan_items`
+tables plus `get_active_rebalance_plan()`, `start_rebalance_plan()`,
+`update_rebalance_plan_amount()`, `update_rebalance_plan_item()` (also
+auto-stamps `completed_at` once every item is bought), `reset_rebalance_plan()`.
+
+**`app_pages/rebalance.py`** (new page, under **Tools** nav): a Summary
+section (four pies -- Div Contrib %/sector breakdown existing-vs-new; KPI
+numbers live below the table instead, per user request), an Amount input
+(persists immediately, no Save needed), `% allocated`/`% remaining` + the
+KPI pair + the blended-yield metric (all reading a `st.session_state`-held
+snapshot that's only rebuilt on Amount change / Save / a live-price
+refresh -- not on every keystroke), and the per-stock table
+(`st.form`-wrapped `data_editor` + "Save changes"/"Reset plan").
+
+**`dashboard_app.py`**: the login page's password field was wrapped in
+`st.form` too (a small, unrelated fix requested along the way) so
+pressing Enter submits, matching what clicking "Log in" already did.
+
+### Testing and verification
+
+`tests/test_rebalance.py` (17 tests) and `tests/test_db.py` additions (11
+tests for the plan CRUD, including auto-complete-on-all-bought and manual
+reset) -- full suite: **217/217 passing**.
+
+Real-data sanity check against the actual 26 real dividend holdings,
+printed in chat before any UI existed: `Current Cat Weight %` summed to
+exactly 100%, `New Cat Weight %` summed to exactly 100% after a sample
+$1,000 allocation, `New Unrealized $` matched `Current Unrealized $`
+exactly per symbol (confirming buying at market price adds zero
+unrealized gain/loss at the moment of purchase), sector breakdown summed
+cleanly to 100% both before and after.
+
+`AppTest` smoke check across all 8 pages, no exceptions. Every UI-facing
+step was verified live in the browser by the user across this build,
+including the two real bugs above -- both reported by the user during
+testing, root-caused, fixed, and re-verified live before moving on.
+
+### Considered and explicitly deferred
+
+**Selling overweight positions** (a true two-way rebalance) -- explicitly
+out of scope; this is a "where does new money go" tool only, per the
+user's own described flow. **Starting a new position** in a Dividend-
+tagged symbol not currently held -- Section 3 only lists symbols with
+`quantity > 0`. **"Live while typing" `% allocated` feedback** -- lost as
+a direct consequence of moving to `st.form` (forms don't rerun on
+individual widget interactions); accepted since fixing the Save-not-
+capturing-the-edit bug mattered more.
+
 ## Deferred / future
 
 - **Restore from a backup** -- see V2.3's "Considered and explicitly
   deferred" note above.
-- **Rebalance planner** -- the dividend-reinvestment/rebalance screen from
-  `personal investment portfolio tool/NOTES.md` is good prior art. V2.1
-  above builds the tagging foundation (Dividend/Growth per symbol) it
-  needs; the target-%/actual-% math and delta indicator itself (like the
-  Excel workbook's `4.4.sum` sheet) is still not designed.
 - Specific-lot *selection* on sell (FIFO-only today). (Live market-price
   feed for mark-to-market -- the other half of this deferred item -- is
   now done, see V2.2 above; it's scoped to Monitor Stocks only, not yet

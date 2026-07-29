@@ -440,3 +440,52 @@ Raises clearly (not a silent guess) if zero or more than one file matches.
 to fold into a filename that already carries type/version/date-range/
 timestamp fields. A missing or corrupt manifest is treated as empty, never
 an error.
+
+## Rebalance & Reallocate (Tools page)
+
+Manual, buy-only reallocation planner for Dividend-classified holdings
+only -- see `docs/ROADMAP.md`'s V2.4 section for the full build history.
+This section is the formula/logic reference.
+
+**Universe**: Dividend-classified symbols currently held (`quantity >
+0`), from `db.fetch_symbol_types()` filtered to `"Dividend"`. A symbol
+tagged Dividend but fully sold out of simply doesn't appear.
+
+**New-value recalculation**: buying `Invest $` = `amount x pct / 100`
+more of a symbol at its current `Latest Price` adds `Invest $ / Latest
+Price` shares. `New Cost Basis` = `Cost Basis + Invest $`; `New Value` =
+`New Quantity x Latest Price`, which algebraically equals `Current Value
++ Invest $`. Since `New Unrealized $` = `New Value - New Cost Basis` =
+`(Current Value + Invest $) - (Cost Basis + Invest $)` = `Current Value -
+Cost Basis` = `Current Unrealized $`, it comes out **unchanged** -- buying
+more at market price contributes zero unrealized gain/loss at the moment
+of purchase. `New Unrealized %` still moves (down, for a gain position)
+because the same $ gain/loss is now measured against a larger cost basis.
+
+**Cat Weight %** is a symbol's share of the whole dividend basket's
+value. Unlike Monitor Stocks' `Category Weight %` (which groups by
+Dividend/Growth/Others across the whole portfolio), no groupby is needed
+here -- every row is already Dividend, so it's a plain share-of-total.
+
+**Div Contrib %** mirrors Monitor Stocks' `Div Return Contribution %`
+exactly: `Cat Weight % / 100 x Dividend Yield % x (1 - 15% withholding)`.
+Summed across every row, this reproduces the basket's blended annual
+yield (`Total Expected Div/Yr / Total Value x 100`) -- the same algebraic
+property that column already relies on, verified again here for the
+dividend-only universe before building the page's "Blended dividend
+yield" summary metric.
+
+**Plan persistence** lives in two tables inside the same `portfolio.db`
+(`rebalance_plans`, `rebalance_plan_items`), not a separate file --
+automatically covered by the System Backup feature (V2.3) with no extra
+work. Only one plan is ever active (`completed_at IS NULL`) at a time; it
+auto-completes once every item is ticked Bought, or can be abandoned
+early via "Reset plan."
+
+**Edits are saved via `st.form`, not per keystroke**: `% Reinvest` and
+`Bought?` are collected in the table and only written through when "Save
+changes" is clicked, inside a real `st.form` -- Streamlit's own mechanism
+for reliably flushing an in-progress, not-yet-committed cell edit
+regardless of what widget triggered the save. A plain button *outside*
+the grid was found, during testing, not to reliably capture an
+in-progress edit that hadn't been explicitly committed first.

@@ -12,7 +12,8 @@ not an aspirational process, a record of what's been done.
 | `v2-Reconciliation` | V2 feature branch (Reconciliation page). Branched from `main` *after* V1 was merged in, not from the V1 branch directly -- keeps each version's diff clean and reviewable on its own. |
 | `v2.1-allocation-type` | V2.1 feature branch (Dividend/Growth/Others symbol classification, plus first-entry tagging in Record Trade). A minor version off `main` rather than a new whole version, since it's a smaller, additive feature building on top of V2 rather than a major build phase. |
 | `v2.2-monitor-stocks` | V2.2 feature branch (Monitor Stocks page -- live `yfinance` market data for current holdings). Minor version off `main`, same rationale as v2.1. Merged into `main`. |
-| `v2.3-system-backup` | V2.3 feature branch (System Backup page -- manual, on-demand backups of `data/portfolio.db` and the official Statement xlsx). Cut from `main` after v2.2 was merged in. Pulled forward ahead of Rebalance/Reallocate, which shifts to v2.4 (see "My version quick note" below) -- repurposed from an earlier `v2.3.1-rebalance-reallocate` branch that had no real code on it yet. |
+| `v2.3-system-backup` | V2.3 feature branch (System Backup page -- manual, on-demand backups of `data/portfolio.db` and the official Statement xlsx). Cut from `main` after v2.2 was merged in. Pulled forward ahead of Rebalance/Reallocate, which shifts to v2.4 (see "My version quick note" below) -- repurposed from an earlier `v2.3.1-rebalance-reallocate` branch that had no real code on it yet. Merged into `main`. |
+| `v2.4-rebalance-reallocate` | V2.4 feature branch (Rebalance / Reallocate Investment -- decide where new cash goes across Dividend-classified holdings). Cut from `main` after v2.3 was merged in. Rebuilt from scratch, per the user's explicit choice -- none of the earlier discarded `v2.3-rebalance-reallocate`/`v2.3.1-rebalance-reallocate` design was reused; wireframe and flow were re-derived through fresh discussion. Merged into `main`. |
 
 Naming convention: `vN-short-description` (or `vN.M-short-description` for a
 smaller, additive feature that doesn't warrant a new whole version number),
@@ -65,9 +66,8 @@ tip commit was already an ancestor of `main`). Feature branches that are
 still useful as a labeled reference point (`V1-record-trade-and-view`,
 `v2-Reconciliation`) are kept rather than deleted by default.
 
-## Current status (as of `v2.3-system-backup`)
+## Current status (as of `v2.4-rebalance-reallocate`)
 
-`main` has V1, V2, V2.1, and V2.2 merged in (`v2.2-monitor-stocks` merged
-via `git merge --no-ff`, 164/164 passing on `main` post-merge). Work has
-started on `v2.3-system-backup`, cut from that updated `main`. Rebalance /
-Reallocate Investment has shifted to v2.4, to be built after v2.3 merges.
+`main` has V1, V2, V2.1, V2.2, V2.3, and V2.4 merged in (`v2.4-rebalance-reallocate`
+merged via `git merge --no-ff`, 217/217 passing on `main` post-merge).
+Next up per "My version quick note" above: v2.5, simplify UX/UI.
