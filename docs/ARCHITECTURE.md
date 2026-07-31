@@ -7,7 +7,7 @@
 | UI framework | [Streamlit](https://streamlit.io) 1.58 | Multi-page app via `st.navigation`/`st.Page` |
 | Language | Python 3.12 | Single `.venv_dashboard` virtualenv |
 | Data wrangling | pandas 3.0 | Every `core/` function is DataFrame-in/DataFrame-out |
-| Persistence | SQLite (stdlib `sqlite3`) | One file, `data/portfolio.db`; no server, no ORM |
+| Persistence | Turso (`libsql` client) | Hosted, SQLite-compatible; `get_connection()` always targets Turso now, local and deployed alike -- `data/portfolio.db` is a frozen pre-migration snapshot, no longer read by the running app (see "Hosting" below) |
 | Official source file | openpyxl 3.1 (via `pandas.read_excel`) | Reads the audited `Offshore_Statements_*.xlsx` |
 | Charts | Plotly 6.8 | Dashboard only |
 | Slip parsing | Anthropic SDK 0.120 (`claude-opus-5`, vision) | Structured-output JSON schema, see `core/slip_parser.py` |
@@ -26,12 +26,12 @@ flowchart TD
 
     Pages --> Core["core/<br/>auth, calculations, db,<br/>slip_parser, reconciliation"]
 
-    Core --> DB[("data/portfolio.db<br/>SQLite")]
+    Core --> DB[("Turso (libSQL)<br/>hosted, SQLite-compatible")]
     Core --> XLSX[("Offshore_Statements_*.xlsx<br/>audited official statement")]
     Core --> Claude["Claude Vision API<br/>(slip_parser.py only)"]
 
-    Secrets[".streamlit/secrets.toml<br/>(gitignored)"] -.-> App
-    Secrets -.-> Core
+    Secrets[".streamlit/secrets.toml<br/>(gitignored, local) /<br/>host secrets (deployed)"] -.-> App
+    App -.->|"os.environ bridge"| Core
 ```
 
 `core/` holds every function that touches data or does a calculation --
@@ -40,6 +40,29 @@ none of it imports Streamlit, so it's unit-testable in isolation
 state. `dashboard_app.py` is the thin entry point (login gate +
 `st.navigation` page routing) and stays at the project root, everything
 else moved into `core/` during V1's post-Step-7 restructure.
+
+## Hosting (v3)
+
+Deployed on **Streamlit Community Cloud** (free, deploys straight from
+this GitHub repo), backed by **Turso** (free, SQLite-compatible hosted
+database) for persistence -- chosen after Streamlit Community Cloud,
+Render, and Google Cloud Run's free tiers all turned out to lack durable
+storage (ephemeral disks that reset on redeploy), and Hugging Face Spaces'
+free tier turned out to no longer include the Docker SDK Streamlit needs.
+Compute and storage are deliberately decoupled: Streamlit Community Cloud
+hosts the running app (which can restart, sleep, or redeploy freely
+without losing data), while Turso is the single source of truth for
+`trades`/`dividends`/`symbol_types`/`rebalance_plans`, shared identically
+by the local dev instance and the deployed one via the same
+`TURSO_DATABASE_URL`/`TURSO_AUTH_TOKEN` secrets.
+
+`core/db.py` deliberately has no Streamlit import (see `CLAUDE.md`), so it
+can't read `st.secrets` directly -- `dashboard_app.py` bridges the two
+Turso values from `st.secrets` into `os.environ` at startup, before any
+`core.db` call happens, and `get_connection()` reads them from there.
+
+See `docs/DEPLOYMENT.md` for the actual setup steps and
+`docs/VERSION_CONTROL.md` for why this shipped as v3.
 
 ## Data flow / pipelines
 

@@ -1,5 +1,34 @@
 # Changelog
 
+## Hosting migration (v3): now live on the web, with data that actually survives a restart
+
+The app is no longer local-only -- it's deployed to **Streamlit Community
+Cloud** at `myinvestment27.streamlit.app`, backed by **Turso** (a free,
+hosted, SQLite-compatible database) so new trades/dividends entered on
+the live app persist across restarts and redeploys, not just locally.
+
+- **`core/db.py`**: `get_connection()` now targets Turso instead of the
+  local `data/portfolio.db` file, for both local dev and the deployed app
+  alike -- one shared source of truth. Two internal rewrites made this
+  safe without a live connection to test against ahead of time: schema
+  creation now runs each `CREATE TABLE` individually instead of one
+  multi-statement script, and a new `_read_sql()` helper replaces
+  pandas' automatic SQLite/SQLAlchemy connection handling, which doesn't
+  recognize Turso's connection type.
+- Chose Streamlit Community Cloud + Turso after Hugging Face Spaces (the
+  original pick) turned out to require a paid plan for the Docker SDK
+  Streamlit needs, and after confirming Streamlit Community Cloud and
+  Render's own free tiers both reset their disk on every redeploy --
+  decoupling compute (Community Cloud) from storage (Turso) was the only
+  combination that was both free and actually durable.
+- `data/portfolio.db` is now a frozen pre-migration snapshot, not read by
+  the running app -- kept as-is for System Backup and historical
+  reference.
+- No user-facing feature changes -- this is entirely about where the app
+  runs and where your data lives, not what it does.
+- Full test suite: 217/217 passing (unaffected -- tests always use an
+  in-memory database, never the real connection).
+
 ## Rebalance & Reallocate Investment (v2.4): decide where new dividend cash goes
 
 Adds a **Rebalance & Reallocate** page (Tools nav) for splitting new cash

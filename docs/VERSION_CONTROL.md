@@ -14,6 +14,7 @@ not an aspirational process, a record of what's been done.
 | `v2.2-monitor-stocks` | V2.2 feature branch (Monitor Stocks page -- live `yfinance` market data for current holdings). Minor version off `main`, same rationale as v2.1. Merged into `main`. |
 | `v2.3-system-backup` | V2.3 feature branch (System Backup page -- manual, on-demand backups of `data/portfolio.db` and the official Statement xlsx). Cut from `main` after v2.2 was merged in. Pulled forward ahead of Rebalance/Reallocate, which shifts to v2.4 (see "My version quick note" below) -- repurposed from an earlier `v2.3.1-rebalance-reallocate` branch that had no real code on it yet. Merged into `main`. |
 | `v2.4-rebalance-reallocate` | V2.4 feature branch (Rebalance / Reallocate Investment -- decide where new cash goes across Dividend-classified holdings). Cut from `main` after v2.3 was merged in. Rebuilt from scratch, per the user's explicit choice -- none of the earlier discarded `v2.3-rebalance-reallocate`/`v2.3.1-rebalance-reallocate` design was reused; wireframe and flow were re-derived through fresh discussion. Merged into `main`. |
+| `v3-hosting-prep` | V3 feature branch (hosting preparation -- deploy to the cloud, keep it free, make writes actually persist). Cut from `main` after v2.4 was merged in. Explored Hugging Face Spaces first (scored highest in an initial comparison) but reversed that decision mid-build once its Docker SDK turned out to require a paid PRO plan; landed on Streamlit Community Cloud (compute) + Turso (persistence) instead, decoupling the two since no single free host offered both. Live at `myinvestment27.streamlit.app`, verified working end-to-end including write persistence across a restart. |
 
 Naming convention: `vN-short-description` (or `vN.M-short-description` for a
 smaller, additive feature that doesn't warrant a new whole version number),
@@ -27,7 +28,7 @@ Version planning
 	○ 2.2 Monitor connect market price | retrieve these data symbol description, 90 day trend, adding asset class, portfolio group, beta, weight %
   ○ 2.3 system backup page (backup db + official statement xlsx)
   ○ 2.4 rebalance and label version in the web application
-- 3 - hosting preparation and improvement (deploy to Hugging Face Spaces, make source code cloud-compatible)
+- 3 - hosting preparation and improvement (deploy to Streamlit Community Cloud + Turso, make source code cloud-compatible -- Hugging Face Spaces was the original target, reversed once its Docker SDK went paid-only)
 - 4 - advance "dashhboard, tools v2, intetration"
 - 5 - cosmetic
 - 6 - tax management
@@ -66,8 +67,10 @@ tip commit was already an ancestor of `main`). Feature branches that are
 still useful as a labeled reference point (`V1-record-trade-and-view`,
 `v2-Reconciliation`) are kept rather than deleted by default.
 
-## Current status (as of `v2.4-rebalance-reallocate`)
+## Current status (as of `v3-hosting-prep`)
 
-`main` has V1, V2, V2.1, V2.2, V2.3, and V2.4 merged in (`v2.4-rebalance-reallocate`
-merged via `git merge --no-ff`, 217/217 passing on `main` post-merge).
-Next up per "My version quick note" above: v2.5, simplify UX/UI.
+`main` has V1, V2, V2.1, V2.2, V2.3, and V2.4 merged in. `v3-hosting-prep`
+is built, tested (217/217), and verified working live at
+`myinvestment27.streamlit.app` -- not yet merged into `main`. Next up per
+"My version quick note" above, once v3 merges: v4, advance
+dashboard/tools v2/integration.
