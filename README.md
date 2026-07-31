@@ -1,13 +1,3 @@
----
-title: Unified Portfolio Web App
-emoji: 💹
-colorFrom: blue
-colorTo: green
-sdk: docker
-app_port: 7860
-pinned: false
----
-
 # Unified Portfolio Web App
 
 A personal offshore brokerage portfolio tracker. Blends an audited official
