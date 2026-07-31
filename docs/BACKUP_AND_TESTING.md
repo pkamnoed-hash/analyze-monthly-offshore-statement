@@ -54,19 +54,33 @@ test that against your real holdings.
 3. **Before changing anything locally**, save your current production
    secrets: copy `.streamlit/secrets.toml` to `.streamlit/secrets.prod.toml.bak`
    (still gitignored, safe).
-4. Edit `.streamlit/secrets.toml`, replacing just `TURSO_DATABASE_URL`/
-   `TURSO_AUTH_TOKEN` with the `dev` branch's values. Leave the other 3
-   keys (password/Anthropic) unchanged.
+4. Edit `.streamlit/secrets.toml`, replacing `TURSO_DATABASE_URL`/
+   `TURSO_AUTH_TOKEN` with the `dev` branch's values, **and add/set
+   `APP_ENV = "dev"`** (see "Which environment am I on?" below). Leave
+   the other 3 keys (password/Anthropic) unchanged.
 5. Restart `run_dashboard.bat` (kill any running instance first). Local
    testing now reads/writes only `dev` -- production is untouched no
    matter what happens.
 6. When done: copy the values back from `secrets.prod.toml.bak` into
-   `secrets.toml` and restart again.
+   `secrets.toml` (which should have `APP_ENV = "prod"`, or no `APP_ENV`
+   key at all -- it defaults to prod) and restart again.
 
 Tip: keep `secrets.prod.toml.bak` and a `secrets.dev.toml` side by side
 permanently, and just copy whichever one you want active *into*
 `secrets.toml` (the file Streamlit actually reads) when switching
 contexts, rather than hand-editing values each time.
+
+### Which environment am I on?
+
+The sidebar shows **"🟢 Environment: PROD"** or **"🟡 Environment: DEV"**,
+right under the version label -- driven by an `APP_ENV` key in
+`secrets.toml` (`"dev"` or `"prod"`; defaults to `"prod"` if the key is
+missing, so older secrets files without it still show the safe default).
+This is a deliberately explicit, manually-set flag rather than something
+inferred from the Turso URL -- toggle it in the same edit as
+`TURSO_DATABASE_URL`/`TURSO_AUTH_TOKEN` above, every time you switch.
+Check this label before doing anything on real data, especially after
+switching back and forth a few times in one session.
 
 ## Schema changes
 

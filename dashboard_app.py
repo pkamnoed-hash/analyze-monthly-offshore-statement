@@ -59,3 +59,14 @@ pg.run()
 # pg.run() executing, so anything appended to the sidebar after that call lands below it,
 # at the bottom of the left menu.
 st.sidebar.caption(f"Version {current_app_version()}")
+
+# APP_ENV is an explicit, manually-set secret (not inferred from the Turso URL --
+# safer to require stating it outright than to guess from a hostname pattern) --
+# defaults to "prod" so existing secrets.toml files without this key still show the
+# correct, safe default. Toggle this alongside TURSO_DATABASE_URL/TURSO_AUTH_TOKEN
+# when switching environments (see docs/BACKUP_AND_TESTING.md).
+_app_env = st.secrets.get("APP_ENV", "prod")
+if _app_env == "dev":
+    st.sidebar.caption("🟡 Environment: DEV")
+else:
+    st.sidebar.caption("🟢 Environment: PROD")
