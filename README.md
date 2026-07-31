@@ -40,6 +40,7 @@ Full details: `docs/DEPLOYMENT.md`.
 | [`docs/METHODOLOGY.md`](docs/METHODOLOGY.md) | How every KPI/calculation actually works, and why |
 | [`docs/ROADMAP.md`](docs/ROADMAP.md) | Build history and design record (V1, V2, deferred/future) |
 | [`docs/VERSION_CONTROL.md`](docs/VERSION_CONTROL.md) | Branch strategy, merge/commit conventions |
-| [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) | How to run this app (local only, today) |
+| [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) | How to run this app locally and deploy it to the cloud |
+| [`docs/BACKUP_AND_TESTING.md`](docs/BACKUP_AND_TESTING.md) | Turso backup/rollback, safe testing with database branches, schema-change process |
 | [`CHANGELOG.md`](CHANGELOG.md) | User-facing summary of what shipped, per version |
 | [`CLAUDE.md`](CLAUDE.md) | Orientation notes for a Claude Code session working in this repo |
