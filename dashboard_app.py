@@ -1,3 +1,5 @@
+import os
+
 import streamlit as st
 
 from core.auth import verify_password
@@ -5,6 +7,12 @@ from core.db import init_db
 from core.version import current_app_version
 
 st.set_page_config(page_title="Financial Summary Dashboard", layout="wide")
+
+# core/db.py deliberately has no Streamlit import (see CLAUDE.md), so it reads its
+# Turso connection details from the environment instead of st.secrets directly --
+# bridge them here, before init_db() or any other core.db call happens below.
+os.environ.setdefault("TURSO_DATABASE_URL", st.secrets["TURSO_DATABASE_URL"])
+os.environ.setdefault("TURSO_AUTH_TOKEN", st.secrets["TURSO_AUTH_TOKEN"])
 
 if not st.session_state.get("authenticated"):
     st.title("Financial Summary Dashboard")

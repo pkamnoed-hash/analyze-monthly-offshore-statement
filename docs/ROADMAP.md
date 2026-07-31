@@ -1102,6 +1102,122 @@ a direct consequence of moving to `st.form` (forms don't rerun on
 individual widget interactions); accepted since fixing the Save-not-
 capturing-the-edit bug mattered more.
 
+## V3: Hosting Migration
+
+### Context
+
+Up to this point the app ran as a single local instance on the
+developer's own machine only (`docs/DEPLOYMENT.md`'s "not designed yet"
+placeholder for cloud deployment). The user wanted to deploy it to the
+web, for free, with one hard requirement: new trades/dividends entered on
+the *live* deployed app had to actually persist, not just view a
+snapshot of whatever was last pushed to GitHub.
+
+### Design decisions
+
+**Hugging Face Spaces was the original pick, reversed mid-build.** An
+initial 4-way comparison (Streamlit Community Cloud, Render, Hugging Face
+Spaces, Google Cloud Run), scored against the user's stated roadmap
+(record trade, monitor stock, economic data, future AI/ML, future
+auto-trendline/notifications), rated Hugging Face Spaces highest (8/10)
+for its compute headroom and Docker-based flexibility. Real work started
+on that path (`Dockerfile`, HF Space README metadata) before discovering,
+while actually walking through HF's "Create Space" screen, that Docker
+Spaces -- the SDK type Streamlit needs -- require a paid PRO subscription
+($9/mo); only the Static SDK (no server-side Python) is free. That
+invalidated the free-tier premise the score was built on.
+
+**Compute and storage were deliberately decoupled**, once it became clear
+no single free host offered both: Streamlit Community Cloud and Render's
+free web services both reset their disk on every redeploy; Hugging Face
+lost its free Docker tier (above); Google Cloud Run is stateless by
+design. Landed on **Streamlit Community Cloud** (free compute, deploys
+straight from GitHub, zero server config) + **Turso** (free,
+SQLite-compatible hosted database, 5GB storage / 10M writes-per-month) for
+persistence -- confirmed both genuinely free before committing.
+
+**`get_connection()` always targets Turso now, local and deployed alike**
+-- not a dual-mode local-SQLite-vs-remote-Turso branch. Since the real
+data was already migrated into Turso (see Implementation), keeping a
+second, diverging local-file code path would just reintroduce the
+local/deployed data-consistency problem this migration exists to solve.
+`data/portfolio.db` remains on disk as a frozen pre-migration snapshot
+(still targeted by System Backup) but the running app no longer reads it.
+
+**Two defensive rewrites in `core/db.py`, made without a live Turso
+connection to test against** (no access to the user's auth token from
+this environment, by design -- secrets stay out of the assistant's
+reach): `pd.read_sql_query(query, conn)` only special-cases a stdlib
+`sqlite3.Connection` or a SQLAlchemy connectable, and libsql's connection
+is neither, so a new `_read_sql()` helper fetches rows manually instead
+(portable regardless of connection type); `SCHEMA` was restructured from
+one `executescript()` string into a list of statements looped through
+individual `.execute()` calls, since `executescript()` support wasn't
+confirmed on libsql's client. Both were verified correct once the app
+actually went live (see Testing).
+
+### Implementation
+
+**`core/db.py`**: `get_connection()` now calls `libsql.connect(database=
+os.environ["TURSO_DATABASE_URL"], auth_token=os.environ["TURSO_AUTH_TOKEN"])`
+instead of `sqlite3.connect(DB_PATH)`. New `_read_sql()` helper used by
+`fetch_trades()`/`fetch_dividends()`/`fetch_symbol_types()`. `SCHEMA`
+became `SCHEMA_STATEMENTS` (a list), looped in `init_db()`.
+`requirements.txt` gained `libsql==0.1.11`.
+
+**`dashboard_app.py`**: bridges `TURSO_DATABASE_URL`/`TURSO_AUTH_TOKEN`
+from `st.secrets` into `os.environ` at startup, before any `core.db` call
+-- `core/db.py` deliberately has no Streamlit import (`CLAUDE.md`), so it
+can't read `st.secrets` directly.
+
+**Data migration**: the real `data/portfolio.db` was uploaded directly
+into a new Turso database via Turso's own "Upload SQLite File" dashboard
+feature, seeding it with real data in the same step the database was
+created -- collapsed what was originally planned as a separate
+dump/import step. One detour: the upload requires `journal_mode=WAL`,
+which the file wasn't in by default; fixed with a one-line
+`PRAGMA journal_mode=WAL;` against the local file before re-uploading.
+
+**Reverted work**: the Hugging Face-specific `Dockerfile`, `.dockerignore`,
+and README YAML metadata block, once the HF direction was abandoned --
+none of it applies to Streamlit Community Cloud, which needs no
+Dockerfile at all.
+
+### Testing and verification
+
+217/217 tests passing throughout (unaffected by any of this -- tests
+always inject their own in-memory `sqlite3` connection, never touching
+`get_connection()`).
+
+Live verification, done by the user in the browser, in two parts: (1)
+reads -- the deployed app's Rebalance & Reallocate page loaded with
+correct real figures matching local data, confirming `_read_sql()` and
+the schema-init rewrite both work against an actual Turso connection; (2)
+writes persisting across a restart -- an edit made on the live app was
+confirmed still present after a restart, the actual point of the
+migration (proving data survives independently of Streamlit Community
+Cloud's own ephemeral disk).
+
+Real friction hit and resolved along the way, worth keeping as reference:
+Streamlit Community Cloud's plain "Continue with GitHub" sign-in only
+grants a weaker OAuth identity authorization, not the GitHub App
+installation needed to see a **private** repo -- isolated by testing with
+a throwaway public repo (visible immediately) versus the real private one
+(silently "does not exist"), fixed by using Streamlit's interactive
+repository picker to select the private repo directly, which triggers
+GitHub's own access-grant prompt that the plain sign-in flow hadn't.
+
+### Considered and explicitly deferred
+
+**Hugging Face Spaces** -- explored first, reversed once Docker Spaces
+turned out to require a paid plan; see Design decisions above.
+**A local/remote dual-mode connection** -- rejected in favor of Turso
+being the single source of truth everywhere, per Design decisions above.
+**Hardening the single shared password** for a now-public URL -- flagged
+during the original hosting discussion as worth reconsidering someday,
+not addressed as part of this migration; `docs/DEPLOYMENT.md`'s "Auth
+model" note carries this forward.
+
 ## Deferred / future
 
 - **Restore from a backup** -- see V2.3's "Considered and explicitly
