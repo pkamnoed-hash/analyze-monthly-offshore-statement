@@ -1,74 +1,88 @@
-"""SQLite persistence for user-entered trades and dividends.
+"""Turso (SQLite-compatible) persistence for user-entered trades and dividends.
 
 Pure logic, no Streamlit import -- every function accepts an optional
-injected `conn` so tests can pass an in-memory database instead of the real
-file (see tests/test_db.py).
+injected `conn` so tests can pass an in-memory sqlite3 database instead of
+the real Turso connection (see tests/test_db.py). Tests never go through
+get_connection(), so they're unaffected by which backend it targets.
 """
 
 import os
-import sqlite3
+
+import libsql
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# No longer the live connection target (see get_connection() below) -- kept as the
+# path core/backup.py's local snapshot backups still read from, and for the
+# regression test that pins it to the project root, not core/'s own directory.
 DB_PATH = os.path.join(PROJECT_ROOT, "data", "portfolio.db")
 
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS trades (
-    id            INTEGER PRIMARY KEY AUTOINCREMENT,
-    trade_date    TEXT NOT NULL,
-    entry_type    TEXT NOT NULL DEFAULT 'Trade Entry',
-    side          TEXT,
-    symbol        TEXT NOT NULL,
-    description   TEXT,
-    quantity      REAL NOT NULL,
-    price         REAL,
-    amount        REAL,
-    commission    REAL,
-    vat           REAL,
-    reserved_fee  REAL,
-    fee_rebate    REAL,
-    order_id      TEXT,
-    order_type    TEXT,
-    source        TEXT NOT NULL DEFAULT 'manual',
-    reconciled_month TEXT,
-    notes         TEXT,
-    created_at    TEXT NOT NULL DEFAULT (datetime('now'))
-);
-CREATE INDEX IF NOT EXISTS idx_trades_symbol_date ON trades(symbol, trade_date);
-
-CREATE TABLE IF NOT EXISTS dividends (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    trade_date  TEXT NOT NULL,
-    symbol      TEXT,
-    entry_type  TEXT NOT NULL CHECK(entry_type IN ('Dividend','Interest','Capital Distribution')),
-    net_amount  REAL NOT NULL,
-    source      TEXT NOT NULL DEFAULT 'manual',
-    reconciled_month TEXT,
-    notes       TEXT,
-    created_at  TEXT NOT NULL DEFAULT (datetime('now'))
-);
-CREATE INDEX IF NOT EXISTS idx_dividends_symbol_date ON dividends(symbol, trade_date);
-
-CREATE TABLE IF NOT EXISTS symbol_types (
-    symbol           TEXT PRIMARY KEY,
-    allocation_type  TEXT NOT NULL CHECK(allocation_type IN ('Dividend', 'Growth')),
-    updated_at       TEXT NOT NULL DEFAULT (datetime('now'))
-);
-
-CREATE TABLE IF NOT EXISTS rebalance_plans (
-    id            INTEGER PRIMARY KEY AUTOINCREMENT,
-    amount        REAL NOT NULL DEFAULT 0,
-    created_at    TEXT NOT NULL DEFAULT (datetime('now')),
-    completed_at  TEXT
-);
-
-CREATE TABLE IF NOT EXISTS rebalance_plan_items (
-    plan_id  INTEGER NOT NULL REFERENCES rebalance_plans(id),
-    symbol   TEXT NOT NULL,
-    pct      REAL NOT NULL DEFAULT 0,
-    bought   INTEGER NOT NULL DEFAULT 0,
-    PRIMARY KEY (plan_id, symbol)
-);
-"""
+# A list of individual statements, not one big executescript() string -- libsql's
+# Python client isn't confirmed to support executescript(), so init_db() below
+# loops and .execute()s each one instead, which is guaranteed to work.
+SCHEMA_STATEMENTS = [
+    """
+    CREATE TABLE IF NOT EXISTS trades (
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        trade_date    TEXT NOT NULL,
+        entry_type    TEXT NOT NULL DEFAULT 'Trade Entry',
+        side          TEXT,
+        symbol        TEXT NOT NULL,
+        description   TEXT,
+        quantity      REAL NOT NULL,
+        price         REAL,
+        amount        REAL,
+        commission    REAL,
+        vat           REAL,
+        reserved_fee  REAL,
+        fee_rebate    REAL,
+        order_id      TEXT,
+        order_type    TEXT,
+        source        TEXT NOT NULL DEFAULT 'manual',
+        reconciled_month TEXT,
+        notes         TEXT,
+        created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_trades_symbol_date ON trades(symbol, trade_date)",
+    """
+    CREATE TABLE IF NOT EXISTS dividends (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        trade_date  TEXT NOT NULL,
+        symbol      TEXT,
+        entry_type  TEXT NOT NULL CHECK(entry_type IN ('Dividend','Interest','Capital Distribution')),
+        net_amount  REAL NOT NULL,
+        source      TEXT NOT NULL DEFAULT 'manual',
+        reconciled_month TEXT,
+        notes       TEXT,
+        created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_dividends_symbol_date ON dividends(symbol, trade_date)",
+    """
+    CREATE TABLE IF NOT EXISTS symbol_types (
+        symbol           TEXT PRIMARY KEY,
+        allocation_type  TEXT NOT NULL CHECK(allocation_type IN ('Dividend', 'Growth')),
+        updated_at       TEXT NOT NULL DEFAULT (datetime('now'))
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS rebalance_plans (
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        amount        REAL NOT NULL DEFAULT 0,
+        created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+        completed_at  TEXT
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS rebalance_plan_items (
+        plan_id  INTEGER NOT NULL REFERENCES rebalance_plans(id),
+        symbol   TEXT NOT NULL,
+        pct      REAL NOT NULL DEFAULT 0,
+        bought   INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (plan_id, symbol)
+    )
+    """,
+]
 
 TRADE_COLUMNS = [
     "trade_date", "entry_type", "side", "symbol", "description", "quantity", "price",
@@ -79,20 +93,35 @@ DIVIDEND_COLUMNS = ["trade_date", "symbol", "entry_type", "net_amount", "source"
 
 
 def get_connection():
-    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-    return sqlite3.connect(DB_PATH)
+    return libsql.connect(
+        database=os.environ["TURSO_DATABASE_URL"],
+        auth_token=os.environ["TURSO_AUTH_TOKEN"],
+    )
 
 
 def _with_connection(conn):
-    """Returns (conn, should_close). Opens the real DB file if none was injected."""
+    """Returns (conn, should_close). Opens the real Turso connection if none was injected."""
     if conn is not None:
         return conn, False
     return get_connection(), True
 
 
+def _read_sql(c, query):
+    """Manual fetch instead of pd.read_sql_query(query, c) -- pandas only special-cases
+    a stdlib sqlite3.Connection or a SQLAlchemy connectable, and a libsql.Connection is
+    neither, so this stays portable across both the real Turso connection and the
+    in-memory sqlite3 connections tests inject."""
+    import pandas as pd
+
+    cur = c.execute(query)
+    columns = [d[0] for d in cur.description]
+    return pd.DataFrame(cur.fetchall(), columns=columns)
+
+
 def init_db(conn=None):
     c, should_close = _with_connection(conn)
-    c.executescript(SCHEMA)
+    for statement in SCHEMA_STATEMENTS:
+        c.execute(statement)
     c.commit()
     if should_close:
         c.close()
@@ -206,7 +235,7 @@ def fetch_trades(conn=None):
     import pandas as pd
 
     c, should_close = _with_connection(conn)
-    df = pd.read_sql_query("SELECT * FROM trades ORDER BY trade_date", c)
+    df = _read_sql(c, "SELECT * FROM trades ORDER BY trade_date")
     if should_close:
         c.close()
     df["trade_date"] = pd.to_datetime(df["trade_date"])
@@ -227,7 +256,7 @@ def fetch_dividends(conn=None):
     import pandas as pd
 
     c, should_close = _with_connection(conn)
-    df = pd.read_sql_query("SELECT * FROM dividends ORDER BY trade_date", c)
+    df = _read_sql(c, "SELECT * FROM dividends ORDER BY trade_date")
     if should_close:
         c.close()
     df["trade_date"] = pd.to_datetime(df["trade_date"])
@@ -281,7 +310,7 @@ def fetch_symbol_types(conn=None):
     all_symbols = pd.DataFrame({"Symbol": pd.Series(sorted(trades["Symbol"].dropna().unique()), dtype="object")})
 
     c, should_close = _with_connection(conn)
-    types = pd.read_sql_query("SELECT symbol, allocation_type FROM symbol_types", c)
+    types = _read_sql(c, "SELECT symbol, allocation_type FROM symbol_types")
     if should_close:
         c.close()
     types = types.rename(columns={"symbol": "Symbol", "allocation_type": "Allocation Type"})
