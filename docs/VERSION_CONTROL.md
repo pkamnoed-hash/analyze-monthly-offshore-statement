@@ -27,10 +27,10 @@ Version planning
 	○ 2.2 Monitor connect market price | retrieve these data symbol description, 90 day trend, adding asset class, portfolio group, beta, weight %
   ○ 2.3 system backup page (backup db + official statement xlsx)
   ○ 2.4 rebalance and label version in the web application
-  ○ 2.5 simplify UXUI for usage (e.g., adding, updating, etc)
-- 3 - advance "dashhboard, tools v2, intetration" 
-- 4 - cosmetic
-- 5 - tax management
+- 3 - hosting preparation and improvement (deploy to Hugging Face Spaces, make source code cloud-compatible)
+- 4 - advance "dashhboard, tools v2, intetration"
+- 5 - cosmetic
+- 6 - tax management
 
 ## Merge strategy
 
