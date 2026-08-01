@@ -72,15 +72,18 @@ contexts, rather than hand-editing values each time.
 
 ### Which environment am I on?
 
-The sidebar shows **"🟢 Environment: PROD"** or **"🟡 Environment: DEV"**,
-right under the version label -- driven by an `APP_ENV` key in
-`secrets.toml` (`"dev"` or `"prod"`; defaults to `"prod"` if the key is
-missing, so older secrets files without it still show the safe default).
-This is a deliberately explicit, manually-set flag rather than something
-inferred from the Turso URL -- toggle it in the same edit as
-`TURSO_DATABASE_URL`/`TURSO_AUTH_TOKEN` above, every time you switch.
-Check this label before doing anything on real data, especially after
-switching back and forth a few times in one session.
+The sidebar shows a colored **"DEV environment"** (green) or **"PROD
+environment"** (red) badge, right under the version label -- driven by an
+`APP_ENV` key in `secrets.toml` (`"dev"` or `"prod"`; defaults to `"prod"`
+if the key is missing, so older secrets files without it still show the
+safe default). Rendered as a solid-color badge rather than emoji circles
+-- an earlier version used 🟢/🟡, but they didn't render distinctly enough
+to trust at a glance, which defeated the point. This is a deliberately
+explicit, manually-set flag rather than something inferred from the Turso
+URL -- toggle it in the same edit as `TURSO_DATABASE_URL`/
+`TURSO_AUTH_TOKEN` above, every time you switch. Check this label before
+doing anything on real data, especially after switching back and forth a
+few times in one session.
 
 ## Schema changes
 
@@ -120,3 +123,53 @@ is limited -- those need the "create a new table with the right shape,
 copy data across, drop the old one, rename" dance, which is meaningfully
 riskier than adding a column. Plan for that explicitly if it comes up,
 rather than assuming the simple pattern above covers it.
+
+## Practice lab: try it yourself
+
+Reading how this works isn't the same as knowing you can actually do it
+under pressure. These five scenarios were run for real once (not just
+theorized) -- each has a concrete checkpoint proving it worked, and
+scenarios 2-5 all build on the `dev` branch scenario 1 creates, keeping
+the whole exercise off production data throughout.
+
+**1. Create `dev` and confirm isolation.** Follow "Safe testing
+environment" above to create `dev` and point your local app at it.
+Checkpoint: log one obviously-fake trade (e.g. symbol `TESTXYZ`) in the
+app, then check the Turso dashboard's **production** database (not
+`dev`) and confirm it's *not* there.
+
+**2. Practice a schema change.** Still on `dev`, add the
+`_add_column_if_missing()` helper from "Schema changes" above to
+`core/db.py`, call it once with a throwaway test column, and restart the
+app. Checkpoint: confirm the column exists on `dev` (Turso's Edit Data
+tab), then restart the app a *second* time with nothing changed and
+confirm it doesn't error -- that's what proves the pattern is idempotent,
+not just working once. Afterwards, revert the code change (`git checkout
+-- core/db.py` if uncommitted) -- this was practice, not a real feature.
+The column itself stays on `dev` harmlessly; deal with it in scenario 5.
+
+**3. Practice a point-in-time rollback.** Note the time, make an
+obviously-wrong change on `dev` (delete `TESTXYZ`, or mangle its price),
+wait a minute or two, then in Turso: database's "..." menu -> **Create
+Branch** -> **From Point-in-Time** -> pick a timestamp from before the
+change -> name it `dev-restored`. (PITR in Turso's UI works this way --
+creating a new branch from a past moment -- not an in-place restore
+button.) Checkpoint: open `dev-restored`'s Edit Data and confirm
+`TESTXYZ` is back.
+
+**4. Practice manual export + restore.** On `dev`, use "Export Database"
+/ "Download SQLite File" to save a local snapshot. Add a second,
+different throwaway trade to `dev` afterward. Create a **new, separate**
+Turso database (Create Database -> Upload SQLite File, not a branch) and
+upload the snapshot into it. Checkpoint: the new database has the first
+throwaway trade but not the second one added afterward -- proving the
+export is a frozen point-in-time copy, not a live link. Delete this
+scratch database once confirmed.
+
+**5. Wrap up.** Restore `secrets.toml` from your `secrets.prod.toml.bak`
+copy (or manually restore the `TURSO_*` values and set `APP_ENV =
+"prod"`), restart the app, and confirm the sidebar shows the red PROD
+badge with none of the throwaway test trades visible. Decide whether to
+keep `dev` around (it's now diverged from production after all this
+practice -- resync "From Now" before next real use) or delete it and
+create a fresh one whenever it's actually needed.
