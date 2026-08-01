@@ -51,6 +51,17 @@ Version planning
 - A new version's branch is cut from the *updated* `main`, after the prior
   version is merged in -- not stacked on top of the previous feature
   branch.
+- **Tag the merge commit** (`git tag -a vN -m "..."`, matching the
+  version's CHANGELOG.md headline, then `git push origin vN`) right after
+  merging into `main`. Not optional bookkeeping -- `core/version.py`'s
+  sidebar/backup-filename label only reads the branch name while you're
+  *on* a version branch (e.g. `v4-...` -> "v4"); once merged, `main`'s
+  branch name doesn't match that pattern, so it falls back to
+  `git describe --tags`, which walks back to the nearest tag. Tagging
+  stopped after v2.2 for several versions (v2.3 through v3.1 were never
+  tagged) and nobody noticed until `main` was showing "v2.2-22-gXXXXXXX"
+  instead of "v4" -- retroactively fixed by tagging each missed merge
+  commit, but don't let it happen again.
 
 ## Commit messages
 
