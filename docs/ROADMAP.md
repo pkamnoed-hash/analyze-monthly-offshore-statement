@@ -1218,6 +1218,96 @@ during the original hosting discussion as worth reconsidering someday,
 not addressed as part of this migration; `docs/DEPLOYMENT.md`'s "Auth
 model" note carries this forward.
 
+## V3.1: Testing Environment
+
+### Context
+
+Follow-up to V3: once real data lived in Turso, two gaps became obvious
+in practice. First, local dev broke (`ERR_CONNECTION_REFUSED`) with no
+clear cause -- root-caused to a Turso `dev` branch's connection details
+having a brief propagation delay right after creation, not a code bug
+(confirmed Turso databases don't sleep/cold-start in general; this was
+specific to a freshly-created branch). Second, there was no way to build
+or test v4 features (including schema changes) without risking
+production data, and no visible way to tell which environment a running
+instance was even pointed at.
+
+### Design decisions
+
+**An explicit `APP_ENV` secret, not URL-sniffing.** Considered inferring
+dev-vs-prod from the `TURSO_DATABASE_URL`'s hostname pattern, rejected --
+fragile (depends on an unconfirmed Turso branch-naming convention) versus
+an explicit flag the user sets deliberately in the same edit as the
+Turso credentials themselves. Defaults to `"prod"` if unset, so existing
+`secrets.toml` files stay on the safe default without changes.
+
+**Solid-color badge, not emoji.** First shipped as 🟢/🟡 circles;
+user-reported they weren't visually distinguishable in practice (a real
+example of "works on my rendering, not on theirs"). Replaced with an
+HTML/CSS badge (green background = dev, red = prod) for guaranteed
+contrast regardless of font/platform emoji rendering.
+
+**Turso database branching as the safe-testing mechanism**, not a second
+Streamlit Community Cloud deployment. A true parallel "staging" site was
+considered and rejected -- the free tier only allows one private app, and
+this app must stay private (real financial data). Branching is free on
+every plan, instant (copy-on-write), and pairs with a local secrets swap
+to fully sandbox both compute and data.
+
+**PITR is branch-creation-based in Turso's actual UI**, not an in-place
+restore -- corrected mid-session once the real "Create Branch -> From
+Point-in-Time" flow was seen; the original assumption (a restore button)
+was wrong.
+
+### Implementation
+
+**`dashboard_app.py`**: reads `st.secrets.get("APP_ENV", "prod")`,
+renders the color badge in the sidebar below the version label.
+
+**`docs/BACKUP_AND_TESTING.md`** (new): backup (Turso PITR + manual
+export), rollback (PITR restore vs. re-upload), the safe-testing-branch
+workflow (create `dev`, swap local secrets, toggle `APP_ENV`), the
+schema-change pattern (`_add_column_if_missing()`, since `init_db()` only
+handled `CREATE TABLE IF NOT EXISTS`, not `ALTER TABLE`, before this), and
+a "Practice lab" section with five hands-on scenarios.
+
+**No `core/db.py` changes shipped** -- the `_add_column_if_missing()`
+helper was added, tested against the `dev` branch, and deliberately
+reverted (`git checkout -- core/db.py`) once its practice checkpoints
+passed, since v3.1's scope was the *pattern* and the *testing workflow*,
+not a real schema change. It's documented in `docs/BACKUP_AND_TESTING.md`
+ready to reuse whenever v4 actually needs it.
+
+### Testing and verification
+
+217/217 tests passing throughout (unaffected -- none of this touches
+`core/` logic).
+
+All five practice-lab scenarios run for real by the user, each with its
+own confirmed checkpoint: **(1)** a throwaway trade logged on `dev`
+confirmed absent from production; **(2)** a test column added via the
+idempotent helper, confirmed present after one restart and non-erroring
+after a second; **(3)** a deliberate mistake on `dev` recovered via a
+`dev-restored` point-in-time branch; **(4)** a downloaded snapshot
+restored into a fresh scratch database, confirmed to hold only the
+pre-snapshot state; **(5)** local secrets restored to production,
+confirmed via the sidebar badge and absence of any test data.
+
+### Considered and explicitly deferred
+
+**In-app pages for deploy/rollback/backup management** -- discussed and
+deliberately not built. Deploy is inherently external (git push -> host
+auto-redeploys) and doesn't fit inside the app being redeployed. Rollback
+would require embedding a Turso *organization*-level API token (more
+powerful than the per-database tokens used today) for a personal app that
+already protects real financial data with just a single password --
+judged not worth the added attack surface, and the manual Turso-dashboard
+process has a real safety property (a separate login as a speed bump
+against an accidental one-click rollback). Backup is the one plausible
+future candidate -- repointing the existing (now-decorative) System
+Backup page at Turso's export API -- but low priority, since PITR already
+covers the last 24h automatically.
+
 ## Deferred / future
 
 - **Restore from a backup** -- see V2.3's "Considered and explicitly

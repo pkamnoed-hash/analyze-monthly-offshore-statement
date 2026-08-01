@@ -59,3 +59,19 @@ pg.run()
 # pg.run() executing, so anything appended to the sidebar after that call lands below it,
 # at the bottom of the left menu.
 st.sidebar.caption(f"Version {current_app_version()}")
+
+# APP_ENV is an explicit, manually-set secret (not inferred from the Turso URL --
+# safer to require stating it outright than to guess from a hostname pattern) --
+# defaults to "prod" so existing secrets.toml files without this key still show the
+# correct, safe default. Toggle this alongside TURSO_DATABASE_URL/TURSO_AUTH_TOKEN
+# when switching environments (see docs/BACKUP_AND_TESTING.md).
+# Solid background colors, not emoji -- emoji circle colors (🟢/🟡) render too
+# similarly to reliably tell apart at a glance, which defeats the point of this label.
+_app_env = st.secrets.get("APP_ENV", "prod")
+_env_color = "#2e7d32" if _app_env == "dev" else "#c62828"  # green=dev (safe), red=prod (caution)
+_env_label = "DEV" if _app_env == "dev" else "PROD"
+st.sidebar.markdown(
+    f"<span style='background-color:{_env_color};color:white;padding:2px 10px;"
+    f"border-radius:4px;font-size:0.85em;font-weight:600;'>{_env_label} environment</span>",
+    unsafe_allow_html=True,
+)
