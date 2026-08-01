@@ -1,5 +1,34 @@
 # Changelog
 
+## Testing environment (v3.1): know which environment you're on, and a safe way to test v4
+
+Fixes the gap left right after going live: local dev could break with no
+clear cause, there was no way to test risky changes (schema changes
+especially) without touching real data, and no way to tell at a glance
+whether you were looking at production or a test environment.
+
+- **Sidebar environment badge**: shows "DEV environment" (green) or "PROD
+  environment" (red), driven by a new `APP_ENV` secret (defaults to
+  "prod"). Originally shipped as 🟢/🟡 emoji circles; replaced with a
+  solid-color badge after you reported they weren't visually
+  distinguishable.
+- **`docs/BACKUP_AND_TESTING.md`** (new): how Turso's automatic backup
+  (Point-in-Time Recovery) and manual export work, how to roll back, how
+  to safely test using a Turso database branch instead of production, and
+  the pattern for adding a column to an existing table safely (`init_db()`
+  previously had no way to alter existing tables, only create new ones).
+- **Practice lab**: five hands-on scenarios, each actually run once with
+  a real, confirmed checkpoint -- dev-branch isolation, a schema-change
+  rehearsal, a point-in-time rollback recovery, a manual export/restore
+  round-trip, and restoring back to production.
+- Root-caused the local dev crash along the way: a freshly-created Turso
+  branch's connection endpoint had a brief propagation delay -- not a
+  code bug, and not a general Turso reliability issue (confirmed Turso
+  databases don't sleep or cold-start).
+- No user-facing feature changes to the app itself -- this is entirely
+  about safely developing what comes next.
+- Full test suite: 217/217 passing.
+
 ## Hosting migration (v3): now live on the web, with data that actually survives a restart
 
 The app is no longer local-only -- it's deployed to **Streamlit Community

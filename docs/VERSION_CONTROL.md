@@ -15,6 +15,7 @@ not an aspirational process, a record of what's been done.
 | `v2.3-system-backup` | V2.3 feature branch (System Backup page -- manual, on-demand backups of `data/portfolio.db` and the official Statement xlsx). Cut from `main` after v2.2 was merged in. Pulled forward ahead of Rebalance/Reallocate, which shifts to v2.4 (see "My version quick note" below) -- repurposed from an earlier `v2.3.1-rebalance-reallocate` branch that had no real code on it yet. Merged into `main`. |
 | `v2.4-rebalance-reallocate` | V2.4 feature branch (Rebalance / Reallocate Investment -- decide where new cash goes across Dividend-classified holdings). Cut from `main` after v2.3 was merged in. Rebuilt from scratch, per the user's explicit choice -- none of the earlier discarded `v2.3-rebalance-reallocate`/`v2.3.1-rebalance-reallocate` design was reused; wireframe and flow were re-derived through fresh discussion. Merged into `main`. |
 | `v3-hosting-prep` | V3 feature branch (hosting preparation -- deploy to the cloud, keep it free, make writes actually persist). Cut from `main` after v2.4 was merged in. Explored Hugging Face Spaces first (scored highest in an initial comparison) but reversed that decision mid-build once its Docker SDK turned out to require a paid PRO plan; landed on Streamlit Community Cloud (compute) + Turso (persistence) instead, decoupling the two since no single free host offered both. Live at `myinvestment27.streamlit.app`, verified working end-to-end including write persistence across a restart. Merged into `main`. |
+| `v3.1-testing-environment` | V3.1 feature branch (understand and prepare a safe testing environment now that real data lives in Turso). Cut from `main` after V3 was merged in. Adds a sidebar dev/prod environment badge (`APP_ENV` secret), `docs/BACKUP_AND_TESTING.md` (backup/rollback/safe-testing/schema-change reference), and a 5-scenario hands-on practice lab, each scenario actually run once with a confirmed checkpoint. Root-caused an early local-dev connection failure to a freshly-created Turso branch's brief propagation delay, not a code bug. Merged into `main`. |
 
 Naming convention: `vN-short-description` (or `vN.M-short-description` for a
 smaller, additive feature that doesn't warrant a new whole version number),
@@ -29,6 +30,7 @@ Version planning
   ○ 2.3 system backup page (backup db + official statement xlsx)
   ○ 2.4 rebalance and label version in the web application
 - 3 - hosting preparation and improvement (deploy to Streamlit Community Cloud + Turso, make source code cloud-compatible -- Hugging Face Spaces was the original target, reversed once its Docker SDK went paid-only)
+	○ 3.1 understand and prepare testing environment (dev/prod environment badge, Turso branching for safe testing, schema-change pattern, hands-on practice lab)
 - 4 - advance "dashhboard, tools v2, intetration"
 - 5 - cosmetic
 - 6 - tax management
@@ -67,10 +69,12 @@ tip commit was already an ancestor of `main`). Feature branches that are
 still useful as a labeled reference point (`V1-record-trade-and-view`,
 `v2-Reconciliation`) are kept rather than deleted by default.
 
-## Current status (as of `v3-hosting-prep`)
+## Current status (as of `v3.1-testing-environment`)
 
-`main` has V1, V2, V2.1, V2.2, V2.3, V2.4, and V3 merged in
-(`v3-hosting-prep` merged via `git merge --no-ff`, 217/217 passing on
-`main` post-merge). The app is live at `myinvestment27.streamlit.app`,
-verified working end-to-end. Next up per "My version quick note" above:
-v4, advance dashboard/tools v2/integration.
+`main` has V1, V2, V2.1, V2.2, V2.3, V2.4, V3, and V3.1 merged in
+(`v3.1-testing-environment` merged via `git merge --no-ff`, 217/217
+passing on `main` post-merge). The app is live at
+`myinvestment27.streamlit.app`, verified working end-to-end, with a
+documented safe-testing workflow (Turso branching) now in place for v4.
+Next up per "My version quick note" above: v4, advance dashboard/tools
+v2/integration.
