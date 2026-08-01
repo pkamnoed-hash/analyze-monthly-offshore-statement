@@ -31,6 +31,28 @@ def _frequency_label(payout_count: int) -> str:
     return _FREQUENCY_LABELS.get(payout_count, f"Irregular ({payout_count}/yr)")
 
 
+def fetch_usd_thb_rate(*, yf_module=None) -> float | None:
+    """Live USD -> THB quote for the Dashboard's THB reference figure.
+    yfinance quotes FX pairs (THB=X) through the same Ticker/.history()
+    call fetch_stock_profile already uses for equities/ETFs -- no new API
+    or dependency needed. A 5-calendar-day lookback (not just today) covers
+    weekends/holidays where the most recent FX session isn't literally
+    today. Returns None on any failure (network error, empty history) so
+    the caller can fall back to a hardcoded default -- this is a "nice to
+    have" pre-fill, not something the page should ever block on."""
+    yf_module = yf_module or _yfinance
+    today = pd.Timestamp.today().normalize()
+    start = today - pd.Timedelta(days=5)
+    end = today + pd.Timedelta(days=1)
+    try:
+        history = yf_module.Ticker("THB=X").history(start=start, end=end)
+        if history is None or history.empty:
+            return None
+        return float(history["Close"].iloc[-1])
+    except Exception:
+        return None
+
+
 def fetch_stock_profile(symbols: list[str], *, yf_module=None) -> pd.DataFrame:
     """Batch-fetches, per symbol, exactly what the Monitor Stocks page's
     first pass needs: Description (longName/shortName), Sector, Industry

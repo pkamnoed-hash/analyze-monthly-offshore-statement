@@ -31,19 +31,25 @@ def _cached_fetch_stock_profile(symbols: list[str]) -> tuple[pd.DataFrame, datet
 
 
 st.title("Monitor Stocks")
-st.caption(
-    "Live market data for every symbol you currently hold, filterable by Category "
-    "(Dividend/Growth/Others). Weight % is each symbol's share of your whole portfolio; "
-    "Category Weight % is its share of just its own Dividend/Growth/Others group. "
-    "Cost per Share and Total Cost are computed live from your full trade history "
-    "(FIFO lot accounting) -- a different, live number from Dashboard's snapshot-based "
-    "Cost Price. Unrealized % follows that same live FIFO cost basis. Expected Div per Year/"
-    "Month are Total Market Value x % Div per Year, net of the 15% Thai withholding tax "
-    "(matching Dashboard's own Dividends KPI convention) -- the actual cash expected from "
-    "your position size, not a gross per-share rate; % Div per Year itself stays gross, "
-    "computed from actual trailing-12-month payouts (not yfinance's often-blank-for-ETFs "
-    "dividendRate). Prices are cached for 5 minutes."
-)
+# Collapsed by default -- was a full-width st.caption() paragraph right under the title
+# (pushed all the actual data below the fold). Same pattern as Dashboard's "Since Last
+# Statement" expander: keeps the page opening clean while keeping the term definitions
+# discoverable right near where Category Weight %/Cost per Share/etc. first appear below,
+# rather than requiring a scroll to the bottom of the page to find them.
+with st.expander("What do these numbers mean?"):
+    st.caption(
+        "Live market data for every symbol you currently hold, filterable by Category "
+        "(Dividend/Growth/Others). Weight % is each symbol's share of your whole portfolio; "
+        "Category Weight % is its share of just its own Dividend/Growth/Others group. "
+        "Cost per Share and Total Cost are computed live from your full trade history "
+        "(FIFO lot accounting) -- a different, live number from Dashboard's snapshot-based "
+        "Cost Price. Unrealized % follows that same live FIFO cost basis. Expected Div per Year/"
+        "Month are Total Market Value x % Div per Year, net of the 15% Thai withholding tax "
+        "(matching Dashboard's own Dividends KPI convention) -- the actual cash expected from "
+        "your position size, not a gross per-share rate; % Div per Year itself stays gross, "
+        "computed from actual trailing-12-month payouts (not yfinance's often-blank-for-ETFs "
+        "dividendRate). Prices are cached for 5 minutes."
+    )
 
 db_trades = db.fetch_trades()
 holdings = calculations.compute_current_positions(db_trades)
@@ -167,42 +173,8 @@ def _category_summary(holdings_df: pd.DataFrame) -> pd.DataFrame:
     return summary
 
 
-st.subheader("Category Summary")
-category_summary = _category_summary(holdings)
-kpi_cols = st.columns(4)
-for kpi_col, (_, row) in zip(kpi_cols, category_summary.iterrows()):
-    with kpi_col:
-        st.markdown(f"**{row['Category']}**")
-        st.metric("Holdings", int(row["Holdings"]))
-        st.metric("Total Cost", f"${row['Total Cost']:,.2f}")
-        st.metric(
-            "Total Market Value", f"${row['Total Market Value']:,.2f}",
-            delta=f"{row['% of Portfolio']:.1f}% of portfolio", delta_color="off",
-        )
-        if pd.isna(row["Unrealized %"]):
-            st.metric("Unrealized %", "N/A")
-        else:
-            st.metric(
-                "Unrealized %", f"{row['Unrealized %']:.2f}%",
-                delta=f"${row['Unrealized']:,.2f}",
-            )
-        st.metric("Total Div/Yr", f"${row['Total Div/Yr']:,.2f}", help=DIVIDEND_TAX_HELP)
-        st.metric("Total Div/Mth", f"${row['Total Div/Mth']:,.2f}", help=DIVIDEND_TAX_HELP)
-        if pd.isna(row["Expected Div Return %"]):
-            st.metric("Expected Div Return %", "N/A")
-        else:
-            st.metric(
-                "Expected Div Return %", f"{row['Expected Div Return %']:.2f}%",
-                help=DIVIDEND_TAX_HELP,
-            )
-
-unresolved_symbols = holdings[holdings["Position Value"].isna()]["Symbol"].tolist()
-if unresolved_symbols:
-    st.caption(
-        f"{len(unresolved_symbols)} symbol(s) unresolved ({', '.join(unresolved_symbols)}) -- excluded "
-        "from Total Market Value, Unrealized %, and Total Div/Yr above; Total Cost still includes them."
-    )
-
+# Moved above Category Summary (was below it) -- type_filter now also gates which single
+# category's KPIs render below, not just the pie charts/table further down the page.
 type_filter = st.radio(
     "Filter by type", ["All", "Others", "Dividend", "Growth"], horizontal=True, label_visibility="collapsed",
 )
@@ -210,6 +182,50 @@ type_filter = st.radio(
 view = holdings.copy()
 if type_filter != "All":
     view = view[view["Category"] == type_filter]
+
+st.subheader(f"Category Summary — {type_filter}")
+category_summary = _category_summary(holdings)
+row = category_summary[category_summary["Category"] == type_filter].iloc[0]
+
+st.markdown("**Holdings & Valuation**")
+v1, v2, v3, v4 = st.columns(4)
+v1.metric("Holdings", int(row["Holdings"]))
+v2.metric("Total Cost", f"${row['Total Cost']:,.2f}")
+v3.metric(
+    "Total Market Value", f"${row['Total Market Value']:,.2f}",
+    delta=f"{row['% of Portfolio']:.1f}% of portfolio", delta_color="off",
+)
+if pd.isna(row["Unrealized %"]):
+    v4.metric("Unrealized %", "N/A")
+else:
+    v4.metric(
+        "Unrealized %", f"{row['Unrealized %']:.2f}%",
+        # delta_color="off" -- this is an informational $ amount, not a change from a prior
+        # value, so it shouldn't carry a directional arrow. Also sidesteps a Streamlit quirk
+        # where a delta string like "$-1,113.09" (minus sign after the $) isn't recognized as
+        # negative, so the default "normal" mode rendered a misleading green up arrow on a loss.
+        delta=f"${row['Unrealized']:,.2f}", delta_color="off",
+    )
+st.divider()
+
+st.markdown("**Dividend Projections**")
+d1, d2, d3 = st.columns(3)
+d1.metric("Total Div/Yr", f"${row['Total Div/Yr']:,.2f}", help=DIVIDEND_TAX_HELP)
+d2.metric("Total Div/Mth", f"${row['Total Div/Mth']:,.2f}", help=DIVIDEND_TAX_HELP)
+if pd.isna(row["Expected Div Return %"]):
+    d3.metric("Expected Div Return %", "N/A")
+else:
+    d3.metric(
+        "Expected Div Return %", f"{row['Expected Div Return %']:.2f}%",
+        help=DIVIDEND_TAX_HELP,
+    )
+
+unresolved_symbols = view[view["Position Value"].isna()]["Symbol"].tolist()
+if unresolved_symbols:
+    st.caption(
+        f"{len(unresolved_symbols)} symbol(s) unresolved ({', '.join(unresolved_symbols)}) -- excluded "
+        "from Total Market Value, Unrealized %, and Total Div/Yr above; Total Cost still includes them."
+    )
 
 def _grouped_pie(source_df, group_col, title, top_n=10):
     """Top N groups by summed Weight % + a grouped "Other" slice -- otherwise up to 52

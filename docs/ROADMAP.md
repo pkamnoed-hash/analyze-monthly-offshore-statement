@@ -1308,6 +1308,101 @@ future candidate -- repointing the existing (now-decorative) System
 Backup page at Turso's export API -- but low priority, since PITR already
 covers the last 24h automatically.
 
+## V4: Dashboard & Monitor Stocks Grouping, Live FX Default
+
+### Context
+
+First v4 batch under the "advance dashboard, tools v2, integration"
+theme (see `docs/VERSION_CONTROL.md`'s version quick note). Cut from
+`main` after V3.1 was merged in, on `v4-dashboard-tools-integration`.
+Four independent, user-driven refinements to the Dashboard and Monitor
+Stocks pages, worked out iteratively against a mockup and live
+screenshots rather than a single upfront design.
+
+### Design decisions
+
+**English section headers**, matching the app's existing convention, for
+the Dashboard KPI grouping (translated from the user's Thai-labeled
+mockup). Total Fees was moved into the Portfolio Overview row rather
+than kept as its own single-metric section, after the user flagged a
+single-card row looked sparse next to the others.
+
+**Single-category display on Monitor Stocks**, not four side by side --
+the existing `type_filter` radio previously only affected the pie
+charts/table further down the page, not the Category Summary cards
+above it. Moved the radio above the summary so it gates both.
+
+**yfinance reused for the USD/THB default**, not a new FX API -- the app
+already depends on it and already has the exact "quote a ticker, cache
+it, degrade gracefully" pattern in `core/market_data.py`
+(`fetch_stock_profile`); yfinance quotes FX pairs (`THB=X`) through the
+same `Ticker`/`.history()` call.
+
+**The Realized P/L "None" was a real bug, not a display quirk** -- traced
+to `compute_realized_pl()`/`compute_fifo_realized_pl()` defaulting to
+`dtype=object` (not `float64`) whenever the result had zero rows (e.g.
+only buys logged, nothing sold yet). Fixed at the source rather than
+patched around in the display layer.
+
+### Implementation
+
+**`app_pages/dashboard.py`**: KPI cards regrouped into 3 labeled
+sections -- Portfolio Overview (Portfolio Value, Net Deposits, Total
+Fees), Returns & Performance (Investment Gain/Loss, ROI, Realized P/L,
+Unrealized P/L), Income & Dividends (Dividends, Avg. Monthly Dividend,
+Interest) -- each with `st.subheader()` + `st.divider()`. The `USD ->
+THB rate` field now defaults from a cached (1hr TTL) live quote instead
+of a hardcoded `33.0`, falling back to that same default if the fetch
+fails; still fully editable.
+
+**`app_pages/monitor_stocks.py`**: `type_filter` radio moved above
+Category Summary, now shows one category's numbers at a time instead of
+All/Others/Dividend/Growth side by side, regrouped into two rows
+(Holdings & Valuation: Holdings/Total Cost/Total Market Value/Unrealized
+%; Dividend Projections: Total Div/Yr/Total Div/Mth/Expected Div Return
+%). The page-top explanation is now a collapsed "What do these numbers
+mean?" expander instead of a permanent paragraph under the title. Added
+`delta_color="off"` to the Unrealized % metric, fixing a misleading
+green up-arrow on a negative delta (Streamlit's sign detection missed
+the `-` landing after the `$` prefix in the delta string).
+
+**`core/market_data.py`**: new `fetch_usd_thb_rate()`, same
+`Ticker`/`.history()` shape as `fetch_stock_profile`, quoting `THB=X`.
+
+**`core/calculations.py`**: `compute_realized_pl()` and
+`compute_fifo_realized_pl()` now explicitly cast `Realized P/L` to
+`float64`. Previously, `pd.DataFrame([], columns=[...])` silently
+defaulted every column to `dtype=object` whenever there were zero
+realized rows -- that object-dtype `NaN` survived into `dashboard.py`'s
+"Since Last Statement" merge and rendered as the literal text "None" in
+a `NumberColumn` cell instead of blank.
+
+**No `core/db.py` changes** -- confirmed via `git diff`, this batch is
+entirely app-logic/UI, no schema or column changes, no new dependency,
+no new secret.
+
+### Testing and verification
+
+220/220 tests passing (217 + 3 new: `fetch_usd_thb_rate` happy
+path/network failure/empty history in `tests/test_market_data.py`, plus
+2 dtype regression assertions added to the existing "no sells" tests in
+`tests/test_calculations.py`). All UI changes visually confirmed by the
+user via live screenshots through several rounds of iterative
+refinement (initial 4-section Dashboard layout -> merged Costs into the
+Portfolio Overview row; initial 3-group Monitor Stocks layout -> merged
+Unrealized Performance into the first row; arrow-removal confirmed).
+
+### Considered and explicitly deferred
+
+**A dedicated FX API** (exchangerate.host, Frankfurter, etc.) for the
+USD/THB rate -- rejected in favor of reusing yfinance, which was already
+a dependency and already wired for exactly this shape of problem.
+
+**Whether v4 is "done" here** -- the version quick note's "advance
+dashboard, tools v2, integration" theme is broad, and this batch only
+touched the Dashboard and Monitor Stocks pages. Left open for a later
+decision (a v4.x continuation, or moving on to v5).
+
 ## Deferred / future
 
 - **Restore from a backup** -- see V2.3's "Considered and explicitly

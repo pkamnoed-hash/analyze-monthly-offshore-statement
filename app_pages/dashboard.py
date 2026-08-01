@@ -9,6 +9,9 @@ from core import db
 from core.calculations import blended_dividends, blended_realized_pl
 from core.calculations import compute_realized_pl as _compute_realized_pl
 from core.calculations import compute_roi
+from core.market_data import fetch_usd_thb_rate
+
+DEFAULT_THB_RATE = 33.0
 
 DATA_FILE = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "Offshore_Statements_2023-01_to_2026-06.xlsx"
@@ -38,6 +41,14 @@ def load_data(path):
 @st.cache_data
 def compute_realized_pl(transactions):
     return _compute_realized_pl(transactions)
+
+
+# 1-hour TTL, longer than Monitor Stocks' 5-minute one -- this is just a rough reference
+# figure (see the number_input's own help text below), not something that needs
+# near-real-time freshness, and it avoids an extra network call on every Dashboard load.
+@st.cache_data(ttl=3600)
+def _cached_usd_thb_rate():
+    return fetch_usd_thb_rate()
 
 
 def for_display(df):
@@ -136,10 +147,12 @@ start = pd.Timestamp(start.year, start.month, 1)
 end = pd.Timestamp(end.year, end.month, 1)
 
 st.sidebar.header("Display")
+_live_thb_rate = _cached_usd_thb_rate()
 thb_rate = st.sidebar.number_input(
-    "USD → THB rate", min_value=0.0, value=33.0, step=0.1,
-    help="Adjust to today's rate. Used only for the small THB reference shown under each dollar figure "
-         "below -- it's a single rough rate applied uniformly, not a historically accurate one for older months.",
+    "USD → THB rate", min_value=0.0, value=_live_thb_rate or DEFAULT_THB_RATE, step=0.1,
+    help="Pre-filled from a live quote (yfinance); edit freely if you want a different rate. Used only "
+         "for the small THB reference shown under each dollar figure below -- it's a single rough rate "
+         "applied uniformly, not a historically accurate one for older months.",
 )
 
 
@@ -229,13 +242,28 @@ capital_base = start_value + net_flows
 period_days = max((end_of_period - start).days + 1, 1)
 roi_pct, annualized_roi_pct = compute_roi(investment_gain, capital_base, period_days)
 
-c1, c2, c3, c4 = st.columns(4)
+n_months = len(s)
+avg_monthly_dividend = total_dividends / n_months
+
+# --- KPI cards, grouped into 4 sections (matches the user's dashboard mockup) ---
+# Total Fees ("Costs") sits in this same row rather than its own section below -- a
+# single-metric row on its own looked sparse and unbalanced against the other groups.
+st.subheader("Portfolio Overview")
+c1, c2, c10 = st.columns(3)
 c1.metric("Portfolio Value", f"${ending_value:,.2f}", delta=thb(ending_value), delta_color="off")
 c2.metric("Net Deposits (tracked)", f"${net_flows:,.2f}", delta=thb(net_flows), delta_color="off")
+c10.metric("Total Fees", f"${total_fees:,.2f}", delta=thb(total_fees), delta_color="off",
+           help="Fees sheet (REG/TAF/CAT/ADR, etc.) + Transactions sheet's Commission column. "
+                "The Fees tab below only shows the former, so summing just that table will "
+                "come up short of this figure by however much was paid in trade commissions.")
+st.divider()
+
+st.subheader("Returns & Performance")
+c3, c4, c5, c6 = st.columns(4)
 c3.metric("Investment Gain/Loss", f"${investment_gain:,.2f}", delta=thb(investment_gain), delta_color="off",
-           help="Realized P/L + Unrealized P/L + Dividends + Interest. This is the recommended headline "
-                "number — it's built from trade prices and holding values, so it isn't affected by how "
-                "the statement labels cash movements.")
+          help="Realized P/L + Unrealized P/L + Dividends + Interest. This is the recommended headline "
+               "number — it's built from trade prices and holding values, so it isn't affected by how "
+               "the statement labels cash movements.")
 if roi_pct is not None:
     roi_delta = f"{annualized_roi_pct:,.2f}%/yr annualized" if annualized_roi_pct is not None else None
     c4.metric("ROI (period)", f"{roi_pct:,.2f}%", delta=roi_delta, delta_color="off",
@@ -245,29 +273,20 @@ if roi_pct is not None:
 else:
     c4.metric("ROI (period)", "N/A",
               help="No capital base (starting value + net deposits) in this period to compute ROI against.")
+c5.metric("Realized P/L (est.)", f"${total_realized:,.2f}", delta=thb(total_realized), delta_color="off")
+c6.metric("Unrealized P/L", f"${total_unrealized:,.2f}", delta=thb(total_unrealized), delta_color="off")
+st.divider()
 
-# -- Income (recurring cash yield: dividends/interest) --
-n_months = len(s)
-avg_monthly_dividend = total_dividends / n_months
-
-c5, c6, c7 = st.columns(3)
-c5.metric("Dividends", f"${total_dividends:,.2f}", delta=thb(total_dividends), delta_color="off",
+st.subheader("Income & Dividends")
+c7, c8, c9 = st.columns(3)
+c7.metric("Dividends", f"${total_dividends:,.2f}", delta=thb(total_dividends), delta_color="off",
           help="Net of the 15% Thai (NRA) withholding tax. Only dividends -- not interest -- are "
                "attributed per-symbol in the By Symbol tab below.")
-c6.metric("Avg. Monthly Dividend", f"${avg_monthly_dividend:,.2f}", delta=thb(avg_monthly_dividend), delta_color="off",
+c8.metric("Avg. Monthly Dividend", f"${avg_monthly_dividend:,.2f}", delta=thb(avg_monthly_dividend), delta_color="off",
           help=f"Dividends ÷ {n_months} month{'s' if n_months != 1 else ''} in the selected period.")
-c7.metric("Interest", f"${total_interest:,.2f}", delta=thb(total_interest), delta_color="off",
+c9.metric("Interest", f"${total_interest:,.2f}", delta=thb(total_interest), delta_color="off",
           help="Cash-sweep/margin interest. This account rarely earns any in real time -- most of its "
                "history shows $0 here except a one-time year-end reallocation catching up prior months.")
-
-# -- Capital gains/losses and costs (price movements, separate from income above) --
-c8, c9, c10 = st.columns(3)
-c8.metric("Realized P/L (est.)", f"${total_realized:,.2f}", delta=thb(total_realized), delta_color="off")
-c9.metric("Unrealized P/L", f"${total_unrealized:,.2f}", delta=thb(total_unrealized), delta_color="off")
-c10.metric("Total Fees", f"${total_fees:,.2f}", delta=thb(total_fees), delta_color="off",
-           help="Fees sheet (REG/TAF/CAT/ADR, etc.) + Transactions sheet's Commission column. "
-                "The Fees tab below only shows the former, so summing just that table will "
-                "come up short of this figure by however much was paid in trade commissions.")
 
 if abs(balance_based_gain - investment_gain) > 1:
     st.caption(
