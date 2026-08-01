@@ -1,5 +1,34 @@
 # Changelog
 
+## Dashboard & Monitor Stocks polish (v4): grouped KPIs, a live FX default, and a real bug fix
+
+Refines how the Dashboard and Monitor Stocks pages present their
+numbers, worked out iteratively against a mockup and live screenshots,
+plus a real display bug found and fixed along the way.
+
+- **Dashboard KPI cards** regrouped into three labeled sections instead
+  of unlabeled 4+3+3 rows: Portfolio Overview (Portfolio Value, Net
+  Deposits, Total Fees), Returns & Performance (Investment Gain/Loss,
+  ROI, Realized P/L, Unrealized P/L), Income & Dividends (Dividends,
+  Avg. Monthly Dividend, Interest).
+- **Monitor Stocks' Category Summary** now shows one category at a time
+  (matching the "Filter by type" radio) instead of All/Others/Dividend/
+  Growth side by side, regrouped into two rows, and the page's
+  explanation text moved into a collapsed "What do these numbers mean?"
+  expander instead of a permanent paragraph under the title.
+- **USD -> THB rate** now defaults to a live quote (via the same
+  yfinance dependency already used for Monitor Stocks) instead of a
+  hardcoded `33.0` -- still fully editable.
+- **Fixed a real bug**: a freshly logged trade with nothing realized yet
+  (a buy, no sells) showed the literal text "None" in the "Since Last
+  Statement" table instead of a blank cell -- traced to
+  `compute_realized_pl()`/`compute_fifo_realized_pl()` silently
+  defaulting to `dtype=object` on an empty result.
+- Removed a misleading green up-arrow next to a negative Unrealized %
+  delta on Monitor Stocks (a Streamlit delta-sign-detection quirk).
+- No database/schema changes.
+- Full test suite: 220/220 passing.
+
 ## Testing environment (v3.1): know which environment you're on, and a safe way to test v4
 
 Fixes the gap left right after going live: local dev could break with no

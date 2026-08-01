@@ -45,6 +45,10 @@ class TestComputeRealizedPl:
         result = compute_realized_pl(tx)
         assert result.empty
         assert list(result.columns) == ["Symbol", "Trade Date", "Month", "Realized P/L"]
+        # Regression: pd.DataFrame([], columns=[...]) defaults every column to dtype=object,
+        # which downstream (blended_realized_pl's concat, then dashboard.py's live_trades
+        # merge) turned a missing Realized P/L into a literal "None" cell instead of NaN.
+        assert result["Realized P/L"].dtype == "float64"
 
     def test_simple_profit(self):
         tx = make_transactions([
@@ -139,6 +143,12 @@ class TestComputeFifoRealizedPl:
         result = compute_fifo_realized_pl(tx)
         assert result.empty
         assert list(result.columns) == ["Symbol", "Trade Date", "Month", "Realized P/L", "id"]
+        # Regression: pd.DataFrame([], columns=[...]) defaults every column to dtype=object,
+        # which downstream (blended_realized_pl's concat, then dashboard.py's live_trades
+        # merge) turned a missing Realized P/L into a literal "None" cell instead of NaN --
+        # real symptom: a fresh buy with no sells yet showed "None" in the Realized P/L
+        # column of the "Since Last Statement" table instead of a blank cell.
+        assert result["Realized P/L"].dtype == "float64"
 
     def test_id_passes_through_from_the_originating_row(self):
         tx = make_transactions([

@@ -68,7 +68,11 @@ def compute_realized_pl(transactions: pd.DataFrame) -> pd.DataFrame:
         if realized != 0:
             rows.append({"Symbol": sym, "Trade Date": row["Trade Date"], "Month": row["Month"], "Realized P/L": realized})
 
-    return pd.DataFrame(rows, columns=["Symbol", "Trade Date", "Month", "Realized P/L"])
+    df = pd.DataFrame(rows, columns=["Symbol", "Trade Date", "Month", "Realized P/L"])
+    # Same empty-rows dtype trap as compute_fifo_realized_pl below -- an empty `rows` list
+    # would otherwise leave "Realized P/L" as dtype=object.
+    df["Realized P/L"] = df["Realized P/L"].astype(float)
+    return df
 
 
 def _run_fifo(trades: pd.DataFrame):
@@ -165,6 +169,12 @@ def compute_fifo_realized_pl(trades: pd.DataFrame) -> pd.DataFrame:
     # column (seen for real merging this against dashboard.py's live_trades). float64 (not
     # int) since callers concat this with historical rows that have no id at all -> NaN.
     df["id"] = df["id"].astype(float)
+    # Same object-dtype trap when `rows` is empty (e.g. only buys logged so far, nothing
+    # realized yet) -- pd.DataFrame([], columns=[...]) defaults every column to dtype=object,
+    # which downstream (dashboard.py's live_trades merge) turns a missing Realized P/L into
+    # a literal None cell instead of NaN, and Streamlit's NumberColumn then renders that as
+    # the text "None" instead of leaving it blank.
+    df["Realized P/L"] = df["Realized P/L"].astype(float)
     return df
 
 

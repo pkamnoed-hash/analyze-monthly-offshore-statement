@@ -1,7 +1,7 @@
 import pandas as pd
 import pytest
 
-from core.market_data import fetch_stock_profile
+from core.market_data import fetch_stock_profile, fetch_usd_thb_rate
 
 
 class FakeTicker:
@@ -246,3 +246,17 @@ class TestFetchStockProfile:
                                          "Dividend Frequency"]
         assert result["Beta"].dtype == "float64"
         assert result["Symbol"].dtype == "object"
+
+
+class TestFetchUsdThbRate:
+    def test_happy_path_returns_last_close(self):
+        yf_module = FakeYfModule({"THB=X": FakeTicker(history_df=_history([33.10, 33.15, 33.22]))})
+        assert fetch_usd_thb_rate(yf_module=yf_module) == pytest.approx(33.22)
+
+    def test_network_failure_returns_none_not_a_crash(self):
+        yf_module = FakeYfModule({"THB=X": FakeTicker(raise_on_history=True)})
+        assert fetch_usd_thb_rate(yf_module=yf_module) is None
+
+    def test_empty_history_returns_none(self):
+        yf_module = FakeYfModule({"THB=X": FakeTicker(history_df=_history([]))})
+        assert fetch_usd_thb_rate(yf_module=yf_module) is None
