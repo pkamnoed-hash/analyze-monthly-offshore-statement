@@ -211,7 +211,12 @@ if symbol:
             sign = "gain" if preview >= 0 else "loss"
             st.info(f"Estimated Realized P/L: **${preview:,.2f}** ({sign}, excludes commission/fees)")
 
-        is_oversell = quantity > current_qty
+        # Tolerance matches calculations.estimate_sell_realized_pl's own oversell check
+        # (quantity > available + 1e-9) -- current_qty is a float64 sum accumulated across
+        # every FIFO lot, so a position built from many small buys (e.g. DRIP-style trades)
+        # can land a hair below its displayed, rounded value (82.0812 shown, 82.08119999...
+        # actually stored). Selling exactly the displayed full position must not trip this.
+        is_oversell = quantity > current_qty + 1e-9
         if is_oversell:
             st.warning(f"You only hold {current_qty:g} shares of {symbol} -- this would sell more than you have.")
             # Keyed by symbol+quantity (not a fixed key) so a checked confirmation never
