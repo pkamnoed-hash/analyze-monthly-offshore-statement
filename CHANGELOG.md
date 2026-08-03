@@ -1,5 +1,21 @@
 # Changelog
 
+## Fix oversell false-positive on a full-position sell (v4.1.1)
+
+Selling your *entire* position in a symbol built from many small buys
+(e.g. a DRIP-style holding) could incorrectly trigger "this would sell
+more than you have," even when selling the exact amount shown as your
+current position.
+
+- **`app_pages/record_trade.py`**: the oversell check now tolerates the
+  same tiny floating-point noise `core/calculations.py`'s
+  `estimate_sell_realized_pl()` already tolerates (`+ 1e-9`) -- a
+  position accumulated across many FIFO lots can land a hair below its
+  displayed, rounded quantity (e.g. shown as `82.0812`, actually stored
+  as `82.081199999998`), which tripped a strict `>` comparison.
+- No database/schema changes -- pure comparison-logic fix.
+- Full test suite: 220/220 passing.
+
 ## Dashboard & Monitor Stocks polish (v4): grouped KPIs, a live FX default, and a real bug fix
 
 Refines how the Dashboard and Monitor Stocks pages present their
