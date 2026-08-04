@@ -17,7 +17,8 @@ not an aspirational process, a record of what's been done.
 | `v3-hosting-prep` | V3 feature branch (hosting preparation -- deploy to the cloud, keep it free, make writes actually persist). Cut from `main` after v2.4 was merged in. Explored Hugging Face Spaces first (scored highest in an initial comparison) but reversed that decision mid-build once its Docker SDK turned out to require a paid PRO plan; landed on Streamlit Community Cloud (compute) + Turso (persistence) instead, decoupling the two since no single free host offered both. Live at `myinvestment27.streamlit.app`, verified working end-to-end including write persistence across a restart. Merged into `main`. |
 | `v3.1-testing-environment` | V3.1 feature branch (understand and prepare a safe testing environment now that real data lives in Turso). Cut from `main` after V3 was merged in. Adds a sidebar dev/prod environment badge (`APP_ENV` secret), `docs/BACKUP_AND_TESTING.md` (backup/rollback/safe-testing/schema-change reference), and a 5-scenario hands-on practice lab, each scenario actually run once with a confirmed checkpoint. Root-caused an early local-dev connection failure to a freshly-created Turso branch's brief propagation delay, not a code bug. Merged into `main`. |
 | `v4-dashboard-tools-integration` | V4 feature branch (first batch under "advance dashboard, tools v2, integration"). Cut from `main` after V3.1 was merged in. Regroups Dashboard's KPI cards and Monitor Stocks' Category Summary into labeled sections (worked out iteratively against a mockup + live screenshots), defaults the USD -> THB rate from a live yfinance quote, and fixes a real dtype bug that showed literal "None" instead of a blank Realized P/L cell for a buy-only trade. No `core/db.py`/schema changes. Merged into `main`. |
-| `v4.1-revised-number-and-stats` | V4.1 feature branch (revised number and stats). Cut from `main` after V4 was merged in. Just created -- scope not built out yet. |
+| `v4.1.1-fix-oversell-precision` | V4.1.1 hotfix branch, cut from `main` (not from v4.1 -- unrelated to that branch's theme). Fixes a floating-point false-positive on Record Trade's oversell check (selling an entire position built from many small buys could trip "this would sell more than you have"), adding the same `+1e-9` tolerance `estimate_sell_realized_pl()` already used. No database/schema changes. Merged into `main`. |
+| `v4.1-revised-number-and-stats` | V4.1 feature branch (revised number and stats). Cut from `main` after V4 was merged in. Started as an open scoping discussion (dividend/ROI numbers, via a one-off `scripts/dividend_category_stats.py`), then built real Monitor Stocks features: per-symbol `Total P/L`/`Total P/L %` (actual Dividends Received + Unrealized), `Holding Period (Years)`/`Total P/L %/yr`, a category-level "Total Return" group in Category Summary, and the per-symbol table split into 5 tabs. No `core/db.py`/schema changes. Merged into `main`. |
 
 Naming convention: `vN-short-description` (or `vN.M-short-description` for a
 smaller, additive feature that doesn't warrant a new whole version number),
@@ -35,7 +36,8 @@ Version planning
 	○ 3.1 understand and prepare testing environment (dev/prod environment badge, Turso branching for safe testing, schema-change pattern, hands-on practice lab)
 - 4 - advance "dashhboard, tools v2, intetration"
 	○ 4.0 (`v4-dashboard-tools-integration`) Dashboard/Monitor Stocks KPI regrouping, live USD/THB default, Realized P/L dtype fix
-	○ 4.1 (`v4.1-revised-number-and-stats`) revised number and stats
+	○ 4.1.1 (`v4.1.1-fix-oversell-precision`) hotfix: oversell false-positive floating-point tolerance
+	○ 4.1 (`v4.1-revised-number-and-stats`) Monitor Stocks Total P/L/%, Holding Period, category-level Total Return, tabbed columns
 - 5 - cosmetic
 - 6 - tax management
 
@@ -86,17 +88,17 @@ still useful as a labeled reference point (`V1-record-trade-and-view`,
 
 ## Current status (as of `v4.1-revised-number-and-stats`)
 
-`main` has V1, V2, V2.1, V2.2, V2.3, V2.4, V3, V3.1, and V4 merged in
-(`v4-dashboard-tools-integration` merged via `git merge --no-ff`,
-220/220 passing on `main` post-merge). The app is live at
+`main` has V1, V2, V2.1, V2.2, V2.3, V2.4, V3, V3.1, V4, V4.1.1, and V4.1
+merged in (`v4.1-revised-number-and-stats` merged via `git merge --no-ff`,
+225/225 passing on `main` post-merge). The app is live at
 `myinvestment27.streamlit.app`, but that deployment is still tracking
 the stale `v3-hosting-prep` branch, not `main` -- Streamlit Community
 Cloud has no way to switch an already-deployed app's tracked branch, so
-neither V3.1 nor this V4 batch is live yet. A delete + redeploy pointing
-at `main` with fresh secrets was started (see `docs/DEPLOYMENT.md`) and
-hit a `ModuleNotFoundError: No module named 'core'` from the new app
-being configured with the wrong main file path (`app_pages/dashboard.py`
-instead of the root-level `dashboard_app.py`) -- being corrected via a
-second redeploy attempt, not yet confirmed live. Work has now started
-on `v4.1-revised-number-and-stats` (revised number and stats), cut from
-`main` after V4.
+none of V3.1/V4/V4.1.1/V4.1 is live yet. A delete + redeploy pointing at
+`main` with fresh secrets was started (see `docs/DEPLOYMENT.md`) and hit
+a `ModuleNotFoundError: No module named 'core'` from the new app being
+configured with the wrong main file path (`app_pages/dashboard.py`
+instead of the root-level `dashboard_app.py`) -- correction attempted,
+not yet confirmed live. Next: decide whether to apply the "Total
+Return" concept (Total P/L/%) to the Dashboard page too (raised, not
+yet scoped), or move on to something else.

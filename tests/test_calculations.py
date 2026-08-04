@@ -6,6 +6,7 @@ from core.calculations import (
     blended_realized_pl,
     compute_current_positions,
     compute_fifo_realized_pl,
+    compute_holding_period_start,
     compute_realized_pl,
     compute_roi,
     estimate_sell_realized_pl,
@@ -297,6 +298,48 @@ class TestComputeCurrentPositions:
         ])
         result = compute_current_positions(tx)
         assert list(result["Symbol"]) == ["BBB"]
+
+
+class TestComputeHoldingPeriodStart:
+    def test_never_sold_starts_at_first_buy(self):
+        tx = make_transactions([
+            buy("AAA", "2023-01-01", 10, 10.0),
+            buy("AAA", "2023-06-01", 5, 12.0),
+        ])
+        result = compute_holding_period_start(tx)
+        assert result["AAA"] == pd.Timestamp("2023-01-01")
+
+    def test_fully_sold_symbol_is_absent(self):
+        tx = make_transactions([
+            buy("AAA", "2023-01-01", 10, 10.0),
+            sell("AAA", "2023-02-01", 10, 15.0),
+        ])
+        result = compute_holding_period_start(tx)
+        assert "AAA" not in result.index
+
+    def test_sold_then_rebought_resets_to_rebuy_date(self):
+        # Fully exited on 02-01, rebought on 06-01 -- holding period should start
+        # at the rebuy, not the original 01-01 purchase.
+        tx = make_transactions([
+            buy("AAA", "2023-01-01", 10, 10.0),
+            sell("AAA", "2023-02-01", 10, 15.0),
+            buy("AAA", "2023-06-01", 5, 12.0),
+        ])
+        result = compute_holding_period_start(tx)
+        assert result["AAA"] == pd.Timestamp("2023-06-01")
+
+    def test_partial_sell_does_not_reset_start(self):
+        tx = make_transactions([
+            buy("AAA", "2023-01-01", 10, 10.0),
+            sell("AAA", "2023-02-01", 4, 15.0),   # partial sell, still holding 6
+        ])
+        result = compute_holding_period_start(tx)
+        assert result["AAA"] == pd.Timestamp("2023-01-01")
+
+    def test_no_trades_produces_empty_result(self):
+        tx = make_transactions([])
+        result = compute_holding_period_start(tx)
+        assert result.empty
 
 
 class TestEstimateSellRealizedPl:

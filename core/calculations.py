@@ -194,6 +194,32 @@ def compute_current_positions(trades: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=["Symbol", "Quantity", "Avg Cost", "Cost Basis"])
 
 
+def compute_holding_period_start(trades: pd.DataFrame) -> pd.Series:
+    """Per-symbol: the Trade Date the currently-open position was last built up
+    from zero -- i.e. the most recent point cumulative quantity crossed from ~0
+    to positive and hasn't returned to ~0 since. A symbol that's been fully sold
+    and later rebought resets to the rebuy date, not its original first-ever
+    purchase -- this answers "how long have I continuously held what I hold
+    today," not "how long ago did I first ever buy this."
+
+    Returns a Series indexed by Symbol, values are Trade Date timestamps. Only
+    symbols with a currently open position appear -- others are simply absent,
+    same convention compute_current_positions() uses."""
+    tx = trades[trades["Symbol"].notna() & (trades["Entry Type"] == "Trade Entry")].sort_values(["Symbol", "Trade Date"])
+    starts = {}
+    running = {}
+    for _, row in tx.iterrows():
+        sym = row["Symbol"]
+        prev_qty = running.get(sym, 0.0)
+        new_qty = prev_qty + row["Quantity"]
+        running[sym] = new_qty
+        if prev_qty <= 1e-6 and new_qty > 1e-6:
+            starts[sym] = row["Trade Date"]
+        if new_qty <= 1e-6:
+            starts.pop(sym, None)
+    return pd.Series(starts, name="Holding Period Start", dtype="object")
+
+
 def estimate_sell_realized_pl(trades: pd.DataFrame, symbol: str, quantity: float, price: float):
     """Live preview for the Record Trade form: what would selling `quantity`
     shares of `symbol` at `price` realize right now, against the current FIFO

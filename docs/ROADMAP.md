@@ -1403,6 +1403,100 @@ dashboard, tools v2, integration" theme is broad, and this batch only
 touched the Dashboard and Monitor Stocks pages. Left open for a later
 decision (a v4.x continuation, or moving on to v5).
 
+## V4.1: Monitor Stocks Total Return, Holding Period, and Tabbed Columns
+
+### Context
+
+Continuation under the v4 theme, on `v4.1-revised-number-and-stats`
+(cut from `main` after V4). Started as an open-ended scoping discussion
+("what dividend/ROI numbers exist vs. need building") that produced a
+one-off read-only script (`scripts/dividend_category_stats.py`) before
+any UI work began, then moved into real Monitor Stocks features once
+the scope and formulas were confirmed against real data. A separate,
+unrelated bugfix (oversell false-positive) was pulled out into its own
+`v4.1.1-fix-oversell-precision` branch and shipped independently, since
+it had nothing to do with this branch's actual theme.
+
+### Design decisions
+
+**"Total P/L" reuses Dashboard's existing name**, not a new term --
+Dashboard's By Symbol tab already computes this exact concept (Realized
++ Unrealized + Dividends). Monitor Stocks' version is Unrealized +
+Dividends Received only (no Realized P/L term), since this page only
+tracks currently-held positions -- flagged via the column's own
+tooltip rather than inventing a different name.
+
+**Dividends Received is a genuinely new data source for this page** --
+Monitor Stocks previously only showed `Expected Div/Yr` (a forward-
+looking projection); actual historical dividends received needed
+loading the xlsx `Income` sheet and blending it with live db dividends
+(`calculations.blended_dividends`), the same source/blending Dashboard's
+own "Dividends" KPI already uses, just not previously wired into this
+page.
+
+**Holding Period resets on a full exit + rebuy**, not the original
+first-ever purchase -- answers "how long have I held what I hold
+today," not "how long ago did I first ever buy this." Implemented as
+`calculations.compute_holding_period_start()`: walks each symbol's
+trades in date order, tracking the most recent point cumulative
+quantity crossed from ~0 to positive and hasn't returned to ~0 since.
+
+**Category-level Total P/L %/yr was built, then explicitly removed**
+after the user checked it live and asked for it back out of the
+Category Summary metric cards -- there's no single "holding period" for
+a whole category (each symbol bought at a different time), so it was a
+Cost-Basis-weighted blend of each holding's own annualized rate. Removed
+along with its now-unused calculation in `_category_summary()`, keeping
+only `Total P/L`/`Total P/L %` in that group. The *per-symbol*
+`Total P/L %/yr` column (Performance/Overview tabs) was untouched.
+
+**One 23-column table split into 5 tabs**, Finviz-style column presets
+(Overview/Position/Performance/Dividends/Classification), `Symbol` +
+`90D Trend` pinned in every tab -- same `st.tabs()` mechanism Dashboard's
+data section already uses. Overview shows every column (the original
+unified table); the other four are focused subsets.
+
+### Implementation
+
+**`core/calculations.py`**: new `compute_holding_period_start()`.
+
+**`app_pages/monitor_stocks.py`**: new `_dividends_received_by_symbol()`
+(cached, loads the xlsx + blends with live db dividends); `Dividends
+Received`, `Total P/L`, `Total P/L %`, `Holding Period (Years)`,
+`Total P/L %/yr` added to the per-symbol `holdings` dataframe;
+`_category_summary()` extended with category-level `Total P/L`/
+`Total P/L %` (same resolved-rows-only pattern `Unrealized` already
+uses); Category Summary gets a third "Total Return" metric group; the
+per-symbol table is now 5 tabs instead of one wide table.
+
+**`scripts/dividend_category_stats.py`** (new, not part of the running
+app): one-off read-only script used throughout this branch's scoping
+discussion to compute real dividend/ROI/yield-on-cost figures directly
+against Turso (`dev` or production, whichever `secrets.toml` points at)
+without exposing credentials -- prints only the labeled result numbers.
+Kept as a reference tool, not deleted.
+
+### Testing and verification
+
+225/225 tests passing (220 + 5 new for `compute_holding_period_start`,
+covering never-sold/fully-sold/sold-then-rebought/partial-sell/no-trades
+cases). Every new calculation was cross-checked against real production
+data via one-off scripts before being wired into the UI (dividend/ROI
+figures for the Dividend category, per-symbol Total P/L for AMZP,
+holding-period figures for GOOY/SCHD/SHV, category-level Total P/L for
+"All") -- each check's numbers matched what the shipped code later
+rendered live. No `core/db.py` or schema changes.
+
+### Considered and explicitly deferred
+
+**Applying the same "Total Return" concept to the Dashboard page** --
+raised at the end of this branch's work, not yet scoped (Dashboard
+already has overlapping-but-not-identical concepts: portfolio-wide
+"Investment Gain/Loss"/"ROI (period)", and a per-symbol "Total P/L" $
+figure with no % counterpart). Left for a future decision between
+extending the existing Allocation Type breakdown with P/L figures,
+adding a "Total P/L %" column to By Symbol, or both.
+
 ## Deferred / future
 
 - **Restore from a backup** -- see V2.3's "Considered and explicitly
