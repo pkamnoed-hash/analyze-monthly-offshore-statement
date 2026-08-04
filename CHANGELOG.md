@@ -1,5 +1,20 @@
 # Changelog
 
+## Fix Monitor Stocks crash on Streamlit Community Cloud (v4.1.2)
+
+Monitor Stocks crashed on the live deployed app (`AttributeError`, not
+reproducible in local dev) right after v4.1 shipped -- the Holding
+Period calculation's `.map()` call can infer a non-datetime dtype
+depending on the pandas/platform build, which then breaks the `.dt.days`
+call right after it.
+
+- **`app_pages/monitor_stocks.py`**: the mapped holding-period-start
+  values are now explicitly coerced with `pd.to_datetime(..., errors="coerce")`
+  before the `.dt.days` calculation, guaranteeing a real datetime dtype
+  regardless of environment-specific inference behavior.
+- No database/schema changes.
+- Full test suite: 225/225 passing.
+
 ## Monitor Stocks: Total Return, Holding Period, and tabbed columns (v4.1)
 
 Adds real (not projected) performance tracking to Monitor Stocks, plus

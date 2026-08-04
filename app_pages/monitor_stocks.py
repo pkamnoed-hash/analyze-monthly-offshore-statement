@@ -155,6 +155,15 @@ holdings["Total P/L %"] = (
 # Total P/L % by this -- a lump total return isn't comparable across symbols held for very
 # different lengths of time; the annualized rate is.
 holding_start = holdings["Symbol"].map(calculations.compute_holding_period_start(db_trades))
+# pd.to_datetime(...) forces a real datetime64 dtype regardless of what .map() inferred --
+# confirmed on real data that when NO symbol in `holdings` has a match (e.g. every current
+# holding was somehow absent from the start-date map), .map() falls back to dtype=object
+# instead of datetime64, and (today - holding_start).dt.days then raises AttributeError:
+# "Can only use .dt accessor with datetimelike values". Not reproducible on every
+# platform/pandas build (seen on Streamlit Community Cloud's Linux/Python 3.14 environment,
+# not this local Windows/Python 3.12 venv) -- coercing explicitly makes it deterministic
+# either way instead of depending on .map()'s own dtype-inference behavior.
+holding_start = pd.to_datetime(holding_start, errors="coerce")
 holdings["Holding Period (Years)"] = (pd.Timestamp.today().normalize() - holding_start).dt.days / 365.25
 holdings["Total P/L %/yr"] = (
     holdings["Total P/L %"] / holdings["Holding Period (Years)"]
