@@ -1,5 +1,28 @@
 # Changelog
 
+## Monitor Stocks: Total Return, Holding Period, and tabbed columns (v4.1)
+
+Adds real (not projected) performance tracking to Monitor Stocks, plus
+splits its increasingly wide per-symbol table into focused tabs.
+
+- **`Total P/L` / `Total P/L %`** per symbol -- Unrealized $ + actual
+  Dividends Received (all-time), the first time this page has shown
+  real historical dividend income rather than just a forward-looking
+  projection.
+- **`Holding Period (Years)` / `Total P/L %/yr`** per symbol -- how long
+  you've continuously held your current position (resets if you fully
+  exited and later rebought), and your annualized return over that
+  period.
+- **Category Summary** gets a third "Total Return" group (`Total P/L`,
+  `Total P/L %`) alongside the existing "Holdings & Valuation" and
+  "Dividend Projections" groups.
+- **Per-symbol table split into 5 tabs** (Overview, Position,
+  Performance, Dividends, Classification) instead of one 23-column
+  table -- `Symbol` and `90D Trend` pinned in every tab.
+- No database/schema changes.
+- Full test suite: 225/225 passing (5 new, covering the holding-period
+  calculation's edge cases).
+
 ## Fix oversell false-positive on a full-position sell (v4.1.1)
 
 Selling your *entire* position in a symbol built from many small buys

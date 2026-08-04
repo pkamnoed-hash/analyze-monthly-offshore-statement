@@ -1,3 +1,4 @@
+import os
 from datetime import datetime
 
 import pandas as pd
@@ -16,6 +17,14 @@ WITHHOLDING_TAX_RATE = 0.15
 # permanent reminder of the deduction, not just a mention buried in the page-top caption.
 DIVIDEND_TAX_HELP = f"Net of {WITHHOLDING_TAX_RATE:.0%} Thai (NRA) withholding tax."
 
+# Same xlsx + blending Dashboard's own "Dividends" KPI uses (calculations.blended_dividends)
+# -- needed here for Total P/L below, which is actual dividends received, not the
+# Expected Div/Yr projection already on this page (a different, forward-looking figure).
+DATA_FILE = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "Offshore_Statements_2023-01_to_2026-06.xlsx"
+)
+DIVIDEND_ENTRY_TYPES = ["Dividends", "Div. Adj(NRA Withheld)", "Dividend", "Capital Distribution"]
+
 
 @st.cache_data(ttl=300)
 def _cached_fetch_stock_profile(symbols: list[str]) -> tuple[pd.DataFrame, datetime]:
@@ -28,6 +37,26 @@ def _cached_fetch_stock_profile(symbols: list[str]) -> tuple[pd.DataFrame, datet
     function, so it's captured once at cache-miss time and reused for every cache-hit
     until the TTL expires or Refresh now clears it (not recomputed on every rerun)."""
     return market_data.fetch_stock_profile(symbols), datetime.now()
+
+
+@st.cache_data
+def _dividends_received_by_symbol() -> pd.Series:
+    """Actual (not projected) dividends received per symbol, all-time, blended xlsx
+    history (<=cutoff) + live db (>cutoff) -- the exact same data source and blending
+    Dashboard's own per-symbol "Dividends" column already uses, just not previously
+    loaded on this page. Cached like Dashboard's own load_data() -- the xlsx is static
+    at runtime, only db.fetch_dividends() (uncached) can add new rows."""
+    xls = pd.ExcelFile(DATA_FILE)
+    summary = pd.read_excel(xls, "Summary")
+    income = pd.read_excel(xls, "Income")
+    summary["Month"] = pd.to_datetime(summary["Month"], format="%Y-%m")
+    income["Month"] = pd.to_datetime(income["Month"], format="%Y-%m")
+    income["Trade Date"] = pd.to_datetime(income["Trade Date"], format="%m/%d/%Y", errors="coerce")
+    cutoff = summary["Month"].max() + pd.offsets.MonthEnd(0)
+
+    blended_income = calculations.blended_dividends(income, db.fetch_dividends(), cutoff)
+    div_rows = blended_income[blended_income["Entry Type"].isin(DIVIDEND_ENTRY_TYPES) & blended_income["Symbol"].notna()]
+    return div_rows.groupby("Symbol")["Net Amt"].sum()
 
 
 st.title("Monitor Stocks")
@@ -109,6 +138,28 @@ holdings["Unrealized %"] = (
     (holdings["Position Value"] - holdings["Cost Basis"]) / holdings["Cost Basis"] * 100
 ).where(holdings["Cost Basis"] > 0, float("nan"))
 
+# Total P/L = Unrealized $ + actual Dividends Received (all-time) -- same name Dashboard's
+# By Symbol tab already uses for this concept (Realized P/L + Unrealized + Dividends), but
+# this page only tracks currently-held positions (a fully-exited symbol doesn't appear here
+# at all, same convention compute_current_positions() uses everywhere), so there's no
+# Realized P/L term to add -- just Unrealized + Dividends for whatever's still held today.
+holdings["Dividends Received"] = holdings["Symbol"].map(_dividends_received_by_symbol()).fillna(0.0)
+holdings["Total P/L"] = holdings["Unrealized"] + holdings["Dividends Received"]
+holdings["Total P/L %"] = (
+    holdings["Total P/L"] / holdings["Cost Basis"] * 100
+).where(holdings["Cost Basis"] > 0, float("nan"))
+
+# Holding Period: years since the current position was last built from zero (a symbol
+# fully sold and later rebought resets to the rebuy date -- see
+# calculations.compute_holding_period_start's own docstring). Total P/L %/yr annualizes
+# Total P/L % by this -- a lump total return isn't comparable across symbols held for very
+# different lengths of time; the annualized rate is.
+holding_start = holdings["Symbol"].map(calculations.compute_holding_period_start(db_trades))
+holdings["Holding Period (Years)"] = (pd.Timestamp.today().normalize() - holding_start).dt.days / 365.25
+holdings["Total P/L %/yr"] = (
+    holdings["Total P/L %"] / holdings["Holding Period (Years)"]
+).where(holdings["Holding Period (Years)"] > 0, float("nan"))
+
 # Holding-based dollar income, not the per-share "Dividend Per Year" rate from
 # core/market_data.py -- Total Market Value x (Dividend Yield % / 100). Confirmed
 # algebraically and numerically identical to Outstanding Shares x Div per Share/Year
@@ -147,6 +198,12 @@ def _category_summary(holdings_df: pd.DataFrame) -> pd.DataFrame:
         unrealized_pct = (unrealized / resolved_cost * 100) if resolved_cost > 0 else float("nan")
         total_dividend = resolved["Expected Div Per Year"].sum()
 
+        # Total P/L: same "sum over resolved rows" pattern as Unrealized above -- Total P/L
+        # is Unrealized + Dividends Received per symbol, so it needs the same resolved-only
+        # scoping to avoid an unresolved symbol's NaN Position Value silently dropping it.
+        total_pl = resolved["Total P/L"].sum()
+        total_pl_pct = (total_pl / resolved_cost * 100) if resolved_cost > 0 else float("nan")
+
         rows.append({
             "Category": category,
             "Holdings": len(sub),
@@ -155,6 +212,8 @@ def _category_summary(holdings_df: pd.DataFrame) -> pd.DataFrame:
             "Unrealized": unrealized,
             "Unrealized %": unrealized_pct,
             "Total Div/Yr": total_dividend,
+            "Total P/L": total_pl,
+            "Total P/L %": total_pl_pct,
         })
 
     summary = pd.DataFrame(rows)
@@ -219,6 +278,21 @@ else:
         "Expected Div Return %", f"{row['Expected Div Return %']:.2f}%",
         help=DIVIDEND_TAX_HELP,
     )
+st.divider()
+
+# Actual (not projected) total return -- distinct from both groups above: not a current
+# snapshot (Holdings & Valuation) and not a forward-looking projection (Dividend
+# Projections), so it gets its own group rather than being squeezed into either.
+st.markdown("**Total Return**")
+t1, t2 = st.columns(2)
+t1.metric(
+    "Total P/L", f"${row['Total P/L']:,.2f}",
+    help="Unrealized + Dividends Received (actual, all-time), summed across this category's holdings.",
+)
+if pd.isna(row["Total P/L %"]):
+    t2.metric("Total P/L %", "N/A")
+else:
+    t2.metric("Total P/L %", f"{row['Total P/L %']:.2f}%", help="Total P/L as a % of Total Cost.")
 
 unresolved_symbols = view[view["Position Value"].isna()]["Symbol"].tolist()
 if unresolved_symbols:
@@ -260,39 +334,79 @@ if not view.empty:
 
 st.caption(f"Showing {len(view)} of {len(holdings)} symbols.")
 
-display_cols = ["Symbol", "Description", "Category", "History90D", "Asset Class", "Portfolio Group", "Weight %",
+# Split from one 23-column table into focused tabs (Finviz-style column presets) --
+# Symbol + History90D pinned in every tab so a row is always identifiable regardless
+# of which view you're on. Each tab reuses the same underlying `view` dataframe and
+# `column_config` below, just a different column subset. Overview shows every column
+# (the original unified table); the rest are focused slices of the same data.
+TAB_COLUMNS = {
+    "Overview": ["Symbol", "History90D", "Description", "Category", "Asset Class", "Portfolio Group", "Weight %",
                  "Category Weight %", "Quantity", "Avg Cost", "Latest Price", "Cost Basis", "Position Value",
-                 "Unrealized", "Unrealized %", "Dividend Yield %", "Dividend Frequency", "Expected Div Per Year",
-                 "Expected Div Per Month", "Beta", "Div Return Contribution %"]
-st.dataframe(
-    view[display_cols],
-    use_container_width=True,
-    hide_index=True,
-    column_config={
-        "Description": st.column_config.TextColumn("Desc.", help="Description"),
-        "Category": st.column_config.TextColumn("Cat.", help="Category"),
-        "History90D": st.column_config.LineChartColumn("90D Trend", width=200, help="90 Day Trend"),  # 50% of "large" (400px)
-        "Portfolio Group": st.column_config.TextColumn("Port. Group", help="Portfolio Group"),
-        "Category Weight %": st.column_config.NumberColumn("Cat. Weight %", format="%.1f%%", help="Category Weight %"),
-        "Quantity": st.column_config.NumberColumn("Shares", format="%.4f", help="Outstanding Shares"),
-        "Avg Cost": st.column_config.NumberColumn("Cost/Sh", format="$%.4f", help="Cost per Share"),
-        "Latest Price": st.column_config.NumberColumn("Mkt. Price", format="$%.2f", help="Market Price"),
-        "Cost Basis": st.column_config.NumberColumn("Tot. Cost", format="$%.2f", help="Total Cost"),
-        "Position Value": st.column_config.NumberColumn("Tot. Mkt.", format="$%.2f", help="Total Market Value"),
-        "Unrealized": st.column_config.NumberColumn("Unreal.", format="$%.2f", help="Unrealized"),
-        "Unrealized %": st.column_config.NumberColumn("Unreal. %", format="%.1f%%", help="Unrealized %"),
-        "Dividend Yield %": st.column_config.NumberColumn("Div Yield %", format="%.2f%%", help="% Div per Year"),
-        "Dividend Frequency": st.column_config.TextColumn("Freq.", help="Dividend Frequency"),
-        "Expected Div Per Year": st.column_config.NumberColumn(
-            "Expt. Div/Yr", format="$%.2f", help=f"Expected Div per Year. {DIVIDEND_TAX_HELP}",
-        ),
-        "Expected Div Per Month": st.column_config.NumberColumn(
-            "Expt. Div/Mth", format="$%.2f", help=f"Expected Div per Month. {DIVIDEND_TAX_HELP}",
-        ),
-        "Beta": st.column_config.NumberColumn(format="%.2f"),
-        "Weight %": st.column_config.NumberColumn(format="%.1f%%"),
-        "Div Return Contribution %": st.column_config.NumberColumn(
-            "Div Contrib %", format="%.2f%%", help=f"Div Return Contribution %. {DIVIDEND_TAX_HELP}",
-        ),
-    },
-)
+                 "Unrealized", "Unrealized %", "Dividends Received", "Total P/L", "Total P/L %",
+                 "Holding Period (Years)", "Total P/L %/yr", "Dividend Yield %", "Dividend Frequency",
+                 "Expected Div Per Year", "Expected Div Per Month", "Beta", "Div Return Contribution %"],
+    "Position": ["Symbol", "History90D", "Quantity", "Avg Cost", "Latest Price", "Cost Basis", "Position Value"],
+    "Performance": ["Symbol", "History90D", "Unrealized", "Unrealized %", "Dividends Received", "Total P/L",
+                     "Total P/L %", "Holding Period (Years)", "Total P/L %/yr"],
+    "Dividends": ["Symbol", "History90D", "Dividend Yield %", "Dividend Frequency", "Expected Div Per Year",
+                  "Expected Div Per Month", "Div Return Contribution %"],
+    "Classification": ["Symbol", "History90D", "Asset Class", "Portfolio Group", "Beta"],
+}
+column_config = {
+    "Description": st.column_config.TextColumn("Desc.", help="Description"),
+    "Category": st.column_config.TextColumn("Cat.", help="Category"),
+    "History90D": st.column_config.LineChartColumn("90D Trend", width=200, help="90 Day Trend"),  # 50% of "large" (400px)
+    "Portfolio Group": st.column_config.TextColumn("Port. Group", help="Portfolio Group"),
+    "Category Weight %": st.column_config.NumberColumn("Cat. Weight %", format="%.1f%%", help="Category Weight %"),
+    "Quantity": st.column_config.NumberColumn("Shares", format="%.4f", help="Outstanding Shares"),
+    "Avg Cost": st.column_config.NumberColumn("Cost/Sh", format="$%.4f", help="Cost per Share"),
+    "Latest Price": st.column_config.NumberColumn("Mkt. Price", format="$%.2f", help="Market Price"),
+    "Cost Basis": st.column_config.NumberColumn("Tot. Cost", format="$%.2f", help="Total Cost"),
+    "Position Value": st.column_config.NumberColumn("Tot. Mkt.", format="$%.2f", help="Total Market Value"),
+    "Unrealized": st.column_config.NumberColumn("Unreal.", format="$%.2f", help="Unrealized"),
+    "Unrealized %": st.column_config.NumberColumn("Unreal. %", format="%.1f%%", help="Unrealized %"),
+    "Dividends Received": st.column_config.NumberColumn(
+        "Div Recv.", format="$%.2f",
+        help=f"Actual dividends received to date (all-time), not a projection. {DIVIDEND_TAX_HELP}",
+    ),
+    "Total P/L": st.column_config.NumberColumn(
+        format="$%.2f",
+        help="Unrealized + Dividends Received (actual, all-time). Doesn't include Realized P/L from "
+             "any past partial sells -- unlike Dashboard's own Total P/L column, this page only "
+             "tracks currently-held positions.",
+    ),
+    "Total P/L %": st.column_config.NumberColumn(format="%.1f%%", help="Total P/L as a % of Total Cost."),
+    "Holding Period (Years)": st.column_config.NumberColumn(
+        "Held (Yrs)", format="%.1f",
+        help="Years since your current position was last built from zero. Resets if you fully "
+             "sold and later rebought -- this is how long you've held what you hold today, not "
+             "how long ago you first ever bought this symbol.",
+    ),
+    "Total P/L %/yr": st.column_config.NumberColumn(
+        format="%.1f%%",
+        help="Total P/L % annualized by Holding Period (Years) -- lets you compare symbols held "
+             "for very different lengths of time on the same yearly-rate basis.",
+    ),
+    "Dividend Yield %": st.column_config.NumberColumn("Div Yield %", format="%.2f%%", help="% Div per Year"),
+    "Dividend Frequency": st.column_config.TextColumn("Freq.", help="Dividend Frequency"),
+    "Expected Div Per Year": st.column_config.NumberColumn(
+        "Expt. Div/Yr", format="$%.2f", help=f"Expected Div per Year. {DIVIDEND_TAX_HELP}",
+    ),
+    "Expected Div Per Month": st.column_config.NumberColumn(
+        "Expt. Div/Mth", format="$%.2f", help=f"Expected Div per Month. {DIVIDEND_TAX_HELP}",
+    ),
+    "Beta": st.column_config.NumberColumn(format="%.2f"),
+    "Weight %": st.column_config.NumberColumn(format="%.1f%%"),
+    "Div Return Contribution %": st.column_config.NumberColumn(
+        "Div Contrib %", format="%.2f%%", help=f"Div Return Contribution %. {DIVIDEND_TAX_HELP}",
+    ),
+}
+
+for tab, cols in zip(st.tabs(list(TAB_COLUMNS.keys())), TAB_COLUMNS.values()):
+    with tab:
+        st.dataframe(
+            view[cols],
+            use_container_width=True,
+            hide_index=True,
+            column_config=column_config,
+        )
