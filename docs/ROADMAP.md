@@ -1497,6 +1497,89 @@ figure with no % counterpart). Left for a future decision between
 extending the existing Allocation Type breakdown with P/L figures,
 adding a "Total P/L %" column to By Symbol, or both.
 
+## V4.2: Monitor Stocks Ex-Date Column
+
+### Context
+
+Cut from `main` after V4.1.2, originally scoped as "automatic trend line
+drawing" (`v4.2-auto-trend-line`) -- explored via discussion (chart-API
+feasibility, a `lab_chart` JS prototype found and reviewed, a live MSFT
+proof-of-concept published as a standalone Artifact demonstrating a
+linear-regression trend line plus pivot/cluster support-resistance with
+no external chart API needed) but never implemented in the app itself.
+Mid-branch, the user redirected to a different, real Monitor Stocks gap
+instead: knowing each holding's ex-dividend date. Branch renamed to
+`v4.2-monitor-stocks-ex-date` to match what actually shipped; automatic
+trend line drawing remains unbuilt, deferred to a future version.
+
+### Design decisions
+
+**Ex-Date is sourced from `Ticker.dividends`'s own index** (most recent
+entry, unbounded by the existing 365-day trailing-yield window since
+it's "when was the last one," not a sum) -- populated for every
+dividend payer, including weekly/monthly funds (confirmed for
+FLRT/GOOY/ICLO).
+
+**A "Payout Date" column was tried and removed.** Sourced from
+`info["dividendDate"]`, it was blank for every weekly/monthly fund
+checked (FLRT/GOOY/ICLO/SJNK) -- and for one ETF (SHV) it wasn't blank,
+it was actively *stale* (2018-04-06, for a fund paying monthly in
+2026). A guard against past-dated values was shipped first, then the
+whole column was removed once it became clear the underlying data
+source has no reliable forward payment-date data for the fund types
+that make up most of this portfolio's Dividend category.
+
+**Ex-Date cells are highlighted when they fall in the current calendar
+month** -- since Ex-Date is always a past date, "this month" alone
+means "already happened this cycle," a quick visual signal that a
+monthly/weekly payer's window has closed. Implemented via a pandas
+Styler applied on top of `column_config` (both work together on
+`st.dataframe` in modern Streamlit).
+
+### Implementation
+
+**`core/market_data.py`**: `fetch_stock_profile()` returns a new
+`Ex-Date` column.
+
+**`app_pages/monitor_stocks.py`**: `Ex-Date` added to the Overview and
+Dividends tabs' column presets and `column_config`;
+`_highlight_ex_date_this_month()` applies the current-month highlight
+via `.style.apply(..., subset=["Ex-Date"])` before rendering each tab
+that includes the column.
+
+### Testing and verification
+
+227/227 tests passing (230 at the Ex-Date+Payout-Date peak, net -3 once
+Payout Date's 3 dedicated tests were removed alongside the feature).
+Real yfinance data checked directly in chat for FLRT/GOOY/ICLO/TSM
+(Ex-Date) and SHV/SJNK (Payout Date's stale-vs-blank failure modes)
+before any UI change, same pattern as V4.1's scoping discussion. No
+`core/db.py` or schema changes.
+
+### Considered and explicitly deferred
+
+**Automatic trend line drawing** -- this branch's original scope. A
+live proof-of-concept was built and published (MSFT price chart, a
+linear-regression trend line via `numpy.polyfit`, plus a Python port of
+`lab_chart/supportResistance.js`'s pivot-and-cluster algorithm for 2
+resistance + 2 support levels) confirming the approach needs no
+external chart API -- just Plotly + numpy, both already dependencies.
+Two open questions before building it for real: which chart it targets
+(Dashboard's Portfolio Value chart vs. Monitor Stocks per-symbol, the
+latter needing a rework since `LineChartColumn` sparklines can't be
+overlaid), and what lookback window to use (the same MSFT data gave an
+opposite trend direction and different support/resistance levels at
+180 days vs. 1 year).
+
+**Payout Date, in any form** -- tried, found unreliable at the
+data-source level (not a bug in this app's code), removed rather than
+shipped half-working.
+
+**Predicted next ex-date** -- raised as an alternative to the shipped
+"highlight if in current month" interpretation; not built, since it
+needs frequency-aware date math (different intervals for
+Monthly/Quarterly/Weekly/Irregular payers) that wasn't asked for.
+
 ## Deferred / future
 
 - **Restore from a backup** -- see V2.3's "Considered and explicitly

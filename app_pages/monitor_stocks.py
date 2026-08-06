@@ -353,12 +353,13 @@ TAB_COLUMNS = {
                  "Category Weight %", "Quantity", "Avg Cost", "Latest Price", "Cost Basis", "Position Value",
                  "Unrealized", "Unrealized %", "Dividends Received", "Total P/L", "Total P/L %",
                  "Holding Period (Years)", "Total P/L %/yr", "Dividend Yield %", "Dividend Frequency",
-                 "Expected Div Per Year", "Expected Div Per Month", "Beta", "Div Return Contribution %"],
+                 "Ex-Date", "Expected Div Per Year", "Expected Div Per Month", "Beta",
+                 "Div Return Contribution %"],
     "Position": ["Symbol", "History90D", "Quantity", "Avg Cost", "Latest Price", "Cost Basis", "Position Value"],
     "Performance": ["Symbol", "History90D", "Unrealized", "Unrealized %", "Dividends Received", "Total P/L",
                      "Total P/L %", "Holding Period (Years)", "Total P/L %/yr"],
-    "Dividends": ["Symbol", "History90D", "Dividend Yield %", "Dividend Frequency", "Expected Div Per Year",
-                  "Expected Div Per Month", "Div Return Contribution %"],
+    "Dividends": ["Symbol", "History90D", "Dividend Yield %", "Dividend Frequency", "Ex-Date",
+                  "Expected Div Per Year", "Expected Div Per Month", "Div Return Contribution %"],
     "Classification": ["Symbol", "History90D", "Asset Class", "Portfolio Group", "Beta"],
 }
 column_config = {
@@ -398,6 +399,12 @@ column_config = {
     ),
     "Dividend Yield %": st.column_config.NumberColumn("Div Yield %", format="%.2f%%", help="% Div per Year"),
     "Dividend Frequency": st.column_config.TextColumn("Freq.", help="Dividend Frequency"),
+    "Ex-Date": st.column_config.DateColumn(
+        format="DD/MM/YYYY",
+        help="Most recent ex-dividend date on record. Populated for every dividend payer, "
+             "including weekly/monthly funds. Highlighted when it falls in the current month "
+             "-- this cycle's ex-date has already passed, so it's too late to buy in time for it.",
+    ),
     "Expected Div Per Year": st.column_config.NumberColumn(
         "Expt. Div/Yr", format="$%.2f", help=f"Expected Div per Year. {DIVIDEND_TAX_HELP}",
     ),
@@ -411,10 +418,26 @@ column_config = {
     ),
 }
 
+def _highlight_ex_date_this_month(col: pd.Series) -> list[str]:
+    """Ex-Date is always a past date (see compute above), so "this calendar
+    month" alone means "already happened" -- no separate >= today check
+    needed. Flags it so a monthly/weekly payer's already-passed cycle is
+    visually distinct from an older month's leftover Ex-Date."""
+    today = pd.Timestamp.today().normalize()
+    return [
+        "background-color: rgba(255, 193, 7, 0.28)" if pd.notna(v) and (v.year, v.month) == (today.year, today.month)
+        else ""
+        for v in col
+    ]
+
+
 for tab, cols in zip(st.tabs(list(TAB_COLUMNS.keys())), TAB_COLUMNS.values()):
     with tab:
+        table = view[cols]
+        if "Ex-Date" in cols:
+            table = table.style.apply(_highlight_ex_date_this_month, subset=["Ex-Date"])
         st.dataframe(
-            view[cols],
+            table,
             use_container_width=True,
             hide_index=True,
             column_config=column_config,

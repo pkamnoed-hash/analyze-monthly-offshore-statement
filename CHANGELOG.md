@@ -1,5 +1,22 @@
 # Changelog
 
+## Monitor Stocks: Ex-Date column with current-month highlighting (v4.2)
+
+Adds a real ex-dividend date to Monitor Stocks, after a "Payout Date"
+companion column turned out to be unshippable.
+
+- **`Ex-Date`** per symbol (Overview + Dividends tabs) -- the most
+  recent ex-dividend date on record, sourced from `Ticker.dividends`'s
+  own history. Works for every payer, including weekly/monthly funds.
+- **Highlighted amber** when the ex-date falls in the current calendar
+  month -- a quick "this cycle's window already passed" signal.
+- Explored and removed a **Payout Date** column: `yfinance`'s
+  `info["dividendDate"]` is blank for most funds and confirmed *stale*
+  for at least one ETF (SHV returned a 2018 date for a fund paying
+  monthly in 2026) -- not reliable enough to ship.
+- No database/schema changes.
+- Full test suite: 227/227 passing.
+
 ## Fix Monitor Stocks crash on Streamlit Community Cloud (v4.1.2)
 
 Monitor Stocks crashed on the live deployed app (`AttributeError`, not

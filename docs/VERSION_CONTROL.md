@@ -19,6 +19,8 @@ not an aspirational process, a record of what's been done.
 | `v4-dashboard-tools-integration` | V4 feature branch (first batch under "advance dashboard, tools v2, integration"). Cut from `main` after V3.1 was merged in. Regroups Dashboard's KPI cards and Monitor Stocks' Category Summary into labeled sections (worked out iteratively against a mockup + live screenshots), defaults the USD -> THB rate from a live yfinance quote, and fixes a real dtype bug that showed literal "None" instead of a blank Realized P/L cell for a buy-only trade. No `core/db.py`/schema changes. Merged into `main`. |
 | `v4.1.1-fix-oversell-precision` | V4.1.1 hotfix branch, cut from `main` (not from v4.1 -- unrelated to that branch's theme). Fixes a floating-point false-positive on Record Trade's oversell check (selling an entire position built from many small buys could trip "this would sell more than you have"), adding the same `+1e-9` tolerance `estimate_sell_realized_pl()` already used. No database/schema changes. Merged into `main`. |
 | `v4.1-revised-number-and-stats` | V4.1 feature branch (revised number and stats). Cut from `main` after V4 was merged in. Started as an open scoping discussion (dividend/ROI numbers, via a one-off `scripts/dividend_category_stats.py`), then built real Monitor Stocks features: per-symbol `Total P/L`/`Total P/L %` (actual Dividends Received + Unrealized), `Holding Period (Years)`/`Total P/L %/yr`, a category-level "Total Return" group in Category Summary, and the per-symbol table split into 5 tabs. No `core/db.py`/schema changes. Merged into `main`. |
+| `v4.1.2-fix-holding-period-dtype` | V4.1.2 hotfix branch, cut from `main` (not from v4.1 -- unrelated feature work, same rationale as v4.1.1). Fixes a production-only `AttributeError` on Monitor Stocks (`.dt.days` called on a pandas Series that fell back to `dtype=object` instead of `datetime64` after a `.map()` with zero index overlap) by forcing `pd.to_datetime(..., errors="coerce")` before the `.dt` accessor. No database/schema changes. Merged into `main`, tagged `v4.1.2`. |
+| `v4.2-monitor-stocks-ex-date` | V4.2 feature branch. Cut from `main` after v4.1.2 was merged in, originally as `v4.2-auto-trend-line` -- explored automatic trend line drawing via discussion and a live MSFT proof-of-concept (published as a standalone Artifact, not part of this repo), confirming the approach (Plotly + numpy linear regression, no external chart API) but never implementing it in the app. Redirected mid-branch to a different, real gap instead: adds an `Ex-Date` column to Monitor Stocks (Overview + Dividends tabs), highlighted when it falls in the current month. A companion "Payout Date" column was tried and removed after `yfinance`'s `info["dividendDate"]` was found blank for most funds and stale for at least one ETF (SHV). Renamed to match what shipped. No `core/db.py`/schema changes. Merged into `main`. |
 
 Naming convention: `vN-short-description` (or `vN.M-short-description` for a
 smaller, additive feature that doesn't warrant a new whole version number),
@@ -38,6 +40,8 @@ Version planning
 	○ 4.0 (`v4-dashboard-tools-integration`) Dashboard/Monitor Stocks KPI regrouping, live USD/THB default, Realized P/L dtype fix
 	○ 4.1.1 (`v4.1.1-fix-oversell-precision`) hotfix: oversell false-positive floating-point tolerance
 	○ 4.1 (`v4.1-revised-number-and-stats`) Monitor Stocks Total P/L/%, Holding Period, category-level Total Return, tabbed columns
+	○ 4.1.2 (`v4.1.2-fix-holding-period-dtype`) hotfix: fix production-only dtype crash on Monitor Stocks
+	○ 4.2 (`v4.2-monitor-stocks-ex-date`) Monitor Stocks Ex-Date column + current-month highlighting; automatic trend line explored (live demo, not yet built) -- deferred
 - 5 - cosmetic
 - 6 - tax management
 
@@ -86,19 +90,17 @@ tip commit was already an ancestor of `main`). Feature branches that are
 still useful as a labeled reference point (`V1-record-trade-and-view`,
 `v2-Reconciliation`) are kept rather than deleted by default.
 
-## Current status (as of `v4.1-revised-number-and-stats`)
+## Current status (as of `v4.2-monitor-stocks-ex-date`)
 
-`main` has V1, V2, V2.1, V2.2, V2.3, V2.4, V3, V3.1, V4, V4.1.1, and V4.1
-merged in (`v4.1-revised-number-and-stats` merged via `git merge --no-ff`,
-225/225 passing on `main` post-merge). The app is live at
-`myinvestment27.streamlit.app`, but that deployment is still tracking
-the stale `v3-hosting-prep` branch, not `main` -- Streamlit Community
-Cloud has no way to switch an already-deployed app's tracked branch, so
-none of V3.1/V4/V4.1.1/V4.1 is live yet. A delete + redeploy pointing at
-`main` with fresh secrets was started (see `docs/DEPLOYMENT.md`) and hit
-a `ModuleNotFoundError: No module named 'core'` from the new app being
-configured with the wrong main file path (`app_pages/dashboard.py`
-instead of the root-level `dashboard_app.py`) -- correction attempted,
-not yet confirmed live. Next: decide whether to apply the "Total
-Return" concept (Total P/L/%) to the Dashboard page too (raised, not
-yet scoped), or move on to something else.
+`main` has V1, V2, V2.1, V2.2, V2.3, V2.4, V3, V3.1, V4, V4.1.1, V4.1,
+V4.1.2, and V4.2 merged in (227/227 passing on `main` post-merge). V4.2
+adds Monitor Stocks' `Ex-Date` column; automatic trend line drawing
+(this branch's original scope) was explored via a live MSFT
+proof-of-concept but not built into the app -- still open for a future
+version, along with which chart it would target and what lookback
+window to use. Also still open: whether to apply the "Total Return"
+concept (Total P/L/%) to the Dashboard page (raised during v4.1, not
+yet scoped), and confirming the deployed `myinvestment27.streamlit.app`
+(pointed at `main`, root-level `dashboard_app.py` as main file path)
+has picked up V4.2 -- it did pick up V4.1.2, confirmed via a live
+iPad screenshot during that hotfix.
