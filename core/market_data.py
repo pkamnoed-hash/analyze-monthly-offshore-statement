@@ -22,6 +22,7 @@ _EMPTY_COLUMNS = {
     "Dividend Per Year": "float64",
     "Dividend Yield %": "float64",
     "Dividend Frequency": "object",
+    "Ex-Date": "datetime64[ns]",
 }
 
 _FREQUENCY_LABELS = {0: "None", 1: "Annual", 2: "Semi-Annual", 4: "Quarterly", 12: "Monthly"}
@@ -111,6 +112,15 @@ def fetch_stock_profile(symbols: list[str], *, yf_module=None) -> pd.DataFrame:
     from an unresolvable symbol, which gets NaN/NaN/None like every other
     field in the exception branch below.
 
+    `Ex-Date` is the most recent entry in `Ticker.dividends`'s own index
+    (unbounded by the 365-day window above, since it's just "when was the
+    last one," not a sum) -- populated for every dividend payer,
+    weekly/monthly funds included. (A `Payout Date` column was tried
+    alongside this, sourced from `info["dividendDate"]`, but that field is
+    blank for most funds and confirmed *stale* for at least one ETF -- SHV
+    returned 2018-04-06 for a fund paying monthly in 2026 -- so it was
+    removed rather than shown unreliably.)
+
     Deliberately uses explicit `start`/`end` dates (calendar days), not
     yfinance's `period="90d"` shorthand -- confirmed by direct comparison
     that `period="90d"` actually returns 90 *trading* days, spanning ~131
@@ -158,9 +168,11 @@ def fetch_stock_profile(symbols: list[str], *, yf_module=None) -> pd.DataFrame:
                 trailing_divs = dividends[div_index >= today - pd.Timedelta(days=DIVIDEND_LOOKBACK_DAYS)]
                 dividend_per_year = float(trailing_divs.sum())
                 payout_count = len(trailing_divs)
+                ex_date = div_index.max()
             else:
                 dividend_per_year = 0.0
                 payout_count = 0
+                ex_date = pd.NaT
             dividend_yield_pct = (dividend_per_year / latest_price * 100) if latest_price else 0.0
 
             rows.append({
@@ -175,6 +187,7 @@ def fetch_stock_profile(symbols: list[str], *, yf_module=None) -> pd.DataFrame:
                 "Dividend Per Year": dividend_per_year,
                 "Dividend Yield %": dividend_yield_pct,
                 "Dividend Frequency": _frequency_label(payout_count),
+                "Ex-Date": ex_date,
             })
         except Exception:
             rows.append({
@@ -189,6 +202,7 @@ def fetch_stock_profile(symbols: list[str], *, yf_module=None) -> pd.DataFrame:
                 "Dividend Per Year": float("nan"),
                 "Dividend Yield %": float("nan"),
                 "Dividend Frequency": None,
+                "Ex-Date": pd.NaT,
             })
 
     if not rows:

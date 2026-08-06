@@ -173,6 +173,27 @@ class TestFetchStockProfile:
         assert arm["Dividend Yield %"] == 0.0
         assert arm["Dividend Frequency"] == "None"
 
+    def test_ex_date_is_most_recent_dividend_regardless_of_365_day_window(self):
+        # Ex-Date is "when was the last one," not a sum -- unlike Dividend Per Year, it
+        # shouldn't be excluded just because it falls outside the trailing-365-day window.
+        yf_module = FakeYfModule({
+            "X": FakeTicker(
+                info={"longName": "X Corp"},
+                history_df=_history([100.0]),
+                dividends=_dividends({30: 1.0, 400: 1.0}),
+            ),
+        })
+        result = fetch_stock_profile(["X"], yf_module=yf_module)
+        expected = pd.Timestamp.today().normalize() - pd.Timedelta(days=30)
+        assert result.iloc[0]["Ex-Date"] == expected
+
+    def test_ex_date_is_nat_for_non_dividend_payer(self):
+        yf_module = FakeYfModule({
+            "ARM": FakeTicker(info={"longName": "Arm Holdings"}, history_df=_history([150.0])),
+        })
+        result = fetch_stock_profile(["ARM"], yf_module=yf_module)
+        assert pd.isna(result.iloc[0]["Ex-Date"])
+
     def test_falls_back_to_shortname_when_longname_missing(self):
         yf_module = FakeYfModule({
             "X": FakeTicker(info={"shortName": "X Corp"}, history_df=_history([1.0, 2.0])),
@@ -208,6 +229,7 @@ class TestFetchStockProfile:
         assert pd.isna(bad["Dividend Per Year"])
         assert pd.isna(bad["Dividend Yield %"])
         assert pd.isna(bad["Dividend Frequency"])
+        assert pd.isna(bad["Ex-Date"])
         good = result[result["Symbol"] == "GOOD"].iloc[0]
         assert good["Latest Price"] == pytest.approx(11.0)
 
@@ -243,7 +265,7 @@ class TestFetchStockProfile:
         assert result.empty
         assert list(result.columns) == ["Symbol", "Description", "Sector", "Industry", "Quote Type", "Beta",
                                          "History90D", "Latest Price", "Dividend Per Year", "Dividend Yield %",
-                                         "Dividend Frequency"]
+                                         "Dividend Frequency", "Ex-Date"]
         assert result["Beta"].dtype == "float64"
         assert result["Symbol"].dtype == "object"
 
