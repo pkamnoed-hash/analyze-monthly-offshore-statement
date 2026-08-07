@@ -21,6 +21,7 @@ not an aspirational process, a record of what's been done.
 | `v4.1-revised-number-and-stats` | V4.1 feature branch (revised number and stats). Cut from `main` after V4 was merged in. Started as an open scoping discussion (dividend/ROI numbers, via a one-off `scripts/dividend_category_stats.py`), then built real Monitor Stocks features: per-symbol `Total P/L`/`Total P/L %` (actual Dividends Received + Unrealized), `Holding Period (Years)`/`Total P/L %/yr`, a category-level "Total Return" group in Category Summary, and the per-symbol table split into 5 tabs. No `core/db.py`/schema changes. Merged into `main`. |
 | `v4.1.2-fix-holding-period-dtype` | V4.1.2 hotfix branch, cut from `main` (not from v4.1 -- unrelated feature work, same rationale as v4.1.1). Fixes a production-only `AttributeError` on Monitor Stocks (`.dt.days` called on a pandas Series that fell back to `dtype=object` instead of `datetime64` after a `.map()` with zero index overlap) by forcing `pd.to_datetime(..., errors="coerce")` before the `.dt` accessor. No database/schema changes. Merged into `main`, tagged `v4.1.2`. |
 | `v4.2-monitor-stocks-ex-date` | V4.2 feature branch. Cut from `main` after v4.1.2 was merged in, originally as `v4.2-auto-trend-line` -- explored automatic trend line drawing via discussion and a live MSFT proof-of-concept (published as a standalone Artifact, not part of this repo), confirming the approach (Plotly + numpy linear regression, no external chart API) but never implementing it in the app. Redirected mid-branch to a different, real gap instead: adds an `Ex-Date` column to Monitor Stocks (Overview + Dividends tabs), highlighted when it falls in the current month. A companion "Payout Date" column was tried and removed after `yfinance`'s `info["dividendDate"]` was found blank for most funds and stale for at least one ETF (SHV). Renamed to match what shipped. No `core/db.py`/schema changes. Merged into `main`. |
+| `v4.3-rebalance-columns` | V4.3 feature branch. Cut from `main` after v4.2 was merged in. Improvement column(s) on the Rebalance & Reallocate page -- scope not yet defined at branch-creation time, placeholder row to be filled in once the feature is scoped. |
 
 Naming convention: `vN-short-description` (or `vN.M-short-description` for a
 smaller, additive feature that doesn't warrant a new whole version number),
@@ -42,6 +43,7 @@ Version planning
 	○ 4.1 (`v4.1-revised-number-and-stats`) Monitor Stocks Total P/L/%, Holding Period, category-level Total Return, tabbed columns
 	○ 4.1.2 (`v4.1.2-fix-holding-period-dtype`) hotfix: fix production-only dtype crash on Monitor Stocks
 	○ 4.2 (`v4.2-monitor-stocks-ex-date`) Monitor Stocks Ex-Date column + current-month highlighting; automatic trend line explored (live demo, not yet built) -- deferred
+	○ 4.3 (`v4.3-rebalance-columns`) Rebalance & Reallocate page column improvement(s) -- scope not yet defined
 - 5 - cosmetic
 - 6 - tax management
 
@@ -90,17 +92,16 @@ tip commit was already an ancestor of `main`). Feature branches that are
 still useful as a labeled reference point (`V1-record-trade-and-view`,
 `v2-Reconciliation`) are kept rather than deleted by default.
 
-## Current status (as of `v4.2-monitor-stocks-ex-date`)
+## Current status (as of `v4.3-rebalance-columns`)
 
 `main` has V1, V2, V2.1, V2.2, V2.3, V2.4, V3, V3.1, V4, V4.1.1, V4.1,
-V4.1.2, and V4.2 merged in (227/227 passing on `main` post-merge). V4.2
-adds Monitor Stocks' `Ex-Date` column; automatic trend line drawing
-(this branch's original scope) was explored via a live MSFT
-proof-of-concept but not built into the app -- still open for a future
-version, along with which chart it would target and what lookback
-window to use. Also still open: whether to apply the "Total Return"
-concept (Total P/L/%) to the Dashboard page (raised during v4.1, not
-yet scoped), and confirming the deployed `myinvestment27.streamlit.app`
-(pointed at `main`, root-level `dashboard_app.py` as main file path)
-has picked up V4.2 -- it did pick up V4.1.2, confirmed via a live
-iPad screenshot during that hotfix.
+V4.1.2, and V4.2 merged in, tagged through `v4.2` (tip commit
+`48a4210`, "Merge v4.2: Monitor Stocks Ex-Date column with
+current-month highlighting"). `v4.3-rebalance-columns` was just cut
+from `main` to add improvement column(s) to the Rebalance & Reallocate
+page -- scope not yet defined, nothing implemented yet. Still open from
+earlier versions: automatic trend line drawing (v4.2's original scope,
+validated via a live MSFT proof-of-concept but not built into the app),
+whether to apply the "Total Return" concept (Total P/L/%) to the
+Dashboard page (raised during v4.1), and confirming the deployed
+`myinvestment27.streamlit.app` has picked up V4.2.
