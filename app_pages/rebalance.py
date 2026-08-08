@@ -95,7 +95,7 @@ def _pie(source_df, names_col, values_col, title):
 
 
 DISPLAY_COLS = [
-    "Symbol", "History90D", "% Reinvest", "Invest $", "Beta",
+    "Symbol", "History90D", "% Reinvest", "Invest $", "Beta", "Ex-Date",
     "Current Cat Weight %", "New Cat Weight %",
     "Current Div Contrib %", "New Div Contrib %",
     "Current Expected Div/Yr", "New Expected Div/Yr",
@@ -122,7 +122,7 @@ TAB_COLUMNS = {
                      "Current Unrealized %", "New Unrealized %", "Dividends Received",
                      "Current Total P/L", "New Total P/L",
                      "Current Total P/L %", "New Total P/L %"],
-    "Analyze": ["Symbol", "History90D", "% Reinvest", "Invest $", "Beta",
+    "Analyze": ["Symbol", "History90D", "% Reinvest", "Invest $", "Beta", "Ex-Date",
                 "Current Cat Weight %", "New Cat Weight %",
                 "Current Div Contrib %", "New Div Contrib %",
                 "Current Expected Div/Mo", "New Expected Div/Mo",
@@ -311,6 +311,12 @@ def _rebalance_body(holdings: pd.DataFrame, refreshed_at: datetime):
         ),
         "Invest $": st.column_config.NumberColumn("Invest $", format="$%.2f", help="$ amount above x this row's % Reinvest."),
         "Beta": st.column_config.NumberColumn(format="%.2f"),
+        "Ex-Date": st.column_config.DateColumn(
+            format="DD/MM/YYYY",
+            help="Most recent ex-dividend date on record, same source as Monitor Stocks. "
+                 "Highlighted when it falls in the current month -- this cycle's ex-date "
+                 "has already passed, so it's too late to buy in time for it.",
+        ),
         "Current Cat Weight %": st.column_config.NumberColumn("Cat Wt %", format="%.1f%%", help="Current Category Weight %"),
         "New Cat Weight %": st.column_config.NumberColumn("New Cat Wt %", format="%.1f%%", help="Category Weight % after this allocation"),
         "Current Div Contrib %": st.column_config.NumberColumn(
@@ -374,6 +380,23 @@ def _rebalance_body(holdings: pd.DataFrame, refreshed_at: datetime):
         ["Analyze", "Overview", "Weight", "Dividend Impact", "Performance"]
     )
 
+    def _styled(df):
+        # Same highlight as Monitor Stocks: Ex-Date is always a past date, so "this
+        # calendar month" alone means "already happened" -- flags a monthly/weekly
+        # payer's already-passed cycle. Works on st.data_editor too (Analyze below),
+        # since Streamlit only applies Styler backgrounds to non-editable columns, and
+        # Ex-Date is never one of Analyze's editable ones.
+        if "Ex-Date" not in df.columns:
+            return df
+        today = pd.Timestamp.today().normalize()
+        return df.style.apply(
+            lambda col: [
+                "background-color: rgba(255, 193, 7, 0.28)" if pd.notna(v) and (v.year, v.month) == (today.year, today.month)
+                else "" for v in col
+            ],
+            subset=["Ex-Date"],
+        )
+
     # Overview/Weight/Dividend Impact/Performance are read-only slices of the same
     # snapshot -- editing (% Reinvest, Bought?) only ever happens on Analyze below, since
     # Streamlit can't cleanly reconcile the same editable cell split across two
@@ -381,7 +404,7 @@ def _rebalance_body(holdings: pd.DataFrame, refreshed_at: datetime):
     # column that appears anywhere else on this page); the other three are focused slices.
     with tab_overview:
         st.dataframe(
-            snapshot["grid_source"][DISPLAY_COLS],
+            _styled(snapshot["grid_source"][DISPLAY_COLS]),
             use_container_width=True,
             hide_index=True,
             column_config=column_config,
@@ -407,7 +430,7 @@ def _rebalance_body(holdings: pd.DataFrame, refreshed_at: datetime):
     with tab_analyze:
         with st.form("rebalance_form"):
             edited = st.data_editor(
-                snapshot["grid_source"][TAB_COLUMNS["Analyze"]],
+                _styled(snapshot["grid_source"][TAB_COLUMNS["Analyze"]]),
                 use_container_width=True,
                 hide_index=True,
                 disabled=[c for c in TAB_COLUMNS["Analyze"] if c not in ("% Reinvest", "Bought?")],
