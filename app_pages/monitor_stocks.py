@@ -40,12 +40,14 @@ def _cached_fetch_stock_profile(symbols: list[str]) -> tuple[pd.DataFrame, datet
 
 
 @st.cache_data
-def _dividends_received_by_symbol() -> pd.Series:
-    """Actual (not projected) dividends received per symbol, all-time, blended xlsx
-    history (<=cutoff) + live db (>cutoff) -- the exact same data source and blending
-    Dashboard's own per-symbol "Dividends" column already uses, just not previously
-    loaded on this page. Cached like Dashboard's own load_data() -- the xlsx is static
-    at runtime, only db.fetch_dividends() (uncached) can add new rows."""
+def _blended_dividend_rows() -> pd.DataFrame:
+    """Actual (not projected) dividend/distribution rows, all-time, blended xlsx history
+    (<=cutoff) + live db (>cutoff) -- the exact same data source and blending Dashboard's
+    own per-symbol "Dividends" column already uses, just not previously loaded on this
+    page. Cached like Dashboard's own load_data() -- the xlsx is static at runtime, only
+    db.fetch_dividends() (uncached) can add new rows. Row-level (not pre-summed) so both
+    _dividends_received_by_symbol() and the Monthly Dividend chart below can slice it
+    differently without a second xlsx load."""
     xls = pd.ExcelFile(DATA_FILE)
     summary = pd.read_excel(xls, "Summary")
     income = pd.read_excel(xls, "Income")
@@ -55,8 +57,11 @@ def _dividends_received_by_symbol() -> pd.Series:
     cutoff = summary["Month"].max() + pd.offsets.MonthEnd(0)
 
     blended_income = calculations.blended_dividends(income, db.fetch_dividends(), cutoff)
-    div_rows = blended_income[blended_income["Entry Type"].isin(DIVIDEND_ENTRY_TYPES) & blended_income["Symbol"].notna()]
-    return div_rows.groupby("Symbol")["Net Amt"].sum()
+    return blended_income[blended_income["Entry Type"].isin(DIVIDEND_ENTRY_TYPES) & blended_income["Symbol"].notna()]
+
+
+def _dividends_received_by_symbol() -> pd.Series:
+    return _blended_dividend_rows().groupby("Symbol")["Net Amt"].sum()
 
 
 st.title("Monitor Stocks")
@@ -340,6 +345,29 @@ if not view.empty:
         # so no separate group-by-sum step is needed (each symbol already has one Weight % value).
         symbol_pie = _grouped_pie(view, "Symbol", f"Weight % by Symbol -- {type_filter}")
         st.plotly_chart(symbol_pie, use_container_width=True)
+
+    # Same chart as Dashboard's own "Monthly Dividend" (blended xlsx + live db, same
+    # DIVIDEND_ENTRY_TYPES vocabulary), scoped here to the current type_filter's symbols
+    # instead of Dashboard's date range -- this page has no date picker, only a category
+    # one. All-time, not bounded to any window, matching how Dividends Received/Total P/L
+    # above are already all-time on this page.
+    div_rows = _blended_dividend_rows()
+    div_rows = div_rows[div_rows["Symbol"].isin(view["Symbol"])]
+    if not div_rows.empty:
+        dividend_by_month = div_rows.groupby(div_rows["Trade Date"].dt.to_period("M"))["Net Amt"].sum().reset_index()
+        dividend_by_month = dividend_by_month.rename(columns={"Trade Date": "Month"})
+        dividend_by_month["Month"] = dividend_by_month["Month"].dt.to_timestamp()
+        avg_monthly_dividend = dividend_by_month["Net Amt"].mean()
+
+        fig_div = px.bar(
+            dividend_by_month, x="Month", y="Net Amt",
+            title=f"Monthly Dividend -- {type_filter} (net of 15% withholding tax)",
+            color_discrete_sequence=["#1f77b4"],
+        )
+        fig_div.add_hline(y=avg_monthly_dividend, line_dash="dot", line_color="gray",
+                           annotation_text=f"Avg: ${avg_monthly_dividend:,.2f}/mo", annotation_position="top left")
+        fig_div.update_layout(yaxis_title="USD", xaxis_title="Month")
+        st.plotly_chart(fig_div, use_container_width=True)
 
 st.caption(f"Showing {len(view)} of {len(holdings)} symbols.")
 

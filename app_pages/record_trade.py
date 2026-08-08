@@ -198,9 +198,11 @@ if symbol:
     current_qty = match.iloc[0]["Quantity"] if not match.empty else 0.0
     if not match.empty:
         pos = match.iloc[0]
+        # \$ escapes -- two bare $ in one markdown string pair up as Streamlit's inline-math
+        # delimiter, mangling everything between them into a broken math-mode span.
         st.info(
             f"Current position: **{pos['Quantity']:g} shares** of {symbol} at avg cost "
-            f"**${pos['Avg Cost']:,.4f}/share** (cost basis ${pos['Cost Basis']:,.2f})"
+            f"**\\${pos['Avg Cost']:,.4f}/share** (cost basis \\${pos['Cost Basis']:,.2f})"
         )
     else:
         st.caption(f"No current position in {symbol}.")

@@ -98,6 +98,15 @@ def apply_allocation(holdings: pd.DataFrame, amount: float, pct_by_symbol: dict)
     get_dividend_holdings()) using New Cat Weight % instead -- summed
     across every row, gives the basket's blended yield after this
     allocation, for comparison against the current blended yield.
+
+    New Total P/L = New Unrealized $ + Dividends Received -- requires the
+    caller to have already merged a "Dividends Received" column into
+    `holdings` (app_pages/rebalance.py does this; not computed here since
+    it needs the xlsx + Streamlit caching this module deliberately stays
+    free of). Numerically equal to Current Total P/L (New Unrealized $
+    equals Current Unrealized $, and buying more doesn't change dividends
+    already received) -- only New Total P/L % moves, since New Cost Basis
+    grew. Same relationship as New Unrealized $ vs New Unrealized % above.
     """
     df = holdings.copy()
     pct = df["Symbol"].map(pct_by_symbol).fillna(0.0)
@@ -118,6 +127,11 @@ def apply_allocation(holdings: pd.DataFrame, amount: float, pct_by_symbol: dict)
     df["New Expected Div/Mo"] = df["New Expected Div/Yr"] / 12
 
     df["New Div Contrib %"] = df["New Cat Weight %"] / 100 * df["Dividend Yield %"] * (1 - WITHHOLDING_TAX_RATE)
+
+    df["New Total P/L"] = df["New Unrealized $"] + df["Dividends Received"]
+    df["New Total P/L %"] = (
+        df["New Total P/L"] / df["New Cost Basis"] * 100
+    ).where(df["New Cost Basis"] > 0, float("nan"))
 
     return df
 

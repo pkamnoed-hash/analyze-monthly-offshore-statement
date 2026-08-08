@@ -145,9 +145,9 @@ class TestApplyAllocation:
     def _holdings(self):
         return pd.DataFrame([
             {"Symbol": "AAA", "Quantity": 10.0, "Cost Basis": 1000.0, "Latest Price": 120.0,
-             "Dividend Yield %": 4.0, "Classification": "Tech"},
+             "Dividend Yield %": 4.0, "Classification": "Tech", "Dividends Received": 50.0},
             {"Symbol": "BBB", "Quantity": 10.0, "Cost Basis": 500.0, "Latest Price": 50.0,
-             "Dividend Yield %": 2.0, "Classification": "Health"},
+             "Dividend Yield %": 2.0, "Classification": "Health", "Dividends Received": 0.0},
         ])
 
     def test_invest_amount_split_by_pct(self):
@@ -198,6 +198,34 @@ class TestApplyAllocation:
         result = rebalance.apply_allocation(self._holdings(), 1000.0, {"AAA": 60, "BBB": 40})
         blended_yield = result["New Expected Div/Yr"].sum() / result["New Value"].sum() * 100
         assert result["New Div Contrib %"].sum() == pytest.approx(blended_yield)
+
+    def test_new_total_pl_equals_new_unrealized_plus_dividends_received(self):
+        result = rebalance.apply_allocation(self._holdings(), 1000.0, {"AAA": 100}).set_index("Symbol")
+        assert result.loc["AAA", "New Total P/L"] == pytest.approx(
+            result.loc["AAA", "New Unrealized $"] + 50.0
+        )
+
+    def test_new_total_pl_dollar_equals_current_total_pl_dollar(self):
+        # Buying more at market price doesn't change Unrealized $ or Dividends Received --
+        # New Total P/L should be numerically unchanged from Current Total P/L.
+        holdings = self._holdings()
+        result = rebalance.apply_allocation(holdings, 1000.0, {"AAA": 100}).set_index("Symbol")
+        current_total_pl = (10.0 * 120.0 - 1000.0) + 50.0  # Current Unrealized $ + Dividends Received
+        assert result.loc["AAA", "New Total P/L"] == pytest.approx(current_total_pl)
+
+    def test_new_total_pl_pct_moves_toward_zero_as_cost_basis_grows(self):
+        holdings = self._holdings()
+        result = rebalance.apply_allocation(holdings, 1000.0, {"AAA": 100}).set_index("Symbol")
+        current_pct = 250.0 / 1000.0 * 100  # (200 unrealized + 50 dividends) / cost basis
+        assert result.loc["AAA", "New Total P/L %"] < current_pct
+
+    def test_zero_cost_basis_gives_nan_total_pl_pct_not_a_crash(self):
+        holdings = pd.DataFrame([
+            {"Symbol": "AAA", "Quantity": 0.0, "Cost Basis": 0.0, "Latest Price": 100.0,
+             "Dividend Yield %": 0.0, "Classification": "Tech", "Dividends Received": 0.0},
+        ])
+        result = rebalance.apply_allocation(holdings, 0.0, {"AAA": 100}).iloc[0]
+        assert pd.isna(result["New Total P/L %"])
 
 
 class TestSectorBreakdown:
