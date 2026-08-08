@@ -1580,6 +1580,139 @@ shipped half-working.
 needs frequency-aware date math (different intervals for
 Monthly/Quarterly/Weekly/Irregular payers) that wasn't asked for.
 
+## V4.3: Rebalance & Reallocate Overhaul, Monitor Stocks Monthly Dividend Chart
+
+### Context
+
+Cut from `main` after V4.2. Original scope ("add improvement column(s)
+to the Rebalance & Reallocate page") was loose; landed through
+iterative chat-shown mockups against real live plan data, revised
+several times each. Grew to cover: splitting Rebalance & Reallocate's
+single wide table into tabs (mirroring Monitor Stocks' V4.1 pattern),
+adding real Total P/L tracking (mirroring Monitor Stocks' own Total
+P/L), a new "Analyze" tab combining Beta with allocation-impact
+columns, a THB -> USD reference calculator, a Summary KPI redesign, and
+a real Streamlit markdown rendering bug fix applied across four pages.
+Also added a Monthly Dividend chart to Monitor Stocks, validated
+end-to-end against the account's real broker statement PDFs.
+
+### Design decisions
+
+**Tab split, and why Rebalance's version differs from Monitor Stocks'.**
+Monitor Stocks' V4.1 tabs are all read-only, trivial to split.
+Rebalance has a single editable grid (`% Reinvest`/`Bought?`) feeding
+one Save button -- splitting the *same* editable columns across
+multiple simultaneously-visible tabs isn't something Streamlit
+reconciles automatically. First iteration kept Overview as the one
+editable tab, with new Weight/Dividend Impact/Performance tabs
+read-only. Once a 5th "Analyze" tab was added specifically to combine
+`Beta` with allocation-impact columns, the user asked for Analyze to
+be editable too -- rather than run two independent editable forms
+(technically fine, since `st.tabs()` doesn't rerun the script on tab
+switch, so two independent `st.form`s don't actually conflict, but
+confusingly asymmetric), the simplest resolution flips the roles:
+**Overview becomes read-only** (a full superset view, same pattern as
+the other three), **Analyze becomes the sole editable tab**.
+
+**Total P/L addition mirrors Monitor Stocks exactly** -- `Total P/L =
+Unrealized $ + actual Dividends Received (all-time)`. Needed a new
+page-level `_dividends_received_by_symbol()` cached helper (xlsx +
+live db blend, same source Monitor Stocks' V4.1 version uses) since
+`core/rebalance.py`'s `get_dividend_holdings()` has no dividends-received
+data of its own. `New Total P/L`/`New Total P/L %` added to
+`apply_allocation()` in `core/rebalance.py` -- numerically equal to
+Current Total P/L (buying more doesn't change unrealized $ or
+dividends already received), only the `%` moves since cost basis grows.
+
+**Beta was already-fetched, unused data** -- `market_data.fetch_stock_profile()`
+already returns it, already merged into `holdings` via
+`get_dividend_holdings()`, just never surfaced in `DISPLAY_COLS`/
+`column_config` before this branch. Added to both Overview and Analyze.
+
+**THB -> USD quick calculator is a standalone reference tool, not wired
+to the actual `$` amount input** -- type a THB figure, read the USD
+equivalent, then type that into the real field yourself. No auto-fill,
+no saved state. Reuses the same `fetch_usd_thb_rate()` Dashboard's own
+rate widget uses, but as an independent copy -- Dashboard's widget has
+no explicit session-state key to safely share across pages.
+
+**Summary KPIs redesigned**: replaced single-value-plus-delta-badge
+metrics (`Expected Div/Mo: $265.61, +$11.03`) with explicit
+side-by-side Current/New pairs, matching the `% allocated | %
+remaining` row's existing visual pattern -- easier to read both
+numbers directly rather than doing the subtraction mentally.
+
+**A real Streamlit rendering bug, found and fixed across 4 pages**: any
+`st.caption`/`st.markdown`/`st.info`/`st.success` string containing two
+bare `$` characters gets its middle span silently treated as inline
+LaTeX math by Streamlit's markdown renderer, producing broken green
+monospace text instead of literal dollar signs. Found while collapsing
+Rebalance's intro caption into an expander; the same 2-bare-`$` pattern
+was then found and fixed proactively (not reported broken) in
+`dashboard.py` (a conditional reconciliation note), `record_trade.py`
+(the "Current position" info box), and `record_dividend.py` (the
+"Saved N row(s)" success message) via `\$` escaping.
+
+### Implementation
+
+**`app_pages/rebalance.py`**: `DATA_FILE`/`DIVIDEND_ENTRY_TYPES`/
+`_dividends_received_by_symbol()` (new, mirrors monitor_stocks.py);
+`Dividends Received`/`Current Total P/L`/`Current Total P/L %` added to
+`holdings` at the page layer; `Beta` added to `DISPLAY_COLS`/
+`column_config`; 5-tab structure (Overview/Weight/Dividend
+Impact/Performance/Analyze) -- Overview and the 3 focused tabs are
+plain read-only `st.dataframe`, Analyze holds the `st.form` +
+`st.data_editor` + Save; Summary section's `st.metric` calls split
+into Current/New column pairs; THB calculator expander; intro caption
+collapsed into an expander; `\$` escaping throughout.
+
+**`core/rebalance.py`**: `apply_allocation()` gains `New Total P/L`/
+`New Total P/L %`, requires `Dividends Received` already present in
+the input `holdings` (caller's responsibility, documented in the
+docstring).
+
+**`app_pages/monitor_stocks.py`**: new `_blended_dividend_rows()`
+(refactored out of the existing `_dividends_received_by_symbol()`,
+row-level not pre-summed) backing a new Monthly Dividend bar chart
+(same shape as Dashboard's own), scoped to the page's existing
+`type_filter` category radio instead of a date range (this page has no
+date picker).
+
+**`app_pages/dashboard.py`, `record_trade.py`, `record_dividend.py`**:
+`\$` escaping fix for the same Streamlit inline-math rendering bug.
+
+### Testing and verification
+
+231/231 tests passing (227 + 4 new for `apply_allocation()`'s Total
+P/L behavior: equals-Current-dollar-amount, moves-toward-zero-percent,
+zero-cost-basis-gives-NaN). Real broker-statement validation: the
+Monthly Dividend chart's underlying blended-dividend computation was
+checked line-by-line against the March 2025 official Alpaca/Dime!
+broker statement PDF (`reports/2025/account_statement_947159514_20250331.pdf`)
+and matched exactly -- both the month total ($278.92 net) and a
+specific symbol (KLIP, $20.40) that had appeared to mismatch against
+the user's separate manual Excel tracker. That tracker turned out to
+be the less reliable source (a July 2026 backup file with its own
+date-bucketing quirks), not the app.
+
+### Considered and explicitly deferred
+
+**A shared Save button across Overview and Analyze** -- considered
+(technically feasible, since Streamlit tabs don't rerun the script on
+switch, so two independent forms don't actually conflict), rejected in
+favor of the simpler one-editable-tab design once the user proposed it
+directly.
+
+**Centralizing `_dividends_received_by_symbol()`/`DATA_FILE` into
+`core/`** -- not done; matches this repo's existing precedent of
+small, independently-cached, page-local copies of this same
+xlsx-loading logic (already duplicated between `dashboard.py` and
+`monitor_stocks.py` before this branch).
+
+**Sharing Dashboard's USD -> THB rate widget with Rebalance's
+calculator** -- not done; Dashboard's widget has no explicit
+session-state key to read from another page reliably.
+
 ## Deferred / future
 
 - **Restore from a backup** -- see V2.3's "Considered and explicitly

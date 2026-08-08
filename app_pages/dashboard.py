@@ -289,9 +289,11 @@ c9.metric("Interest", f"${total_interest:,.2f}", delta=thb(total_interest), delt
                "history shows $0 here except a one-time year-end reallocation catching up prior months.")
 
 if abs(balance_based_gain - investment_gain) > 1:
+    # \$ escapes -- two bare $ in one caption pair up as Streamlit markdown's inline-math
+    # delimiter, mangling everything between them into a broken math-mode span.
     st.caption(
-        f"Note: (Portfolio Value − Net Deposits) gives ${balance_based_gain:,.2f}, which differs from the "
-        f"Investment Gain/Loss above by ${balance_based_gain - investment_gain:,.2f}. Most of that gap is the "
+        f"Note: (Portfolio Value − Net Deposits) gives \\${balance_based_gain:,.2f}, which differs from the "
+        f"Investment Gain/Loss above by \\${balance_based_gain - investment_gain:,.2f}. Most of that gap is the "
         "average-cost Realized P/L estimate above differing from the broker's own specific-lot ST/LT figures "
         "(expected — see the Realized P/L caveat); the remainder is minor rounding accumulated across months. "
         "The Investment Gain/Loss figure is the more reliable number for tracking performance."

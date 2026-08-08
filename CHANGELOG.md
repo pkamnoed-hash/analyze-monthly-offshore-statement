@@ -1,5 +1,33 @@
 # Changelog
 
+## Rebalance & Reallocate overhaul, Monitor Stocks Monthly Dividend chart (v4.3)
+
+Splits Rebalance & Reallocate's single wide table into 5 focused tabs,
+adds real Total P/L tracking, and fixes a real Streamlit rendering bug
+found along the way.
+
+- **5 tabs** (Overview, Weight, Dividend Impact, Performance, Analyze)
+  -- **Analyze** is the new sole editable tab (`% Reinvest`, `Bought?`,
+  plus `Beta` and every allocation-impact column); Overview and the
+  other 3 are read-only.
+- **`Dividends Received` / `Total P/L` / `Total P/L %`** (Current +
+  New) added, mirroring Monitor Stocks' own Total P/L formula exactly.
+- **`Beta`** column added -- already-fetched data that was never
+  surfaced on this page before.
+- **Standalone THB -> USD reference calculator** above "$ amount to
+  invest" -- not wired to the real input, just a quick conversion aid.
+- **Summary KPI cards redesigned**: explicit Current/New side-by-side
+  pairs instead of a value + delta badge.
+- **Monitor Stocks**: added a Monthly Dividend bar chart below the two
+  donut charts, scoped to the category filter. Validated line-by-line
+  against a real broker statement PDF -- exact match.
+- **Fixed a real Streamlit rendering bug**: two bare `$` in one
+  caption/message get silently treated as inline math, mangling the
+  text. Fixed across Rebalance, Dashboard, Record Trade, and Record
+  Dividend.
+- No database/schema changes.
+- Full test suite: 231/231 passing (4 new).
+
 ## Monitor Stocks: Ex-Date column with current-month highlighting (v4.2)
 
 Adds a real ex-dividend date to Monitor Stocks, after a "Payout Date"

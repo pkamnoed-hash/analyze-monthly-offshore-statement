@@ -87,7 +87,10 @@ if st.button("Save all rows"):
             "net_amount": net,
             "source": "manual",
         })
-        summary_lines.append(f"- {symbol or '(Interest)'}: ${gross:,.2f} − ${withholding:,.2f} = **${net:,.2f}**")
+        # \$ escapes -- multiple bare $ across these joined lines pair up as Streamlit's
+        # inline-math delimiter (worse across several rows, since st.success joins them all
+        # into one markdown block), mangling the text into broken math-mode spans.
+        summary_lines.append(f"- {symbol or '(Interest)'}: \\${gross:,.2f} − \\${withholding:,.2f} = **\\${net:,.2f}**")
 
     if errors:
         for e in errors:
