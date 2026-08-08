@@ -370,8 +370,8 @@ def _rebalance_body(holdings: pd.DataFrame, refreshed_at: datetime):
         ),
     }
 
-    tab_overview, tab_weight, tab_dividend, tab_performance, tab_analyze = st.tabs(
-        ["Overview", "Weight", "Dividend Impact", "Performance", "Analyze"]
+    tab_analyze, tab_overview, tab_weight, tab_dividend, tab_performance = st.tabs(
+        ["Analyze", "Overview", "Weight", "Dividend Impact", "Performance"]
     )
 
     # Overview/Weight/Dividend Impact/Performance are read-only slices of the same
