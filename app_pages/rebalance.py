@@ -96,6 +96,7 @@ def _pie(source_df, names_col, values_col, title):
 
 DISPLAY_COLS = [
     "Symbol", "History90D", "% Reinvest", "Invest $", "Beta", "Ex-Date",
+    "Current Expected Div/Yr %", "New Expected Div/Yr %",
     "Current Cat Weight %", "New Cat Weight %",
     "Current Div Contrib %", "New Div Contrib %",
     "Current Expected Div/Yr", "New Expected Div/Yr",
@@ -123,6 +124,7 @@ TAB_COLUMNS = {
                      "Current Total P/L", "New Total P/L",
                      "Current Total P/L %", "New Total P/L %"],
     "Analyze": ["Symbol", "History90D", "% Reinvest", "Invest $", "Beta", "Ex-Date",
+                "Current Expected Div/Yr %", "New Expected Div/Yr %",
                 "Current Cat Weight %", "New Cat Weight %",
                 "Current Div Contrib %", "New Div Contrib %",
                 "Current Expected Div/Mo", "New Expected Div/Mo",
@@ -316,6 +318,16 @@ def _rebalance_body(holdings: pd.DataFrame, refreshed_at: datetime):
             help="Most recent ex-dividend date on record, same source as Monitor Stocks. "
                  "Highlighted when it falls in the current month -- this cycle's ex-date "
                  "has already passed, so it's too late to buy in time for it.",
+        ),
+        "Current Expected Div/Yr %": st.column_config.NumberColumn(
+            "% Expt Div/Yr", format="%.2f%%",
+            help="This stock's own dividend yield, net of 15% Thai (NRA) withholding tax -- "
+                 "not its contribution to the whole basket (see Div Contrib %).",
+        ),
+        "New Expected Div/Yr %": st.column_config.NumberColumn(
+            "New % Div/Yr", format="%.2f%%",
+            help="Same yield %, shown after this allocation -- numerically unchanged, since "
+                 "buying more at market price doesn't change a stock's own yield rate.",
         ),
         "Current Cat Weight %": st.column_config.NumberColumn("Cat Wt %", format="%.1f%%", help="Current Category Weight %"),
         "New Cat Weight %": st.column_config.NumberColumn("New Cat Wt %", format="%.1f%%", help="Category Weight % after this allocation"),

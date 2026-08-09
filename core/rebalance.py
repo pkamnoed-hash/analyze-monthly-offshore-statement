@@ -38,6 +38,11 @@ def get_dividend_holdings(*, conn=None, yf_module=None) -> pd.DataFrame:
       monitor_stocks.py's Unrealized columns.
     - Current Expected Div/Yr and Div/Mo: Current Value x Dividend Yield %,
       net of WITHHOLDING_TAX_RATE (matches Monitor Stocks' convention).
+    - Current Expected Div/Yr %: this stock's own dividend yield, net of
+      WITHHOLDING_TAX_RATE -- Dividend Yield % x (1 - WITHHOLDING_TAX_RATE).
+      Quantity-independent (same value whether you hold 1 share or 1000),
+      unlike Current Div Contrib % below, which is this stock's weighted
+      contribution to the whole basket's blended yield.
     - Current Div Contrib %: this symbol's contribution to the whole
       basket's blended dividend yield -- Current Cat Weight % / 100 x
       Dividend Yield % x (1 - WITHHOLDING_TAX_RATE). Mirrors
@@ -72,6 +77,8 @@ def get_dividend_holdings(*, conn=None, yf_module=None) -> pd.DataFrame:
     )
     holdings["Current Expected Div/Mo"] = holdings["Current Expected Div/Yr"] / 12
 
+    holdings["Current Expected Div/Yr %"] = holdings["Dividend Yield %"] * (1 - WITHHOLDING_TAX_RATE)
+
     holdings["Current Div Contrib %"] = (
         holdings["Current Cat Weight %"] / 100 * holdings["Dividend Yield %"] * (1 - WITHHOLDING_TAX_RATE)
     )
@@ -93,6 +100,11 @@ def apply_allocation(holdings: pd.DataFrame, amount: float, pct_by_symbol: dict)
     the correct real-world effect of buying at the market price, not a
     modeling artifact. New Unrealized % still moves (down, usually) because
     the denominator (Cost Basis) grew while the numerator didn't.
+
+    New Expected Div/Yr % mirrors Current Expected Div/Yr % -- Dividend
+    Yield % x (1 - WITHHOLDING_TAX_RATE). Numerically unchanged from Current
+    (a stock's own yield rate doesn't move just because you bought more of
+    it at market price), same relationship as New Unrealized $ above.
 
     New Div Contrib % mirrors Current Div Contrib % (see
     get_dividend_holdings()) using New Cat Weight % instead -- summed
@@ -125,6 +137,8 @@ def apply_allocation(holdings: pd.DataFrame, amount: float, pct_by_symbol: dict)
 
     df["New Expected Div/Yr"] = df["New Value"] * (df["Dividend Yield %"] / 100) * (1 - WITHHOLDING_TAX_RATE)
     df["New Expected Div/Mo"] = df["New Expected Div/Yr"] / 12
+
+    df["New Expected Div/Yr %"] = df["Dividend Yield %"] * (1 - WITHHOLDING_TAX_RATE)
 
     df["New Div Contrib %"] = df["New Cat Weight %"] / 100 * df["Dividend Yield %"] * (1 - WITHHOLDING_TAX_RATE)
 

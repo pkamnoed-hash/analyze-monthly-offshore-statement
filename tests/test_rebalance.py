@@ -107,6 +107,22 @@ class TestGetDividendHoldings:
         assert result["Current Expected Div/Yr"] == pytest.approx(34.0)
         assert result["Current Expected Div/Mo"] == pytest.approx(34.0 / 12)
 
+    def test_computes_expected_dividend_pct_net_of_withholding(self, conn):
+        db.insert_trade(trade_date="2026-01-05", side="buy", symbol="AAA", quantity=10, price=100.0, conn=conn)
+        db.set_symbol_type("AAA", "Dividend", conn=conn)
+        yf_module = FakeYfModule({
+            "AAA": FakeTicker(
+                info={"quoteType": "EQUITY", "sector": "Tech"},
+                history_df=_history([100.0]),
+                dividends=_dividends({10: 4.0}),  # yield 4% gross
+            ),
+        })
+        result = rebalance.get_dividend_holdings(conn=conn, yf_module=yf_module).iloc[0]
+
+        # 4% gross yield, net of 15% withholding -> 3.4% -- quantity-independent, unlike
+        # Current Div Contrib % (which also factors in Cat Weight %).
+        assert result["Current Expected Div/Yr %"] == pytest.approx(3.4)
+
     def test_classification_uses_sector_for_equity_and_industry_for_non_equity(self, conn):
         db.insert_trade(trade_date="2026-01-05", side="buy", symbol="AAA", quantity=1, price=100.0, conn=conn)
         db.insert_trade(trade_date="2026-01-05", side="buy", symbol="BBB", quantity=1, price=100.0, conn=conn)
@@ -181,6 +197,14 @@ class TestApplyAllocation:
         assert result.loc["AAA", "New Expected Div/Yr"] == pytest.approx(
             10.0 * 120.0 * 0.04 * (1 - rebalance.WITHHOLDING_TAX_RATE)
         )
+
+    def test_new_expected_div_yr_pct_equals_current_regardless_of_investment(self):
+        # A stock's own yield rate doesn't change just because you bought more of it at
+        # market price -- New Expected Div/Yr % should be numerically unchanged from
+        # Current (4% gross x 0.85 = 3.4%, same for AAA whether or not it's invested in).
+        result = rebalance.apply_allocation(self._holdings(), 1000.0, {"AAA": 100}).set_index("Symbol")
+        assert result.loc["AAA", "New Expected Div/Yr %"] == pytest.approx(3.4)
+        assert result.loc["BBB", "New Expected Div/Yr %"] == pytest.approx(1.7)  # 2% x 0.85
 
     def test_new_cat_weight_pct_sums_to_100(self):
         result = rebalance.apply_allocation(self._holdings(), 1000.0, {"AAA": 50, "BBB": 50})
