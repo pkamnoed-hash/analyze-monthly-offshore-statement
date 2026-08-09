@@ -22,6 +22,7 @@ not an aspirational process, a record of what's been done.
 | `v4.1.2-fix-holding-period-dtype` | V4.1.2 hotfix branch, cut from `main` (not from v4.1 -- unrelated feature work, same rationale as v4.1.1). Fixes a production-only `AttributeError` on Monitor Stocks (`.dt.days` called on a pandas Series that fell back to `dtype=object` instead of `datetime64` after a `.map()` with zero index overlap) by forcing `pd.to_datetime(..., errors="coerce")` before the `.dt` accessor. No database/schema changes. Merged into `main`, tagged `v4.1.2`. |
 | `v4.2-monitor-stocks-ex-date` | V4.2 feature branch. Cut from `main` after v4.1.2 was merged in, originally as `v4.2-auto-trend-line` -- explored automatic trend line drawing via discussion and a live MSFT proof-of-concept (published as a standalone Artifact, not part of this repo), confirming the approach (Plotly + numpy linear regression, no external chart API) but never implementing it in the app. Redirected mid-branch to a different, real gap instead: adds an `Ex-Date` column to Monitor Stocks (Overview + Dividends tabs), highlighted when it falls in the current month. A companion "Payout Date" column was tried and removed after `yfinance`'s `info["dividendDate"]` was found blank for most funds and stale for at least one ETF (SHV). Renamed to match what shipped. No `core/db.py`/schema changes. Merged into `main`. |
 | `v4.3-rebalance-columns` | V4.3 feature branch. Cut from `main` after v4.2 was merged in. Splits Rebalance & Reallocate's single wide table into 5 tabs (Overview/Weight/Dividend Impact/Performance/Analyze) -- Analyze ended up as the sole editable tab (Overview flipped to read-only once Analyze needed editing too, avoiding two simultaneous editable forms). Adds `Dividends Received`/`Total P/L`/`Total P/L %` (mirroring Monitor Stocks), a `Beta` column, a standalone THB->USD reference calculator, and a Current/New KPI redesign for the Summary section. Also adds a Monitor Stocks Monthly Dividend chart (validated against a real broker statement PDF) and fixes a real Streamlit `$`-pair-as-inline-math rendering bug across 4 pages. No `core/db.py`/schema changes. Merged into `main`. |
+| `v4.3.1` (no branch -- direct to `main`) | Two small follow-ups to V4.3, applied directly to `main` per explicit user request rather than a feature branch: reorders Rebalance & Reallocate's tabs (Analyze first), and adds an `Ex-Date` column (Overview + Analyze) with the same current-month amber highlight as Monitor Stocks. Commits `c9f423d`/`fa1a24d`. No `core/db.py`/schema changes. |
 
 Naming convention: `vN-short-description` (or `vN.M-short-description` for a
 smaller, additive feature that doesn't warrant a new whole version number),
@@ -44,6 +45,7 @@ Version planning
 	○ 4.1.2 (`v4.1.2-fix-holding-period-dtype`) hotfix: fix production-only dtype crash on Monitor Stocks
 	○ 4.2 (`v4.2-monitor-stocks-ex-date`) Monitor Stocks Ex-Date column + current-month highlighting; automatic trend line explored (live demo, not yet built) -- deferred
 	○ 4.3 (`v4.3-rebalance-columns`) Rebalance & Reallocate 5-tab split (Analyze is the sole editable tab), Total P/L, Beta, THB calculator, Summary KPI redesign; Monitor Stocks Monthly Dividend chart; $-pair rendering bug fixed across 4 pages
+	○ 4.3.1 (direct to `main`, no branch) Rebalance & Reallocate tab reorder (Analyze first) + Ex-Date column with current-month highlighting
 - 5 - cosmetic
 - 6 - tax management
 
@@ -92,18 +94,24 @@ tip commit was already an ancestor of `main`). Feature branches that are
 still useful as a labeled reference point (`V1-record-trade-and-view`,
 `v2-Reconciliation`) are kept rather than deleted by default.
 
-## Current status (as of `v4.3-rebalance-columns`)
+## Current status (as of `v4.3.1`)
 
 `main` has V1, V2, V2.1, V2.2, V2.3, V2.4, V3, V3.1, V4, V4.1.1, V4.1,
-V4.1.2, V4.2, and V4.3 merged in (231/231 passing on `main`
-post-merge). V4.3 overhauls Rebalance & Reallocate (5-tab split,
-Analyze as the sole editable tab, Total P/L, Beta, THB calculator,
-Summary KPI redesign), adds a Monitor Stocks Monthly Dividend chart
-(validated against a real broker statement PDF), and fixes a real
-Streamlit rendering bug (bare `$` pairs read as inline math) across 4
-pages. Still open from earlier versions: automatic trend line drawing
-(v4.2's original scope, validated via a live MSFT proof-of-concept but
-not built into the app), whether to apply the "Total Return" concept
-(Total P/L/%) to the Dashboard page (raised during v4.1), and
-confirming the deployed `myinvestment27.streamlit.app` has picked up
-V4.2/V4.3.
+V4.1.2, V4.2, V4.3, and V4.3.1 merged in (231/231 passing on `main`).
+V4.3 overhauls Rebalance & Reallocate (5-tab split, Analyze as the
+sole editable tab, Total P/L, Beta, THB calculator, Summary KPI
+redesign), adds a Monitor Stocks Monthly Dividend chart (validated
+against a real broker statement PDF), and fixes a real Streamlit
+rendering bug (bare `$` pairs read as inline math) across 4 pages.
+V4.3.1 is two small direct-to-`main` follow-ups (no feature branch,
+per explicit request): reorders Rebalance & Reallocate's tabs (Analyze
+first) and adds an `Ex-Date` column (Overview + Analyze) with the same
+current-month highlight Monitor Stocks already has. A live production
+`KeyError` seen right after V4.3's initial deploy turned out to be
+Streamlit Community Cloud's incremental-redeploy leaving stale
+`__pycache__` bytecode, not a code defect -- resolved via a full app
+Reboot, no code change needed. Still open from earlier versions:
+automatic trend line drawing (v4.2's original scope, validated via a
+live MSFT proof-of-concept but not built into the app), and whether to
+apply the "Total Return" concept (Total P/L/%) to the Dashboard page
+(raised during v4.1).

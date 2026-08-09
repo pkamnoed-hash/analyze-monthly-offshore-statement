@@ -1,5 +1,17 @@
 # Changelog
 
+## Rebalance & Reallocate: tab reorder, Ex-Date column (v4.3.1)
+
+Two small follow-ups to v4.3, applied directly to `main` (no feature
+branch) per explicit request.
+
+- **Analyze moved to the first tab** (before Overview) -- it's the
+  only editable tab, so it's now what you see first.
+- **`Ex-Date`** added to Overview and Analyze -- same source and
+  current-month amber highlight as Monitor Stocks' own Ex-Date column.
+- No database/schema changes.
+- Full test suite: 231/231 passing (no new tests -- display-only change).
+
 ## Rebalance & Reallocate overhaul, Monitor Stocks Monthly Dividend chart (v4.3)
 
 Splits Rebalance & Reallocate's single wide table into 5 focused tabs,

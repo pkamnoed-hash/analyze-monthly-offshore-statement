@@ -1713,6 +1713,63 @@ xlsx-loading logic (already duplicated between `dashboard.py` and
 calculator** -- not done; Dashboard's widget has no explicit
 session-state key to read from another page reliably.
 
+## V4.3.1: Rebalance & Reallocate Tab Reorder + Ex-Date Column
+
+### Context
+
+Two small follow-ups requested right after V4.3 shipped, applied
+directly to `main` (no feature branch, per explicit user instruction)
+rather than through the usual branch-cut/merge/tag cycle: reordering
+Analyze to the first tab, and adding an `Ex-Date` column to the page.
+
+### Design decisions
+
+**Analyze moved to the first tab position** (before Overview) -- the
+user reaches for it first since it's the only editable tab; no other
+column/behavior changes.
+
+**Ex-Date sourcing and highlight reuse Monitor Stocks' V4.2 pattern
+exactly** -- `market_data.fetch_stock_profile()` already returns
+`Ex-Date`, already merged into `holdings` via `rebalance.py`'s
+`get_dividend_holdings()` profile merge (same situation `Beta` was in
+before V4.3), just not previously surfaced on this page. Added to
+Overview (keeping it the full superset view) and Analyze.
+
+**Styler-based highlight confirmed safe on the editable Analyze tab**
+-- read Streamlit's own installed source (`data_editor.py`) to confirm
+`st.data_editor` accepts a `pandas.Styler`, applying its styles "only
+to non-editable columns." Ex-Date is never one of Analyze's editable
+columns (`% Reinvest`/`Bought?` only), so the same `_styled()` helper
+(current-month amber background, `(v.year, v.month) == (today.year,
+today.month)`) applies cleanly to both the read-only Overview
+`st.dataframe` and the editable Analyze `st.data_editor`.
+
+### Implementation
+
+**`app_pages/rebalance.py`**: `Ex-Date` added to `DISPLAY_COLS` (after
+`Beta`) and `TAB_COLUMNS["Analyze"]` (after `Beta`); new
+`column_config["Ex-Date"]` entry (`DateColumn`, `DD/MM/YYYY`); new
+`_styled()` helper applying the amber background via `pandas.Styler`,
+used on both the Overview `st.dataframe` and Analyze `st.data_editor`;
+`st.tabs([...])` order changed to Analyze first.
+
+### Testing and verification
+
+231/231 tests passing (no new tests -- this repo has no dedicated
+`app_pages/` test files by convention; verified via `py_compile`,
+local dev server visual check on all 5 tabs, and confirming Ex-Date
+renders/highlights correctly on both Overview and Analyze). No
+`core/db.py` or schema changes.
+
+### Considered and explicitly deferred
+
+**Full branch-cut/merge/tag ceremony** -- explicitly skipped at the
+user's direct request ("fix in main git and put to github") for both
+of these changes, given their small, low-risk, clearly-scoped nature.
+Committed straight to `main`: `c9f423d` (tab reorder), `fa1a24d`
+(Ex-Date column). Retroactively tagged `v4.3.1` when this doc gap was
+closed.
+
 ## Deferred / future
 
 - **Restore from a backup** -- see V2.3's "Considered and explicitly
