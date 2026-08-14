@@ -25,6 +25,7 @@ not an aspirational process, a record of what's been done.
 | `v4.3.1` (no branch -- direct to `main`) | Two small follow-ups to V4.3, applied directly to `main` per explicit user request rather than a feature branch: reorders Rebalance & Reallocate's tabs (Analyze first), and adds an `Ex-Date` column (Overview + Analyze) with the same current-month amber highlight as Monitor Stocks. Commits `c9f423d`/`fa1a24d`. No `core/db.py`/schema changes. |
 | `v4.4-support-resistance-analysis` | V4.4 feature branch. Cut from `main` after v4.3.1 was applied. Adds Monitor Stocks' Trendline tab (Pivot Points S3-R3, all 52 holdings, anchored to Avg Cost) with an `Action` cell linking to a new per-symbol "Auto Trendline" page. That page's chart went through several overlay iterations (diagonal Trend Line, clustered S/R Zones, a Nearest R/S readout) before consolidating -- per direct user feedback after live-testing the readout ("too many competing line concepts") -- into a single **Reference Line** concept: swing highs/lows nearest to current price, captured at a deliberate moment (not recomputed on Timeline/Interval navigation) via a "Regenerate" button, with full drag/delete/create editing and DB persistence (`reference_lines` table). Fixed two real bugs found via live testing (a ~1.6s DB write on every drag, and a delete-button click silently swallowed by the chart's own drag-detection listener). 299/299 tests passing. Full design history in `docs/ROADMAP.md` (V4.4). Merged into `main` (`23cf008`, `--no-ff`), tagged `v4.4`. |
 | `v4.4.1-reference-line-summary` | V4.4.1 feature branch. Cut from `main` after v4.4 was merged in. Builds the portfolio-wide "nearest Reference Line" summary table across all held symbols -- explicitly requested as a follow-up once the per-symbol Reference Line feature (v4.4) was working, with the key requirement that it compute on first load rather than requiring each symbol's own Auto Trendline page be visited first. A read-only chat preview (real Turso + yfinance data, `compute_reference_lines()` run for all ~52 holdings) was shown and confirmed working before this branch was cut. Numbered `4.4.1` (not the originally-discussed `4.5`) since it's simply the next thing built after v4.4, in chronological order -- matches how every other `x.y.z` number in this project was assigned, and avoids reserving a number in advance for something (biometric login) that ended up being built later. Adds Monitor Stocks' Reference Lines + Highlight tabs, renames Overview to Overall, and (a live-testing tweak round) moves the "passed" highlight onto the Nearest Resistance/Support cells themselves, reorders Highlight to the leftmost tab, trims Overall's now-redundant Pivot Points columns, and adds a matching "Passed R/S" column to Auto Trendline's own Zone 5 table -- which also surfaced and fixed a real pre-existing bug (visiting a symbol's page in a fresh session silently wiped its `passed_at`). 317/317 tests passing. Full design history in `docs/ROADMAP.md` (V4.4.1). Merged into `main` (`f45e857`, `--no-ff`), tagged `v4.4.1`. |
+| `v4.5-yfinance-cache-and-bio-login` | V4.5 feature branch. Cut from `main` after v4.4.1 was merged in (`c7e1f1a`). Bundles two improvements on one branch (user's explicit choice -- asked whether to split, given the table-improvements/bio-login precedent earlier, but chose to combine this time), built in order: **1) yfinance cache-to-DB** -- directly motivated by a real production incident right after v4.4.1's first deploy, where Streamlit Community Cloud's shared IP got rate-limited/blocked by Yahoo Finance, leaving every yfinance-derived column blank across the app; caching fetched data in Turso would reduce how often (and how many symbols at once) the app needs to hit yfinance live. **2) Biometric login** -- the long-deferred item from the quick-plan note below (previously placeholder-numbered `4.4.2`, never reserved). In progress -- yfinance caching first. |
 
 Naming convention: `vN-short-description` (or `vN.M-short-description` for a
 smaller, additive feature that doesn't warrant a new whole version number),
@@ -50,7 +51,7 @@ Version planning
 	○ 4.3.1 (direct to `main`, no branch) Rebalance & Reallocate tab reorder (Analyze first) + Ex-Date column with current-month highlighting
   ○ 4.4 (`v4.4-support-resistance-analysis`) Monitor Stocks Trendline tab (Pivot Points, all 52 holdings) + new "Auto Trendline" per-symbol page, consolidated down to a single "Reference Line" concept (swing-based, nearest-to-price, captured-at-a-moment, drag/delete/create, DB-persisted) after iterating through Trend Line/S-R Zones/Nearest-R-S overlays first. Merged into `main`, tagged `v4.4` -- see `docs/ROADMAP.md` for the full arc.
   ○ 4.4.1 (`v4.4.1-reference-line-summary`) portfolio-wide "nearest Reference Line" summary table across all held symbols, computed on first load rather than requiring each symbol's own page be visited first -- see ROADMAP.md's V4.4 "Considered and explicitly deferred" note; a live preview of this table (read-only, real data, not yet built into the app) was shown in chat and confirmed working. Branch cut from `main` after v4.4 merged in. Merged into `main`, tagged `v4.4.1` -- see `docs/ROADMAP.md` for the full arc. (Renumbered from the originally-discussed `4.5` -- see the Branches table entry above for why.)
-  ○ 4.4.2 (or later) bio login (face or finger) -- not started; number to be decided when actually built, not reserved in advance
+  ○ 4.5 (`v4.5-yfinance-cache-and-bio-login`) two improvements, one branch, built in order: 1) cache yfinance data into Turso instead of always fetching live -- prompted by a real production incident where Yahoo rate-limited Streamlit Community Cloud's shared IP right after v4.4.1 deployed, blanking every yfinance-derived column app-wide; 2) biometric login (face or finger) -- the item previously placeholder-numbered `4.4.2` below, built now instead. Branch cut from `main` after v4.4.1 merged in. In progress -- yfinance caching first.
 - 5 - cosmetic
 - 6 - tax management
 
@@ -99,7 +100,7 @@ tip commit was already an ancestor of `main`). Feature branches that are
 still useful as a labeled reference point (`V1-record-trade-and-view`,
 `v2-Reconciliation`) are kept rather than deleted by default.
 
-## Current status (as of `v4.4.1`, merged)
+## Current status (as of `v4.5-yfinance-cache-and-bio-login`, in progress)
 
 `main` has V1, V2, V2.1, V2.2, V2.3, V2.4, V3, V3.1, V4, V4.1.1, V4.1,
 V4.1.2, V4.2, V4.3, V4.3.1, V4.4, and **V4.4.1** merged in (317/317
@@ -131,7 +132,19 @@ real pre-existing bug where visiting a symbol's page in a fresh
 session silently wiped its `passed_at`. See `docs/ROADMAP.md`'s V4.4
 and V4.4.1 sections for the full build and bug-fix history.
 
-**Nothing in progress.** Still open: whether to apply the "Total
-Return" concept (Total P/L/%) to the Dashboard page (raised during
-v4.1); biometric login (number to be decided when actually built, see
-the quick-plan note above).
+Right after v4.4.1's first production deploy, Streamlit Community
+Cloud's shared outbound IP got rate-limited/blocked by Yahoo Finance --
+every yfinance-derived column (Description, Beta, Dividend Yield %,
+Ex-Date, etc.) went blank app-wide, confirmed not a code defect (the
+exact same fetch worked cleanly from a local machine at the same
+moment). Not fixed by a code change; the fix is v4.5's first
+improvement below.
+
+**In progress**: `v4.5-yfinance-cache-and-bio-login`, cut from `main`
+after v4.4.1 merged in. Two improvements, one branch (user's explicit
+choice), built in order: 1) cache yfinance data into Turso instead of
+always fetching live, directly addressing the rate-limit incident
+above; 2) biometric login (face or finger), the long-deferred item
+previously placeholder-numbered `4.4.2`. Still open otherwise: whether
+to apply the "Total Return" concept (Total P/L/%) to the Dashboard
+page (raised during v4.1).

@@ -5,6 +5,7 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
+import cached_db
 from core import calculations, db, market_data
 
 # Matches Dashboard's own "Dividends"/"Avg. Monthly Dividend" KPIs (app_pages/dashboard.py),
@@ -35,8 +36,28 @@ def _cached_fetch_stock_profile(symbols: list[str]) -> tuple[pd.DataFrame, datet
     "Refresh now" below calls .clear() on this same function to bypass the TTL on demand.
     Returns the fetch timestamp alongside the data -- computed here, inside the cached
     function, so it's captured once at cache-miss time and reused for every cache-hit
-    until the TTL expires or Refresh now clears it (not recomputed on every rerun)."""
-    return market_data.fetch_stock_profile(symbols), datetime.now()
+    until the TTL expires or Refresh now clears it (not recomputed on every rerun).
+
+    v4.5 -- adds a durable DB-backed fallback on top of the in-memory 5-minute cache
+    above, prompted by a real production incident: right after v4.4.1's first deploy,
+    Yahoo Finance rate-limited/blocked Streamlit Community Cloud's shared IP, and
+    since this in-memory cache starts empty on every fresh process, every
+    yfinance-derived column went blank app-wide instead of just briefly stale.
+    calculations.apply_market_profile_fallback() replaces any row that failed live
+    with the last real values captured in market_profile_cache, if any, flagged
+    Stale=True so the UI can say so rather than presenting old data as current. Rows
+    that DID succeed live get upserted into market_profile_cache right after, keeping
+    the fallback reasonably fresh -- deliberately only the successful ones, so a
+    still-blocked symbol never overwrites a real captured value with another blank."""
+    live = market_data.fetch_stock_profile(symbols)
+    cached = db.fetch_market_profile_cache()
+    merged = calculations.apply_market_profile_fallback(live, cached)
+
+    fresh_rows = merged[~merged["Stale"] & merged["Latest Price"].notna()]
+    if not fresh_rows.empty:
+        db.save_market_profile_cache(fresh_rows.drop(columns=["Stale", "Fetched At"]).to_dict("records"))
+
+    return merged, datetime.now()
 
 
 @st.cache_data(ttl=300)
@@ -151,7 +172,7 @@ def _blended_dividend_rows() -> pd.DataFrame:
     (<=cutoff) + live db (>cutoff) -- the exact same data source and blending Dashboard's
     own per-symbol "Dividends" column already uses, just not previously loaded on this
     page. Cached like Dashboard's own load_data() -- the xlsx is static at runtime, only
-    db.fetch_dividends() (uncached) can add new rows. Row-level (not pre-summed) so both
+    cached_db.cached_fetch_dividends() (invalidated on write) can add new rows. Row-level (not pre-summed) so both
     _dividends_received_by_symbol() and the Monthly Dividend chart below can slice it
     differently without a second xlsx load."""
     xls = pd.ExcelFile(DATA_FILE)
@@ -162,7 +183,7 @@ def _blended_dividend_rows() -> pd.DataFrame:
     income["Trade Date"] = pd.to_datetime(income["Trade Date"], format="%m/%d/%Y", errors="coerce")
     cutoff = summary["Month"].max() + pd.offsets.MonthEnd(0)
 
-    blended_income = calculations.blended_dividends(income, db.fetch_dividends(), cutoff)
+    blended_income = calculations.blended_dividends(income, cached_db.cached_fetch_dividends(), cutoff)
     return blended_income[blended_income["Entry Type"].isin(DIVIDEND_ENTRY_TYPES) & blended_income["Symbol"].notna()]
 
 
@@ -191,10 +212,10 @@ with st.expander("What do these numbers mean?"):
         "dividendRate). Prices are cached for 5 minutes."
     )
 
-db_trades = db.fetch_trades()
+db_trades = cached_db.cached_fetch_trades()
 holdings = calculations.compute_current_positions(db_trades)
 
-symbol_types = db.fetch_symbol_types()
+symbol_types = cached_db.cached_fetch_symbol_types()
 holdings = holdings.merge(symbol_types, on="Symbol", how="left")
 holdings["Allocation Type"] = holdings["Allocation Type"].fillna("Others")
 holdings = holdings.rename(columns={"Allocation Type": "Category"})
@@ -205,6 +226,21 @@ if st.button("Refresh now", help="Bypass the 5-minute cache and re-fetch live pr
 
 profile, last_refreshed = _cached_fetch_stock_profile(holdings["Symbol"].tolist())
 st.caption(f"Last refreshed: {last_refreshed.strftime('%d/%m/%Y %H:%M')}")
+
+# v4.5 -- surfaces when apply_market_profile_fallback() actually fell back to
+# market_profile_cache for one or more symbols (a live yfinance fetch failed, e.g.
+# the real Yahoo Finance rate-limit incident right after v4.4.1 deployed), so stale
+# data reads as "we know, here's what we last captured" rather than silently
+# pretending to be current.
+stale_count = int(profile["Stale"].sum())
+if stale_count:
+    st.warning(
+        f"{stale_count} symbol(s) couldn't be fetched live just now (likely a temporary "
+        "yfinance/Yahoo issue) -- showing the last successfully captured values for "
+        "those instead. Description/Sector/Beta/Dividend fields may be a bit older than "
+        "\"Last refreshed\" above for just those symbols; Symbol/Category/Quantity/Cost "
+        "columns are unaffected (they don't come from yfinance)."
+    )
 
 holdings = holdings.merge(profile, on="Symbol", how="left")
 # Sector/Industry are yfinance's own terms -- displayed here as "Portfolio Group" and

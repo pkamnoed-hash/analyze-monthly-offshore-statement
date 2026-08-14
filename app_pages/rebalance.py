@@ -5,6 +5,7 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
+import cached_db
 from core import calculations, db, rebalance
 from core.market_data import fetch_usd_thb_rate
 
@@ -55,7 +56,7 @@ def _dividends_received_by_symbol() -> pd.Series:
     income["Trade Date"] = pd.to_datetime(income["Trade Date"], format="%m/%d/%Y", errors="coerce")
     cutoff = summary["Month"].max() + pd.offsets.MonthEnd(0)
 
-    blended_income = calculations.blended_dividends(income, db.fetch_dividends(), cutoff)
+    blended_income = calculations.blended_dividends(income, cached_db.cached_fetch_dividends(), cutoff)
     div_rows = blended_income[blended_income["Entry Type"].isin(DIVIDEND_ENTRY_TYPES) & blended_income["Symbol"].notna()]
     return div_rows.groupby("Symbol")["Net Amt"].sum()
 

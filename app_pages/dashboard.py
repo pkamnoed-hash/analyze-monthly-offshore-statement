@@ -5,7 +5,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
-from core import db
+import cached_db
 from core.calculations import blended_dividends, blended_realized_pl
 from core.calculations import compute_realized_pl as _compute_realized_pl
 from core.calculations import compute_roi
@@ -71,12 +71,13 @@ max_day = max_month + pd.offsets.MonthEnd(0)  # last actual calendar date covere
 
 # Blending cutoff: everything up to and including this date is the audited xlsx history;
 # anything after it is live data entered through this app (Record Trade / Record Dividend).
-# Not cached like load_data() -- db.fetch_trades()/fetch_dividends() read the live SQLite
-# file directly each run, since a Record Trade/Dividend save (Steps 4-6) needs to show up
-# immediately rather than behind a stale cache.
+# v4.5 -- cached + invalidated on write (see cached_db.py) rather than the plain uncached
+# read this used to be: a Record Trade/Dividend save still shows up immediately (the save
+# call explicitly clears this cache), it just no longer costs a real Turso round trip on
+# every plain navigation/rerun that didn't touch either table.
 cutoff = max_day
-db_trades = db.fetch_trades()
-db_dividends = db.fetch_dividends()
+db_trades = cached_db.cached_fetch_trades()
+db_dividends = cached_db.cached_fetch_dividends()
 realized_events = blended_realized_pl(compute_realized_pl(transactions), db_trades, cutoff)
 blended_income = blended_dividends(income, db_dividends, cutoff)
 
@@ -184,7 +185,7 @@ st.caption(f"Showing **{start.strftime('%b %Y')} – {end.strftime('%b %Y')}**")
 # --- Shared per-symbol aggregates (used by KPIs, allocation chart, and By Symbol tab) ---
 # fetch_symbol_types() already guarantees every symbol ever traded has a value (Others by
 # default) -- the .fillna("Others") calls below are a safety net, not the primary path.
-symbol_types = db.fetch_symbol_types()
+symbol_types = cached_db.cached_fetch_symbol_types()
 symbol_type_map = dict(zip(symbol_types["Symbol"], symbol_types["Allocation Type"]))
 
 latest_month = h["Month"].max()

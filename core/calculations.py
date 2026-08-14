@@ -726,3 +726,49 @@ def nearest_reference_cell(lines: list[dict], side: str, latest_price: float) ->
     if passed_at and pd.notna(passed_at):
         return {"text": text, "passed": True, "passed_at": pd.Timestamp(passed_at)}
     return {"text": text, "passed": False, "passed_at": None}
+
+
+def apply_market_profile_fallback(live_rows: pd.DataFrame, cached_rows: pd.DataFrame) -> pd.DataFrame:
+    """v4.5 -- Monitor Stocks' durable fallback for a failed live yfinance fetch
+    (prompted by a real production incident: Yahoo Finance rate-limited Streamlit
+    Community Cloud's shared IP right after v4.4.1 deployed, blanking every
+    yfinance-derived column app-wide). `live_rows` is market_data.fetch_stock_profile()'s
+    own output; `cached_rows` is db.fetch_market_profile_cache()'s durable snapshot from
+    the last successful fetch of each symbol.
+
+    A row's live fetch is considered failed when `Latest Price` is NaN -- the one field
+    fetch_stock_profile()'s `except` branch always sets and its success branch never
+    does (`latest_price = float(history_90d[-1])` always succeeds or the whole try
+    block already raised), so it's a more reliable failure signal than `Description`
+    (which a genuine success could theoretically still leave blank if yfinance's info
+    dict has neither `longName` nor `shortName`).
+
+    A failed row with a cached counterpart gets every yfinance-derived field replaced
+    from the cache and `Stale=True`; a failed row with nothing ever cached stays blank,
+    exactly like before this fallback existed -- no regression, just a better result
+    when something WAS captured before. A row that succeeded live is returned
+    untouched with `Stale=False` -- this function never prefers stale data over fresh
+    data. Pure and Streamlit/DB-free by design so it's testable without a real
+    fetch or a real database (see tests/test_calculations.py)."""
+    cached_by_symbol = {row["Symbol"]: row for _, row in cached_rows.iterrows()} if not cached_rows.empty else {}
+    fallback_cols = [
+        "Description", "Sector", "Industry", "Quote Type", "Beta", "Latest Price",
+        "High90D", "Low90D", "Dividend Per Year", "Dividend Yield %",
+        "Dividend Frequency", "Ex-Date", "History90D",
+    ]
+    out_rows = []
+    for _, live_row in live_rows.iterrows():
+        row = live_row.to_dict()
+        stale = False
+        fetched_at = pd.NaT
+        if pd.isna(row.get("Latest Price")):
+            cached_row = cached_by_symbol.get(row["Symbol"])
+            if cached_row is not None:
+                for col in fallback_cols:
+                    row[col] = cached_row[col]
+                stale = True
+                fetched_at = cached_row["Fetched At"]
+        row["Stale"] = stale
+        row["Fetched At"] = fetched_at
+        out_rows.append(row)
+    return pd.DataFrame(out_rows)

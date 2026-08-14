@@ -1,6 +1,7 @@
 import pandas as pd
 import streamlit as st
 
+import cached_db
 from core import db
 
 ENTRY_TYPES = ["Dividend", "Interest", "Capital Distribution"]
@@ -29,7 +30,7 @@ if "dividend_grid_key" not in st.session_state:
 # Sourced from trade history (not past dividends) -- a dividend can't happen before the
 # stock was bought, so this covers virtually every real case, including a symbol's very
 # first dividend. Only gap: the buy itself hasn't been logged in Record Trade yet.
-known_symbols = sorted(db.fetch_trades()["Symbol"].dropna().unique().tolist())
+known_symbols = sorted(cached_db.cached_fetch_trades()["Symbol"].dropna().unique().tolist())
 
 edited = st.data_editor(
     st.session_state["dividend_grid"],
@@ -99,6 +100,7 @@ if st.button("Save all rows"):
         st.warning("No complete rows to save -- fill in Date, Entry Type, and a non-zero Gross Amount.")
     else:
         db.insert_dividends_bulk(rows)
+        cached_db.invalidate_dividends()
         st.session_state["dividend_grid"] = _blank_grid()
         st.session_state["dividend_grid_key"] += 1
         st.success(f"Saved {len(rows)} row(s):\n" + "\n".join(summary_lines))
@@ -108,7 +110,7 @@ st.divider()
 
 view = st.radio("View", ["Recent list", "Matrix"], horizontal=True, label_visibility="collapsed")
 
-db_dividends = db.fetch_dividends()
+db_dividends = cached_db.cached_fetch_dividends()
 
 if view == "Recent list":
     # Seed rows (imported xlsx history) are deliberately excluded here, same convention
@@ -133,6 +135,7 @@ if view == "Recent list":
                 st.write(f"Delete this {row['Entry Type']} of ${row['Net Amt']:,.2f} for {symbol_label} on {row['Trade Date'].strftime('%Y-%m-%d')}?")
                 if st.button("Yes, delete", key=f"confirm_delete_dividend_{row['id']}"):
                     db.delete_dividend(row["id"])
+                    cached_db.invalidate_dividends()
                     st.rerun()
 else:
     if db_dividends.empty:
