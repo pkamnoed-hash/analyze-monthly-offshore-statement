@@ -1971,7 +1971,14 @@ columns' `Pivot` (also relabeled "Cost/Sh", since `Pivot = Avg Cost`
 exactly). Both hold identical values, so not factually wrong, just
 visually redundant -- flagged, not resolved.
 
-## V4.4.1: Reference Line Consolidation
+## V4.4 (continued): Reference Line Consolidation
+
+Same branch (`v4.4-support-resistance-analysis`), same unmerged version --
+not a separate follow-up version number. (Note for future reference:
+`docs/VERSION_CONTROL.md`'s own quick-plan note already reserves "4.4.1"
+for a different, not-yet-built feature -- bio login -- so this section is
+titled to avoid that collision rather than implying a `v4.4.1` branch that
+was never cut.)
 
 ### Context
 
