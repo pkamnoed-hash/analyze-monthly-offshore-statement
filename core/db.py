@@ -102,12 +102,32 @@ SCHEMA_STATEMENTS = [
         symbol            TEXT NOT NULL,
         price             REAL NOT NULL,
         is_override       INTEGER NOT NULL DEFAULT 0,
+        captured_side     TEXT,
+        passed_at         TEXT,
         captured_timeline TEXT,
         captured_interval TEXT,
         updated_at        TEXT NOT NULL DEFAULT (datetime('now'))
     )
     """,
 ]
+
+# reference_lines shipped in v4.4 without captured_side/passed_at, added in v4.4.1 for
+# the Monitor Stocks summary tab's "nearest line, freeze on passed" feature. CREATE TABLE
+# IF NOT EXISTS above is a no-op against a table that already exists on Turso -- it won't
+# retrofit these two new columns onto real, already-shipped rows -- so init_db() also runs
+# this small migration, guarded by PRAGMA table_info() (SQLite has no ADD COLUMN IF NOT
+# EXISTS) so it's safe to call on every startup, whether the columns already exist or not.
+_REFERENCE_LINES_MIGRATION_COLUMNS = {
+    "captured_side": "ALTER TABLE reference_lines ADD COLUMN captured_side TEXT",
+    "passed_at": "ALTER TABLE reference_lines ADD COLUMN passed_at TEXT",
+}
+
+
+def _migrate_reference_lines_columns(c):
+    existing = {row[1] for row in c.execute("PRAGMA table_info(reference_lines)").fetchall()}
+    for column, statement in _REFERENCE_LINES_MIGRATION_COLUMNS.items():
+        if column not in existing:
+            c.execute(statement)
 
 TRADE_COLUMNS = [
     "trade_date", "entry_type", "side", "symbol", "description", "quantity", "price",
@@ -158,6 +178,7 @@ def init_db(conn=None):
     c, should_close = _with_connection(conn)
     for statement in SCHEMA_STATEMENTS:
         c.execute(statement)
+    _migrate_reference_lines_columns(c)
     c.commit()
     if should_close:
         c.close()
@@ -399,7 +420,7 @@ def fetch_trendline_levels(conn=None):
     })
 
 
-def save_reference_lines(symbol, lines: list, *, captured_timeline=None, captured_interval=None, conn=None):
+def save_reference_lines(symbol, lines: list, *, latest_price: float, captured_timeline=None, captured_interval=None, conn=None):
     """Replaces a symbol's whole captured set of Reference Lines -- delete-then-insert-all
     scoped to `symbol`, the simplest way to sync a variable-length list (unlike Pivot
     Points' fixed 7 columns, there's no fixed set of column names to upsert against).
@@ -410,6 +431,16 @@ def save_reference_lines(symbol, lines: list, *, captured_timeline=None, capture
     `captured_interval` describe what basis produced this set (shown back to the user as a
     caption) -- informational only, not part of what identifies the set; left None for a
     manually-added line that wasn't part of a Regenerate call.
+
+    `latest_price` is used to derive each line's `captured_side` ('resistance' if the price
+    was at/above `latest_price` at save time, else 'support') -- a permanent, immutable
+    record of which side a line was captured on, distinct from the per-symbol chart's own
+    "derive side live from CURRENT price" rule (that rule is unchanged, still used for chart
+    coloring). `captured_side` is what the Monitor Stocks summary tab (v4.4.1) uses to know
+    which direction counts as "passed" for a given line, via mark_reference_lines_passed().
+    Every call here -- Regenerate, drag, delete, or add -- freshly re-derives captured_side
+    and resets `passed_at` to NULL for the whole set (a fresh INSERT never sets it), on the
+    reasoning that any edit on a symbol's own page counts as fresh engagement with it.
 
     Uses executescript() (one DELETE + N INSERTs sent as a single multi-statement batch)
     rather than separate execute()/executemany() calls -- a real, measured difference
@@ -426,11 +457,13 @@ def save_reference_lines(symbol, lines: list, *, captured_timeline=None, capture
     c, should_close = _with_connection(conn)
     statements = [f"DELETE FROM reference_lines WHERE symbol={_sql_literal(symbol)};"]
     for line in lines:
+        captured_side = "resistance" if float(line["price"]) >= latest_price else "support"
         statements.append(
             "INSERT INTO reference_lines "
-            "(symbol, price, is_override, captured_timeline, captured_interval, updated_at) "
+            "(symbol, price, is_override, captured_side, captured_timeline, captured_interval, updated_at) "
             f"VALUES ({_sql_literal(symbol)}, {float(line['price'])!r}, {int(line['is_override'])}, "
-            f"{_sql_literal(captured_timeline)}, {_sql_literal(captured_interval)}, datetime('now'));"
+            f"{_sql_literal(captured_side)}, {_sql_literal(captured_timeline)}, {_sql_literal(captured_interval)}, "
+            "datetime('now'));"
         )
     try:
         c.executescript("\n".join(statements))
@@ -444,24 +477,95 @@ def save_reference_lines(symbol, lines: list, *, captured_timeline=None, capture
 
 
 def fetch_reference_lines(conn=None):
-    """Returns a DataFrame (Symbol, Price, Is Override, Captured Timeline, Captured
-    Interval, Updated At) -- one row per currently-captured Reference Line, across every
-    symbol that has any. Symbol Analysis uses this to load a symbol's last-captured set on
-    a fresh session (instead of a blank chart); a future notification checker would scan
-    this same table against live prices to know what each symbol's watched levels are.
-    A symbol with nothing captured yet just isn't present here."""
+    """Returns a DataFrame (Symbol, Price, Is Override, Captured Side, Passed At, Captured
+    Timeline, Captured Interval, Updated At) -- one row per currently-captured Reference
+    Line, across every symbol that has any. Symbol Analysis uses this to load a symbol's
+    last-captured set on a fresh session (instead of a blank chart); Monitor Stocks'
+    Reference Lines summary tab (v4.4.1) uses Captured Side/Passed At to build its
+    "nearest, or frozen passed" cell per symbol. A symbol with nothing captured yet just
+    isn't present here."""
     c, should_close = _with_connection(conn)
     df = _read_sql(
-        c, "SELECT symbol, price, is_override, captured_timeline, captured_interval, updated_at "
-        "FROM reference_lines",
+        c, "SELECT symbol, price, is_override, captured_side, passed_at, captured_timeline, "
+        "captured_interval, updated_at FROM reference_lines",
     )
     if should_close:
         c.close()
     return df.rename(columns={
         "symbol": "Symbol", "price": "Price", "is_override": "Is Override",
+        "captured_side": "Captured Side", "passed_at": "Passed At",
         "captured_timeline": "Captured Timeline", "captured_interval": "Captured Interval",
         "updated_at": "Updated At",
     })
+
+
+def mark_reference_lines_passed(latest_prices: dict, conn=None):
+    """For every captured Reference Line not yet marked passed (`passed_at IS NULL`),
+    checks whether the symbol's CURRENT price (from `latest_prices`, a {symbol: price}
+    dict -- Monitor Stocks already has this in memory from its own profile fetch, so this
+    costs no extra network call) has reached/crossed that line's captured price, using
+    `captured_side` to know which direction counts as a cross: 'resistance' passes when
+    price has risen to/above it, 'support' passes when price has fallen to/below it. Sets
+    `passed_at` to today's date (`date('now')`) for whatever newly qualifies, once --
+    already-passed rows and symbols missing from `latest_prices` (unresolved/not yet
+    fetched) are left untouched. Returns the number of rows newly marked passed, mainly
+    for tests/logging.
+
+    Self-healing backfill for legacy rows: `captured_side` didn't exist before v4.4.1, so
+    any row saved before this shipped has `captured_side IS NULL` -- left as-is, such a
+    row would never match either side and would silently be excluded from both the
+    Monitor Stocks summary tab's cells AND this passed-check, forever (a real bug this
+    fixed after being caught live: several already-captured symbols showed "-" on both
+    sides post-migration). Fixed by deriving it here, the first time such a row is seen,
+    from CURRENT price vs. the row's own captured price -- the same rule a fresh capture
+    uses, just approximated against today's price instead of the (unrecorded) price at
+    the row's original save time, since that's the best information available for
+    genuinely old data.
+
+    Deliberately id-based single-row UPDATEs, not a bulk statement -- this runs against a
+    small, usually-empty candidate set (only rows with passed_at IS NULL, and only those
+    whose price was actually just crossed), not the whole table, so the simplicity of one
+    UPDATE per row outweighs the round-trip cost a bulk rewrite would save here."""
+    import pandas as pd
+
+    c, should_close = _with_connection(conn)
+    candidates = _read_sql(
+        c, "SELECT id, symbol, price, captured_side FROM reference_lines WHERE passed_at IS NULL",
+    )
+    newly_passed = 0
+    try:
+        for row in candidates.itertuples():
+            price = latest_prices.get(row.symbol)
+            if price is None or pd.isna(price):
+                continue
+            captured_side = row.captured_side
+            if captured_side not in ("resistance", "support"):
+                # Same rule save_reference_lines uses for a fresh capture: the LINE's own
+                # price at/above current price -> resistance, below -> support. (Caught a
+                # real bug here during testing: an earlier draft compared the operands in
+                # the wrong order, backfilling every legacy row to the opposite side.)
+                captured_side = "resistance" if row.price >= price else "support"
+                c.execute(
+                    f"UPDATE reference_lines SET captured_side={_sql_literal(captured_side)} "
+                    f"WHERE id={int(row.id)}",
+                )
+            crossed = (
+                (captured_side == "resistance" and price >= row.price)
+                or (captured_side == "support" and price <= row.price)
+            )
+            if crossed:
+                c.execute(
+                    f"UPDATE reference_lines SET passed_at = date('now') WHERE id = {int(row.id)}",
+                )
+                newly_passed += 1
+        c.commit()
+    except Exception:
+        c.rollback()
+        raise
+    finally:
+        if should_close:
+            c.close()
+    return newly_passed
 
 
 def fetch_unreconciled_trades(cutoff, conn=None):

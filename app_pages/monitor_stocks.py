@@ -39,6 +39,100 @@ def _cached_fetch_stock_profile(symbols: list[str]) -> tuple[pd.DataFrame, datet
     return market_data.fetch_stock_profile(symbols), datetime.now()
 
 
+@st.cache_data(ttl=300)
+def _cached_reference_line_summary(symbols: list[str], latest_prices: dict) -> pd.DataFrame:
+    """v4.4.1 -- Monitor Stocks' Reference Lines summary tab. Builds the "Nearest
+    Resistance (R %)"/"Nearest Support (S %)" cell for every symbol WITHOUT requiring its
+    own Auto Trendline page be visited first: any symbol with no captured
+    `reference_lines` row yet gets auto-captured here (real price-history fetch +
+    calculations.compute_reference_lines + db.save_reference_lines, same YTD/Daily basis
+    the per-symbol page seeds a never-visited symbol with) -- the whole point of this tab.
+
+    Cached like _cached_fetch_stock_profile above (same 5-minute TTL, cleared by the same
+    "Refresh now" button) -- a cold run can mean dozens of real price-history fetches, but
+    once a symbol is captured this only costs a cheap DB read on every subsequent call
+    (auto-capture skips anything already present), so the TTL mainly governs how often the
+    "passed" check re-evaluates against a fresh price, not repeated capture work.
+    `latest_prices` is a plain {symbol: price} dict rather than the profile DataFrame --
+    st.cache_data hashes it directly, and since _cached_fetch_stock_profile is itself
+    cached with the same TTL, this dict is stable (and this function cache-hits) across
+    reruns within the same window, not just within one script pass.
+
+    db.mark_reference_lines_passed() runs every call (cheap -- reuses `latest_prices`
+    already fetched for the page, no extra network cost) so a line crossed since the last
+    cache refresh gets its passed_at set before this tab's cells are built.
+
+    Known, accepted edge case: a genuinely flat/ultra-low-volatility symbol (real example:
+    SGOV/SHV, near-zero price movement) can have ZERO swing candidates on either side, so
+    compute_reference_lines returns two empty lists and save_reference_lines's
+    delete-then-insert-all inserts nothing -- that symbol never shows up in `captured`,
+    so it's never seen as "already captured" and gets re-attempted (one more real
+    fetch_price_history call) every cache cycle instead of being permanently skipped.
+    Accepted rather than fixed with extra schema complexity (e.g. a sentinel row) -- in
+    practice this is a couple of symbols out of a real ~52-symbol portfolio, re-fetched at
+    most once per 5-minute TTL window, not on every rerun."""
+    captured = db.fetch_reference_lines()
+    captured_symbols = set(captured["Symbol"]) if not captured.empty else set()
+    today = pd.Timestamp.today().normalize()
+    cutoff = pd.Timestamp(year=today.year, month=1, day=1)  # YTD -- matches the per-symbol
+                                                              # page's own default basis for
+                                                              # a never-visited symbol.
+
+    for symbol in symbols:
+        if symbol in captured_symbols:
+            continue
+        latest_price = latest_prices.get(symbol)
+        if latest_price is None or pd.isna(latest_price):
+            continue  # unresolved symbol -- nothing to anchor a capture against
+        daily_history = market_data.fetch_price_history(symbol, 1825)
+        if daily_history.empty:
+            continue
+        resampled_full = calculations.resample_ohlc(daily_history, "D")
+        bars_in_range = int((resampled_full["Date"] >= cutoff).sum())
+        window = min(25, max(3, bars_in_range // 25))
+        reflines = calculations.compute_reference_lines(
+            resampled_full["Date"], resampled_full["High"], resampled_full["Low"],
+            latest_price, window=window, search_from=cutoff,
+        )
+        lines_to_save = [{"price": p, "is_override": False} for p in reflines["resistance"] + reflines["support"]]
+        db.save_reference_lines(
+            symbol, lines_to_save, latest_price=latest_price,
+            captured_timeline="YTD", captured_interval="Day",
+        )
+
+    db.mark_reference_lines_passed(latest_prices)
+
+    captured = db.fetch_reference_lines()  # re-fetch: includes anything just captured/marked passed
+    rows = []
+    for symbol in symbols:
+        latest_price = latest_prices.get(symbol)
+        symbol_lines = captured[captured["Symbol"] == symbol] if not captured.empty else captured
+        if latest_price is None or pd.isna(latest_price) or symbol_lines.empty:
+            rows.append({
+                "Symbol": symbol, "Nearest Resistance (R %)": "—", "Nearest Support (S %)": "—",
+                "Passed R/S": pd.NaT,
+            })
+            continue
+        line_dicts = [
+            {"price": row["Price"], "passed_at": row["Passed At"]} for _, row in symbol_lines.iterrows()
+        ]
+        resistance_lines = [d for d, side in zip(line_dicts, symbol_lines["Captured Side"]) if side == "resistance"]
+        support_lines = [d for d, side in zip(line_dicts, symbol_lines["Captured Side"]) if side == "support"]
+        r_cell = calculations.nearest_reference_cell(resistance_lines, "resistance", latest_price)
+        s_cell = calculations.nearest_reference_cell(support_lines, "support", latest_price)
+        # A symbol could, in principle, have both its nearest R and nearest S passed at
+        # once (price whipsawed through both since the last capture) -- "Passed R/S" is
+        # one column, so this surfaces the MORE RECENT of the two dates, the fresher alert.
+        passed_dates = [d for d in (r_cell["passed_at"], s_cell["passed_at"]) if d is not None]
+        rows.append({
+            "Symbol": symbol,
+            "Nearest Resistance (R %)": r_cell["text"],
+            "Nearest Support (S %)": s_cell["text"],
+            "Passed R/S": max(passed_dates) if passed_dates else pd.NaT,
+        })
+    return pd.DataFrame(rows)
+
+
 @st.cache_data
 def _blended_dividend_rows() -> pd.DataFrame:
     """Actual (not projected) dividend/distribution rows, all-time, blended xlsx history
@@ -95,6 +189,7 @@ holdings = holdings.rename(columns={"Allocation Type": "Category"})
 
 if st.button("Refresh now", help="Bypass the 5-minute cache and re-fetch live prices."):
     _cached_fetch_stock_profile.clear()
+    _cached_reference_line_summary.clear()
 
 profile, last_refreshed = _cached_fetch_stock_profile(holdings["Symbol"].tolist())
 st.caption(f"Last refreshed: {last_refreshed.strftime('%d/%m/%Y %H:%M')}")
@@ -143,6 +238,17 @@ for level, values in calculations.compute_pivot_points(
 ).items():
     holdings[level] = values
 holdings["Action"] = "view →"
+
+# v4.4.1 -- Reference Lines summary (Nearest Resistance (R %)/Nearest Support (S %)),
+# genuinely different from the Pivot Points columns above: swing-based, nearest to
+# current price rather than a fixed formula, and CAPTURED (persisted, frozen until the
+# symbol's own Auto Trendline page saves a change) rather than recomputed every render.
+# Auto-captures any symbol with nothing saved yet -- see _cached_reference_line_summary's
+# own docstring -- so every held symbol is watchable from this table without needing to
+# visit each one's own page first.
+latest_price_map = dict(zip(holdings["Symbol"], holdings["Latest Price"]))
+reference_line_summary = _cached_reference_line_summary(holdings["Symbol"].tolist(), latest_price_map)
+holdings = holdings.merge(reference_line_summary, on="Symbol", how="left")
 
 holdings["Position Value"] = holdings["Quantity"] * holdings["Latest Price"]
 total_value = holdings["Position Value"].sum()
@@ -401,8 +507,9 @@ if not view.empty:
         st.plotly_chart(fig_div, use_container_width=True)
 
 st.caption(
-    f"Showing {len(view)} of {len(holdings)} symbols. On Overview/Trendline, click a row's Action "
-    "cell (\"view →\") to open that symbol's price chart with its Support/Resistance levels drawn."
+    f"Showing {len(view)} of {len(holdings)} symbols. On Overview/Trendline/Reference Lines, click a "
+    "row's Action cell (\"view →\") to open that symbol's price chart with its Support/Resistance "
+    "levels drawn."
 )
 
 # Split from one 23-column table into focused tabs (Finviz-style column presets) --
@@ -424,6 +531,8 @@ TAB_COLUMNS = {
                   "Expected Div Per Year", "Expected Div Per Month", "Div Return Contribution %"],
     "Classification": ["Symbol", "History90D", "Asset Class", "Portfolio Group", "Beta"],
     "Trendline": ["Symbol", "History90D", "Latest Price", "S3", "S2", "S1", "Pivot", "R1", "R2", "R3", "Action"],
+    "Reference Lines": ["Symbol", "History90D", "Latest Price", "Nearest Resistance (R %)",
+                         "Nearest Support (S %)", "Passed R/S", "Action"],
 }
 column_config = {
     "Description": st.column_config.TextColumn("Desc.", help="Description"),
@@ -498,6 +607,23 @@ column_config = {
     "Action": st.column_config.TextColumn(
         "Action", help="Click this cell to open a price chart with these levels drawn, and adjust them manually if you want.",
     ),
+    "Nearest Resistance (R %)": st.column_config.TextColumn(
+        help="The captured swing high nearest to current price, above it, with its live % distance. "
+             "Auto-captured on first load if you haven't visited this symbol's own Auto Trendline "
+             "page yet. See \"Passed R/S\" for whether/when current price has reached it.",
+    ),
+    "Nearest Support (S %)": st.column_config.TextColumn(
+        help="The captured swing low nearest to current price, below it, with its live % distance. "
+             "Auto-captured on first load if you haven't visited this symbol's own Auto Trendline "
+             "page yet. See \"Passed R/S\" for whether/when current price has reached it.",
+    ),
+    "Passed R/S": st.column_config.DateColumn(
+        format="DD/MM/YYYY",
+        help="The date current price first reached either Nearest Resistance or Nearest Support -- "
+             "blank if neither has been reached. If both have, shows the more recent of the two. "
+             "Stays set (sortable/filterable) until you Regenerate, drag, delete, or add a line on "
+             "that symbol's own Auto Trendline page.",
+    ),
 }
 
 def _highlight_ex_date_this_month(col: pd.Series) -> list[str]:
@@ -541,6 +667,17 @@ def _highlight_pivot_crosses(row: pd.Series) -> list[str]:
     return styles
 
 
+def _highlight_passed_reference_line(col: pd.Series) -> list[str]:
+    """Column-aware (subset=["Passed R/S"]), same shape as _highlight_ex_date_this_month
+    above -- but unlike that one (which only lights up within the CURRENT calendar month),
+    this stays lit for as long as the date is set at all: a passed Reference Line is a
+    standing alert meant to persist until you act on it (Regenerate/drag/delete/add on
+    that symbol's own page), not something that quietly stops mattering after the month
+    ends."""
+    amber = "background-color: rgba(255, 193, 7, 0.28)"
+    return [amber if pd.notna(v) else "" for v in col]
+
+
 for tab_name, tab, cols in zip(TAB_COLUMNS.keys(), st.tabs(list(TAB_COLUMNS.keys())), TAB_COLUMNS.values()):
     with tab:
         table = view[cols]
@@ -549,6 +686,10 @@ for tab_name, tab, cols in zip(TAB_COLUMNS.keys(), st.tabs(list(TAB_COLUMNS.keys
             styler = table.style.apply(_highlight_ex_date_this_month, subset=["Ex-Date"])
         if "S1" in cols:
             styler = (styler if styler is not None else table.style).apply(_highlight_pivot_crosses, axis=1)
+        if "Passed R/S" in cols:
+            styler = (styler if styler is not None else table.style).apply(
+                _highlight_passed_reference_line, subset=["Passed R/S"],
+            )
 
         # "Action" tabs (Trendline, Overview) get the "Action" cell specifically wired to
         # Symbol Analysis -- see the comment above holdings["Action"]'s assignment for why

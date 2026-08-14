@@ -396,6 +396,7 @@ def _render_symbol_analysis_zones():
         db.save_reference_lines(
             symbol,
             [{"price": line["price"], "is_override": line["is_override"]} for line in current_lines],
+            latest_price=latest_price,
             captured_timeline=basis.get("timeline"),
             captured_interval=basis.get("interval"),
         )

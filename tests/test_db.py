@@ -410,6 +410,103 @@ class TestTrendlineLevels:
         assert list(result.columns) == ["Symbol", "S3", "S2", "S1", "Pivot", "R1", "R2", "R3", "Is Override", "Updated At"]
 
 
+class TestReferenceLines:
+    def test_save_derives_captured_side_from_latest_price(self, conn):
+        db.save_reference_lines(
+            "AIQ",
+            [{"price": 70.0, "is_override": False}, {"price": 60.0, "is_override": False}],
+            latest_price=65.0, conn=conn,
+        )
+        rows = conn.execute(
+            "SELECT price, captured_side FROM reference_lines WHERE symbol='AIQ' ORDER BY price",
+        ).fetchall()
+        assert rows == [(60.0, "support"), (70.0, "resistance")]
+
+    def test_save_resets_passed_at_on_every_call(self, conn):
+        db.save_reference_lines("AIQ", [{"price": 70.0, "is_override": False}], latest_price=65.0, conn=conn)
+        db.mark_reference_lines_passed({"AIQ": 71.0}, conn=conn)
+        assert conn.execute("SELECT passed_at FROM reference_lines WHERE symbol='AIQ'").fetchone()[0] is not None
+
+        # A fresh save (Regenerate/drag/delete/add) re-derives everything, including
+        # wiping the just-set passed_at back to NULL -- confirmed design: any edit on the
+        # symbol's own page counts as fresh engagement with it.
+        db.save_reference_lines("AIQ", [{"price": 70.0, "is_override": False}], latest_price=65.0, conn=conn)
+        assert conn.execute("SELECT passed_at FROM reference_lines WHERE symbol='AIQ'").fetchone()[0] is None
+
+    def test_fetch_reference_lines_returns_the_new_columns(self, conn):
+        db.save_reference_lines("AIQ", [{"price": 70.0, "is_override": False}], latest_price=65.0, conn=conn)
+        result = db.fetch_reference_lines(conn=conn)
+        assert list(result.columns) == [
+            "Symbol", "Price", "Is Override", "Captured Side", "Passed At",
+            "Captured Timeline", "Captured Interval", "Updated At",
+        ]
+        assert result.iloc[0]["Captured Side"] == "resistance"
+        assert pd.isna(result.iloc[0]["Passed At"])
+
+
+class TestMarkReferenceLinesPassed:
+    def test_marks_a_resistance_line_passed_when_price_rises_to_it(self, conn):
+        db.save_reference_lines("AIQ", [{"price": 70.0, "is_override": False}], latest_price=65.0, conn=conn)
+        newly_passed = db.mark_reference_lines_passed({"AIQ": 70.0}, conn=conn)
+        assert newly_passed == 1
+        passed_at = conn.execute("SELECT passed_at FROM reference_lines WHERE symbol='AIQ'").fetchone()[0]
+        assert passed_at is not None
+
+    def test_marks_a_support_line_passed_when_price_falls_to_it(self, conn):
+        db.save_reference_lines("AIQ", [{"price": 60.0, "is_override": False}], latest_price=65.0, conn=conn)
+        newly_passed = db.mark_reference_lines_passed({"AIQ": 60.0}, conn=conn)
+        assert newly_passed == 1
+
+    def test_does_not_pass_a_resistance_line_price_has_not_reached_yet(self, conn):
+        db.save_reference_lines("AIQ", [{"price": 70.0, "is_override": False}], latest_price=65.0, conn=conn)
+        newly_passed = db.mark_reference_lines_passed({"AIQ": 68.0}, conn=conn)
+        assert newly_passed == 0
+        assert conn.execute("SELECT passed_at FROM reference_lines WHERE symbol='AIQ'").fetchone()[0] is None
+
+    def test_is_idempotent_does_not_re_mark_an_already_passed_row(self, conn):
+        db.save_reference_lines("AIQ", [{"price": 70.0, "is_override": False}], latest_price=65.0, conn=conn)
+        db.mark_reference_lines_passed({"AIQ": 70.0}, conn=conn)
+        first_passed_at = conn.execute("SELECT passed_at FROM reference_lines WHERE symbol='AIQ'").fetchone()[0]
+
+        second_run_count = db.mark_reference_lines_passed({"AIQ": 75.0}, conn=conn)
+        assert second_run_count == 0
+        assert conn.execute("SELECT passed_at FROM reference_lines WHERE symbol='AIQ'").fetchone()[0] == first_passed_at
+
+    def test_skips_symbols_missing_from_latest_prices(self, conn):
+        db.save_reference_lines("AIQ", [{"price": 70.0, "is_override": False}], latest_price=65.0, conn=conn)
+        newly_passed = db.mark_reference_lines_passed({}, conn=conn)
+        assert newly_passed == 0
+
+    def test_does_not_touch_other_symbols_lines(self, conn):
+        db.save_reference_lines("AIQ", [{"price": 70.0, "is_override": False}], latest_price=65.0, conn=conn)
+        db.save_reference_lines("BLK", [{"price": 1200.0, "is_override": False}], latest_price=1100.0, conn=conn)
+        db.mark_reference_lines_passed({"AIQ": 71.0, "BLK": 1100.0}, conn=conn)
+        assert conn.execute("SELECT passed_at FROM reference_lines WHERE symbol='AIQ'").fetchone()[0] is not None
+        assert conn.execute("SELECT passed_at FROM reference_lines WHERE symbol='BLK'").fetchone()[0] is None
+
+    def test_backfills_captured_side_for_a_legacy_row_with_no_captured_side(self, conn):
+        # Regression: a real row saved before v4.4.1 added captured_side has NULL there --
+        # caught live on the real DB, where several already-captured symbols silently
+        # showed "-" on both sides because a NULL captured_side matched neither filter.
+        conn.execute(
+            "INSERT INTO reference_lines (symbol, price, is_override, captured_side, updated_at) "
+            "VALUES ('OLD', 70.0, 0, NULL, datetime('now'))",
+        )
+        db.mark_reference_lines_passed({"OLD": 65.0}, conn=conn)  # price below the row -> should backfill 'resistance'
+        row = conn.execute("SELECT captured_side, passed_at FROM reference_lines WHERE symbol='OLD'").fetchone()
+        assert row == ("resistance", None)  # backfilled, and correctly NOT passed (65 < 70)
+
+    def test_backfilled_legacy_row_can_still_be_marked_passed_once_price_crosses_it(self, conn):
+        conn.execute(
+            "INSERT INTO reference_lines (symbol, price, is_override, captured_side, updated_at) "
+            "VALUES ('OLD', 70.0, 0, NULL, datetime('now'))",
+        )
+        db.mark_reference_lines_passed({"OLD": 65.0}, conn=conn)  # backfills to 'resistance', not yet passed
+        newly_passed = db.mark_reference_lines_passed({"OLD": 72.0}, conn=conn)  # price now above it
+        assert newly_passed == 1
+        assert conn.execute("SELECT passed_at FROM reference_lines WHERE symbol='OLD'").fetchone()[0] is not None
+
+
 class TestRebalancePlan:
     def test_get_active_rebalance_plan_returns_none_when_none_exists(self, conn):
         assert db.get_active_rebalance_plan(conn=conn) is None

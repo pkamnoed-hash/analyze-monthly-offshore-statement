@@ -695,3 +695,34 @@ def compute_reference_lines(
         "resistance": resistance_candidates[:max_per_side],
         "support": support_candidates[:max_per_side],
     }
+
+
+def nearest_reference_cell(lines: list[dict], side: str, latest_price: float) -> dict:
+    """Monitor Stocks' Reference Lines summary tab (v4.4.1) -- given one symbol's CAPTURED
+    Reference Lines already filtered to one `side` ('resistance' or 'support', each a dict
+    with at least "price" and "passed_at"), picks the nearest one (smallest price for
+    resistance, largest for support) and formats it into one ready-to-display cell.
+
+    The cell always shows the live reading, recomputed against `latest_price` every call:
+    "$123.45 (+2.1%)" -- even after the line has been passed, since the % distance is
+    still meaningful (it just flips sign: a passed resistance's price now reads negative,
+    i.e. below current price; a passed support's now reads positive, i.e. above it). The
+    "when was it passed" date is returned separately (`passed_at`, a real pd.Timestamp,
+    not baked into `text`) so the caller can put it in its own sortable column -- Monitor
+    Stocks' Reference Lines summary tab uses this for a "Passed R/S" column
+    (st.column_config.DateColumn, same convention as the existing Ex-Date column) rather
+    than a string a user couldn't sort chronologically.
+
+    Returns {"text": "-", "passed": False, "passed_at": None} for an empty `lines` list --
+    nothing captured on that side at all (e.g. price sitting at a new high, so there's no
+    resistance to show)."""
+    if not lines:
+        return {"text": "—", "passed": False, "passed_at": None}
+    nearest = (min if side == "resistance" else max)(lines, key=lambda line: line["price"])
+    price = float(nearest["price"])
+    pct = (price - latest_price) / latest_price * 100
+    text = f"${price:,.2f} ({pct:+.1f}%)"
+    passed_at = nearest.get("passed_at")
+    if passed_at and pd.notna(passed_at):
+        return {"text": text, "passed": True, "passed_at": pd.Timestamp(passed_at)}
+    return {"text": text, "passed": False, "passed_at": None}
