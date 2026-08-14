@@ -62,6 +62,11 @@ def _cached_reference_line_summary(symbols: list[str], latest_prices: dict) -> p
     already fetched for the page, no extra network cost) so a line crossed since the last
     cache refresh gets its passed_at set before this tab's cells are built.
 
+    Returns "_R Passed At"/"_S Passed At" alongside the visible columns -- hidden helper
+    columns (see the render loop below) carrying each side's own passed_at, so the
+    Nearest Resistance/Support cells can be highlighted individually rather than only
+    the shared "Passed R/S" date column.
+
     Known, accepted edge case: a genuinely flat/ultra-low-volatility symbol (real example:
     SGOV/SHV, near-zero price movement) can have ZERO swing candidates on either side, so
     compute_reference_lines returns two empty lists and save_reference_lines's
@@ -110,7 +115,7 @@ def _cached_reference_line_summary(symbols: list[str], latest_prices: dict) -> p
         if latest_price is None or pd.isna(latest_price) or symbol_lines.empty:
             rows.append({
                 "Symbol": symbol, "Nearest Resistance (R %)": "—", "Nearest Support (S %)": "—",
-                "Passed R/S": pd.NaT,
+                "Passed R/S": pd.NaT, "_R Passed At": pd.NaT, "_S Passed At": pd.NaT,
             })
             continue
         line_dicts = [
@@ -129,6 +134,13 @@ def _cached_reference_line_summary(symbols: list[str], latest_prices: dict) -> p
             "Nearest Resistance (R %)": r_cell["text"],
             "Nearest Support (S %)": s_cell["text"],
             "Passed R/S": max(passed_dates) if passed_dates else pd.NaT,
+            # Hidden helper columns (never in a TAB_COLUMNS list, kept off-screen via
+            # column_order=cols below) -- "Passed R/S" alone can't tell the highlighter
+            # WHICH side passed, only the more recent date of whichever side(s) did. These
+            # carry each side's own passed_at so _highlight_passed_nearest_reference can
+            # light up exactly the cell that was actually reached.
+            "_R Passed At": r_cell["passed_at"] if r_cell["passed_at"] is not None else pd.NaT,
+            "_S Passed At": s_cell["passed_at"] if s_cell["passed_at"] is not None else pd.NaT,
         })
     return pd.DataFrame(rows)
 
@@ -515,17 +527,35 @@ st.caption(
 # Split from one 23-column table into focused tabs (Finviz-style column presets) --
 # Symbol + History90D pinned in every tab so a row is always identifiable regardless
 # of which view you're on. Each tab reuses the same underlying `view` dataframe and
-# `column_config` below, just a different column subset. Overall shows every column
-# (the original unified table, renamed from "Overview" in v4.4.1 Improvement 3 once the
-# Reference Line columns made "shows every column" literally true again); the rest are
-# focused slices of the same data.
+# `column_config` below, just a different column subset. Overall shows nearly every
+# column (the original unified table, renamed from "Overview" in v4.4.1 Improvement 3);
+# Pivot Points (S3/S2/S1/Pivot/R1/R2/R3) are deliberately left off it as of the tweak
+# below -- Nearest Resistance/Support already cover "where's the watch-worthy level"
+# more directly, and the dedicated Trendline tab still has the full Pivot Points ladder
+# for anyone who wants it. The rest are focused slices of the same data.
+#
+# "Highlight" is listed first (dict order == tab order, since st.tabs() reads
+# TAB_COLUMNS.keys() directly below) -- moved to the leftmost position as the
+# most-used "where do I need to pay attention" view.
 TAB_COLUMNS = {
+    # v4.4.1, Improvement 2 -- pulls the columns that matter most for "where do I need to
+    # pay attention" together from across the other tabs into one consolidated view,
+    # rather than checking each focused tab separately. Every column here already exists
+    # elsewhere on this page; no new computation. "Passed R/S" is included (not in the
+    # original ask) so it's shown as a real sortable date alongside the two cells whose
+    # highlight (now living directly on Nearest Resistance/Support, not this column) it
+    # explains. Action is included for the same reason every other data-rich tab has it --
+    # an attention-worthy row with no way to jump to that symbol's own chart would be a
+    # real usability gap.
+    "Highlight": ["Symbol", "History90D", "Ex-Date", "Expected Div Per Month", "Total P/L",
+                  "Total P/L %", "Dividend Yield %", "Nearest Resistance (R %)",
+                  "Nearest Support (S %)", "Passed R/S", "Action"],
     "Overall": ["Symbol", "History90D", "Description", "Category", "Asset Class", "Portfolio Group", "Weight %",
                 "Category Weight %", "Quantity", "Avg Cost", "Latest Price", "Cost Basis", "Position Value",
                 "Unrealized", "Unrealized %", "Dividends Received", "Total P/L", "Total P/L %",
                 "Holding Period (Years)", "Total P/L %/yr", "Dividend Yield %", "Dividend Frequency",
                 "Ex-Date", "Expected Div Per Year", "Expected Div Per Month", "Beta",
-                "Div Return Contribution %", "S3", "S2", "S1", "Pivot", "R1", "R2", "R3",
+                "Div Return Contribution %",
                 "Nearest Resistance (R %)", "Nearest Support (S %)", "Passed R/S", "Action"],
     "Position": ["Symbol", "History90D", "Quantity", "Avg Cost", "Latest Price", "Cost Basis", "Position Value"],
     "Performance": ["Symbol", "History90D", "Unrealized", "Unrealized %", "Dividends Received", "Total P/L",
@@ -536,18 +566,6 @@ TAB_COLUMNS = {
     "Trendline": ["Symbol", "History90D", "Latest Price", "S3", "S2", "S1", "Pivot", "R1", "R2", "R3", "Action"],
     "Reference Lines": ["Symbol", "History90D", "Latest Price", "Nearest Resistance (R %)",
                          "Nearest Support (S %)", "Passed R/S", "Action"],
-    # v4.4.1, Improvement 2 -- pulls the columns that matter most for "where do I need to
-    # pay attention" together from across the other tabs into one consolidated view,
-    # rather than checking each focused tab separately. Every column here already exists
-    # elsewhere on this page; no new computation. "Passed R/S" is included (not in the
-    # original ask) so the amber "passed" highlight -- which lives on that column, not the
-    # Nearest R/S text cells themselves -- actually shows up here too; leaving it out would
-    # mean this tab silently lost the one highlight it was built to surface. Action is
-    # included for the same reason every other data-rich tab has it -- an attention-worthy
-    # row with no way to jump to that symbol's own chart would be a real usability gap.
-    "Highlight": ["Symbol", "History90D", "Ex-Date", "Expected Div Per Month", "Total P/L",
-                  "Total P/L %", "Dividend Yield %", "Nearest Resistance (R %)",
-                  "Nearest Support (S %)", "Passed R/S", "Action"],
 }
 column_config = {
     "Description": st.column_config.TextColumn("Desc.", help="Description"),
@@ -625,19 +643,22 @@ column_config = {
     "Nearest Resistance (R %)": st.column_config.TextColumn(
         help="The captured swing high nearest to current price, above it, with its live % distance. "
              "Auto-captured on first load if you haven't visited this symbol's own Auto Trendline "
-             "page yet. See \"Passed R/S\" for whether/when current price has reached it.",
+             "page yet. Highlighted once current price has reached it -- see \"Passed R/S\" for "
+             "the exact date.",
     ),
     "Nearest Support (S %)": st.column_config.TextColumn(
         help="The captured swing low nearest to current price, below it, with its live % distance. "
              "Auto-captured on first load if you haven't visited this symbol's own Auto Trendline "
-             "page yet. See \"Passed R/S\" for whether/when current price has reached it.",
+             "page yet. Highlighted once current price has reached it -- see \"Passed R/S\" for "
+             "the exact date.",
     ),
     "Passed R/S": st.column_config.DateColumn(
         format="DD/MM/YYYY",
         help="The date current price first reached either Nearest Resistance or Nearest Support -- "
              "blank if neither has been reached. If both have, shows the more recent of the two. "
-             "Stays set (sortable/filterable) until you Regenerate, drag, delete, or add a line on "
-             "that symbol's own Auto Trendline page.",
+             "The highlight itself lives on the Nearest Resistance/Support cell, not here -- this "
+             "stays a plain, sortable date. Stays set until you Regenerate, drag, delete, or add a "
+             "line on that symbol's own Auto Trendline page.",
     ),
 }
 
@@ -682,28 +703,44 @@ def _highlight_pivot_crosses(row: pd.Series) -> list[str]:
     return styles
 
 
-def _highlight_passed_reference_line(col: pd.Series) -> list[str]:
-    """Column-aware (subset=["Passed R/S"]), same shape as _highlight_ex_date_this_month
-    above -- but unlike that one (which only lights up within the CURRENT calendar month),
-    this stays lit for as long as the date is set at all: a passed Reference Line is a
-    standing alert meant to persist until you act on it (Regenerate/drag/delete/add on
-    that symbol's own page), not something that quietly stops mattering after the month
-    ends."""
+def _highlight_passed_nearest_reference(row: pd.Series) -> list[str]:
+    """Row-aware (axis=1), same shape as _highlight_pivot_crosses above -- highlights
+    "Nearest Resistance (R %)"/"Nearest Support (S %)" directly once THAT side's own line
+    has been passed, using the hidden "_R Passed At"/"_S Passed At" helper columns (added
+    to `table` alongside the visible columns below, then excluded from display via
+    column_order=cols) rather than the shared "Passed R/S" date column -- that column
+    alone can't tell which side passed, only the more recent date of whichever side(s)
+    did, so it can't drive a per-cell highlight on its own. "Passed R/S" itself is
+    intentionally left unstyled now -- still shown as a real, sortable date, just no
+    longer carrying its own highlight now that the cells it summarizes carry it directly."""
     amber = "background-color: rgba(255, 193, 7, 0.28)"
-    return [amber if pd.notna(v) else "" for v in col]
+    styles = []
+    for col in row.index:
+        if col == "Nearest Resistance (R %)" and pd.notna(row.get("_R Passed At")):
+            styles.append(amber)
+        elif col == "Nearest Support (S %)" and pd.notna(row.get("_S Passed At")):
+            styles.append(amber)
+        else:
+            styles.append("")
+    return styles
 
 
 for tab_name, tab, cols in zip(TAB_COLUMNS.keys(), st.tabs(list(TAB_COLUMNS.keys())), TAB_COLUMNS.values()):
     with tab:
-        table = view[cols]
+        # "_R Passed At"/"_S Passed At" ride along in `table` (for the highlighter below
+        # to read) whenever either Nearest column is on this tab, but are never added to
+        # `cols` -- column_order=cols on st.dataframe() further down keeps them off-screen.
+        needs_passed_highlight = "Nearest Resistance (R %)" in cols or "Nearest Support (S %)" in cols
+        hidden_cols = ["_R Passed At", "_S Passed At"] if needs_passed_highlight else []
+        table = view[cols + hidden_cols]
         styler = None
         if "Ex-Date" in cols:
             styler = table.style.apply(_highlight_ex_date_this_month, subset=["Ex-Date"])
         if "S1" in cols:
             styler = (styler if styler is not None else table.style).apply(_highlight_pivot_crosses, axis=1)
-        if "Passed R/S" in cols:
+        if needs_passed_highlight:
             styler = (styler if styler is not None else table.style).apply(
-                _highlight_passed_reference_line, subset=["Passed R/S"],
+                _highlight_passed_nearest_reference, axis=1,
             )
 
         # "Action" tabs (Trendline, Overall, Reference Lines, Highlight) get the "Action" cell specifically wired to
@@ -720,6 +757,7 @@ for tab_name, tab, cols in zip(TAB_COLUMNS.keys(), st.tabs(list(TAB_COLUMNS.keys
                 use_container_width=True,
                 hide_index=True,
                 column_config=column_config,
+                column_order=cols,
                 on_select="rerun",
                 selection_mode="single-cell",
                 key=f"monitor_stocks_{tab_name}_table",
@@ -736,4 +774,5 @@ for tab_name, tab, cols in zip(TAB_COLUMNS.keys(), st.tabs(list(TAB_COLUMNS.keys
                 use_container_width=True,
                 hide_index=True,
                 column_config=column_config,
+                column_order=cols,
             )
