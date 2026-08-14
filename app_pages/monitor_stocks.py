@@ -507,23 +507,26 @@ if not view.empty:
         st.plotly_chart(fig_div, use_container_width=True)
 
 st.caption(
-    f"Showing {len(view)} of {len(holdings)} symbols. On Overview/Trendline/Reference Lines, click a "
-    "row's Action cell (\"view →\") to open that symbol's price chart with its Support/Resistance "
-    "levels drawn."
+    f"Showing {len(view)} of {len(holdings)} symbols. On Overall/Trendline/Reference Lines/Highlight, "
+    "click a row's Action cell (\"view →\") to open that symbol's price chart with its Support/"
+    "Resistance levels drawn."
 )
 
 # Split from one 23-column table into focused tabs (Finviz-style column presets) --
 # Symbol + History90D pinned in every tab so a row is always identifiable regardless
 # of which view you're on. Each tab reuses the same underlying `view` dataframe and
-# `column_config` below, just a different column subset. Overview shows every column
-# (the original unified table); the rest are focused slices of the same data.
+# `column_config` below, just a different column subset. Overall shows every column
+# (the original unified table, renamed from "Overview" in v4.4.1 Improvement 3 once the
+# Reference Line columns made "shows every column" literally true again); the rest are
+# focused slices of the same data.
 TAB_COLUMNS = {
-    "Overview": ["Symbol", "History90D", "Description", "Category", "Asset Class", "Portfolio Group", "Weight %",
-                 "Category Weight %", "Quantity", "Avg Cost", "Latest Price", "Cost Basis", "Position Value",
-                 "Unrealized", "Unrealized %", "Dividends Received", "Total P/L", "Total P/L %",
-                 "Holding Period (Years)", "Total P/L %/yr", "Dividend Yield %", "Dividend Frequency",
-                 "Ex-Date", "Expected Div Per Year", "Expected Div Per Month", "Beta",
-                 "Div Return Contribution %", "S3", "S2", "S1", "Pivot", "R1", "R2", "R3", "Action"],
+    "Overall": ["Symbol", "History90D", "Description", "Category", "Asset Class", "Portfolio Group", "Weight %",
+                "Category Weight %", "Quantity", "Avg Cost", "Latest Price", "Cost Basis", "Position Value",
+                "Unrealized", "Unrealized %", "Dividends Received", "Total P/L", "Total P/L %",
+                "Holding Period (Years)", "Total P/L %/yr", "Dividend Yield %", "Dividend Frequency",
+                "Ex-Date", "Expected Div Per Year", "Expected Div Per Month", "Beta",
+                "Div Return Contribution %", "S3", "S2", "S1", "Pivot", "R1", "R2", "R3",
+                "Nearest Resistance (R %)", "Nearest Support (S %)", "Passed R/S", "Action"],
     "Position": ["Symbol", "History90D", "Quantity", "Avg Cost", "Latest Price", "Cost Basis", "Position Value"],
     "Performance": ["Symbol", "History90D", "Unrealized", "Unrealized %", "Dividends Received", "Total P/L",
                      "Total P/L %", "Holding Period (Years)", "Total P/L %/yr"],
@@ -703,7 +706,7 @@ for tab_name, tab, cols in zip(TAB_COLUMNS.keys(), st.tabs(list(TAB_COLUMNS.keys
                 _highlight_passed_reference_line, subset=["Passed R/S"],
             )
 
-        # "Action" tabs (Trendline, Overview) get the "Action" cell specifically wired to
+        # "Action" tabs (Trendline, Overall, Reference Lines, Highlight) get the "Action" cell specifically wired to
         # Symbol Analysis -- see the comment above holdings["Action"]'s assignment for why
         # this is st.switch_page() driven, not a LinkColumn. selection_mode="single-cell"
         # (not "single-row") so clicking any OTHER cell in the row (Symbol, S3, etc.) just
