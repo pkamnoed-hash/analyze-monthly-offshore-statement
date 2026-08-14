@@ -2155,6 +2155,168 @@ passed, both fixed and re-verified:
   near-duplicate); explicitly kept simple (plain closest-N, no spacing
   rule) per the user's own choice.
 
+## V4.4.1: Monitor Stocks Reference Line Summary, Highlight Tab, Overall Rename
+
+Branch `v4.4.1-reference-line-summary`, cut from `main` after V4.4 merged
+in (`23cf008`, tagged `v4.4`). Numbered `4.4.1` rather than the
+originally-discussed `4.5` -- simply the next thing built after v4.4 in
+chronological order, matching how every other `x.y.z` number in this
+project has been assigned (see `docs/VERSION_CONTROL.md`'s Branches
+table for the renumbering note). Not to be confused with the *other*
+`4.4.1` mentioned in `docs/VERSION_CONTROL.md`'s old quick-plan note --
+that was a placeholder reservation for biometric login, which never got
+built under that number and remains unscoped.
+
+### Context
+
+V4.4 shipped per-symbol Reference Lines (swing highs/lows nearest to
+current price, captured at a moment, drag/delete/create-editable) on a
+new per-symbol Auto Trendline page -- but only ever for a symbol you'd
+actually visited. Immediately flagged as the next real gap (already
+named in V4.4's own "Considered and explicitly deferred" note): can the
+"nearest Reference Line" reading exist for every held symbol as one
+table, without opening each symbol's own page first? Confirmed via a
+read-only chat preview (`compute_reference_lines()` run fresh against
+all ~52 real holdings) before this branch was cut.
+
+Built as three "Improvements" on the same branch, requested and
+implemented in order, followed by a fourth tweak round based on live
+testing feedback against the running app.
+
+### Design decisions
+
+**Improvement 1 -- Monitor Stocks "Reference Lines" tab.** Reads from
+the persisted `reference_lines` table rather than recomputing fresh
+every render; a held symbol with no captured row yet is auto-captured
+on first load (YTD/Daily basis, same as a never-visited symbol on its
+own page) -- the whole point of the tab. Two new nullable columns on
+`reference_lines`: `captured_side` (`'resistance'`/`'support'`, set once
+at capture time from price vs. `latest_price`, permanent -- distinct
+from the per-symbol chart's own *live*-derived side used for coloring)
+and `passed_at` (set the first time a line is observed crossed, cleared
+only by a fresh Regenerate/drag/delete/add on that symbol's own page).
+`nearest_reference_cell()` (`core/calculations.py`) picks the nearest
+captured line per side and always shows a **live** reading
+(`"$123.45 (+2.1%)"`, recomputed every render) with `passed_at` returned
+separately as a real `pd.Timestamp` rather than baked into the string --
+went through two rounds of user-driven redesign before landing here (an
+earlier version replaced the whole cell with `"passed: dd/mm/yyyy"` on
+crossing; the live-reading-plus-separate-column shape was chosen so the
+date stays independently sortable). A self-healing backfill in
+`mark_reference_lines_passed()` derives `captured_side` for any legacy
+row saved before this column existed, the first time such a row is
+seen -- caught live via a real-data smoke test showing several
+already-captured symbols (AIQ, AMZP, ARM, BMY, PLTR) silently reading
+"--/--" post-migration.
+
+**Improvement 2 -- "Highlight" tab.** Pulls Ex-Date, Expected Div/Mth,
+Total P/L(%), Dividend Yield %, and the two Reference Line columns
+together from across the other tabs into one "where do I need to pay
+attention" view -- no new computation, every column already exists
+elsewhere. Validated the page's column-presence-driven styler pattern
+(`if "<column>" in cols: ...`, keyed off which columns a tab happens to
+include, not the tab's name) generalizes cleanly to a tab mixing columns
+from several sources: Ex-Date's and the Reference Line highlight both
+"came for free" once their columns were added to this tab's list.
+
+**Improvement 3 -- rename "Overview" to "Overall".** `TAB_COLUMNS`'s
+dict key change (`st.tabs()` reads the keys directly, so this also
+renames the visible tab label); the two new Reference Line columns
+appended so "shows every column" stayed literally true.
+
+**Tweak round** (live-testing feedback against the running app, after
+all three Improvements were built and committed):
+- **Highlight moved to the "Nearest Resistance/Support" cells
+  themselves**, not the "Passed R/S" date column. Needed each side's
+  own `passed_at` independently (a shared "Passed R/S" column can only
+  ever show the more-recent of the two dates, not which side it
+  belongs to) -- solved by returning two hidden helper columns
+  (`_R Passed At`/`_S Passed At`) from `_cached_reference_line_summary`,
+  included in the `table` DataFrame passed to `st.dataframe()`'s
+  Styler but excluded from the visible grid via `column_order=cols`
+  (a documented Streamlit parameter: columns present in the data but
+  left out of `column_order` are hidden, while still fully readable by
+  a `.style.apply(..., axis=1)` function). `_highlight_passed_reference_line`
+  (column-aware, applied to "Passed R/S") was removed entirely in favor
+  of row-aware `_highlight_passed_nearest_reference`.
+- **"Highlight" moved to the leftmost tab position** (`TAB_COLUMNS`
+  dict order = tab order) as the most-used view.
+- **"Overall" dropped its Pivot Points columns** (S3/S2/S1/Pivot/R1/R2/R3)
+  -- Nearest Resistance/Support already cover "where's the watch-worthy
+  level" more directly; the full Pivot Points ladder stays on the
+  dedicated Trendline tab. Pivot itself was dropped too (not explicitly
+  asked, flagged to the user) since it's a plain duplicate of the
+  already-present "Avg Cost" column (both share the "Cost/Sh" label)
+  once its S/R siblings are gone.
+- **Auto Trendline's own Zone 5 table gets a "Passed R/S" column**,
+  matching Monitor Stocks' data exactly -- looked up per line by price
+  from the DB (not recomputed), after calling
+  `db.mark_reference_lines_passed({symbol: latest_price})` for that one
+  symbol so a symbol viewed directly (never through Monitor Stocks' own
+  5-minute-cached batch check) still gets an up-to-date reading.
+  Deliberately does *not* get the amber cell highlight Monitor Stocks
+  has -- V4.4's own design note already established that a "reached"
+  highlight is structurally impossible under Zone 5's live-derived-side
+  rule (the row's Level label itself flips from Resistance to Support
+  the instant price crosses it), unchanged by this round; only the date
+  column was added.
+
+### Real bug found and fixed (via the Zone 5 "Passed R/S" round above)
+
+Visiting a symbol's Auto Trendline page in a **fresh session** --
+without editing anything -- silently reset that symbol's whole
+`passed_at` state to null. Root cause: the DB-persistence block's
+snapshot-equality guard (added in V4.4 specifically to stop *unrelated*
+reruns from re-saving identical values) compares against
+`st.session_state[save_snapshot_key]`, which the DB-hydration path
+(loading a symbol's already-captured lines fresh from the DB into
+session state) never seeded -- so the very first render of any fresh
+session always looked like "these values changed," triggering a resave,
+and `save_reference_lines()` unconditionally nulls `passed_at` on every
+save (correct for a real edit, wrong for a passive load of unchanged
+data). Existed since V4.4 shipped `passed_at`'s predecessor concept was
+introduced in this branch; invisible until now because nothing
+previously displayed `passed_at` on this page. Fixed by seeding
+`save_snapshot_key` at hydration time to match what was just loaded, so
+the guard correctly recognizes "nothing changed" on first render too.
+Verified end-to-end with a real held symbol (XLP) that had a genuine
+`passed_at` on record: confirmed it survived a fresh-session page visit
+after the fix (previously confirmed it did *not* survive, before the
+fix, via a real symbol -- RKLB -- whose already-recorded `passed_at`
+was incidentally wiped by this exact bug during that verification pass
+and had to be manually restored afterward). One known, accepted loose
+end from that incident: RKLB's `$80.00` line's `captured_side` is left
+as `resistance` (the value it flipped to at the moment of the wipe,
+derived live from price at that instant) rather than restored to
+`support` -- cosmetic only (Monitor Stocks currently groups that one
+line under "Nearest Resistance" instead of "Nearest Support" for RKLB
+specifically), not corrected since it wasn't part of what was asked.
+
+### Testing and verification
+
+317 tests passing (18 new: `TestReferenceLines`/`TestMarkReferenceLinesPassed`
+in `tests/test_db.py`, `TestNearestReferenceCell` in
+`tests/test_calculations.py`). `py_compile` on every changed file.
+Streamlit `AppTest` run against real Turso + yfinance data after each
+Improvement and after the tweak round, checking tab order, exact column
+lists, and zero exceptions each time -- caught the fresh-session
+`passed_at`-wipe bug described above via a real before/after data
+comparison, not a synthetic test.
+
+### Considered and explicitly deferred
+
+- **Only the single nearest captured line per side is tracked/shown**
+  in Monitor Stocks' summary columns -- unchanged from Improvement 1's
+  original scope; a symbol with 2 captured resistance lines only
+  surfaces the nearer one there (both are still visible, and now both
+  carry their own "Passed R/S" date, on that symbol's own Auto
+  Trendline Zone 5 table).
+- **No auto-expiry of a "passed" state** -- stays frozen indefinitely
+  until a manual Regenerate/drag/delete/add, not after some time
+  window.
+- Biometric login remains fully unscoped, deliberately deferred to its
+  own future branch (see `docs/VERSION_CONTROL.md`'s quick-plan note).
+
 ## Deferred / future
 
 - **Restore from a backup** -- see V2.3's "Considered and explicitly

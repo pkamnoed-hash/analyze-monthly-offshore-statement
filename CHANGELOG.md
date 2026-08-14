@@ -1,5 +1,38 @@
 # Changelog
 
+## Monitor Stocks Reference Line Summary, Highlight Tab, Overall Rename (v4.4.1)
+
+Portfolio-wide "nearest Reference Line" summary across all held
+symbols, requested as a direct follow-up once v4.4's per-symbol
+Reference Lines were working.
+
+- **Monitor Stocks "Reference Lines" tab** -- Nearest Resistance/
+  Support reading for every held symbol, computed on first load rather
+  than requiring each symbol's own Auto Trendline page be visited
+  first. Once current price reaches a captured level, that specific
+  cell highlights amber and a new sortable "Passed R/S" date column
+  records when.
+- **"Highlight" tab** (moved to the leftmost position) -- consolidates
+  the columns that matter most for "where do I need to pay attention"
+  from across the other tabs: Ex-Date, Expt. Div/Mth, Total P/L(%),
+  Div Yield %, and Nearest Resistance/Support.
+  - **"Overview" renamed to "Overall"**, and its now-redundant Pivot
+  Points columns (S3/S2/S1/Pivot/R1/R2/R3) dropped -- Nearest
+  Resistance/Support cover the same "where's the watch-worthy level"
+  question more directly; the full Pivot Points ladder stays on the
+  dedicated Trendline tab.
+- **Auto Trendline's own Zone 5 table** gets a matching "Passed R/S"
+  column, reading the same underlying data Monitor Stocks does.
+- Fixed a real pre-existing bug: opening a symbol's Auto Trendline
+  page in a fresh session -- without editing anything -- silently
+  wiped that symbol's whole "passed" state. Root cause was an unseeded
+  guard on the database-hydration path; caught via live-data testing,
+  not a synthetic test.
+- New `captured_side`/`passed_at` columns on `reference_lines`, with a
+  self-healing backfill for rows captured before v4.4.1.
+- No breaking changes.
+- Full test suite: 317/317 passing (18 new).
+
 ## Auto Trendline: Monitor Stocks Trendline tab + Reference Lines (v4.4)
 
 Finally builds automatic support/resistance drawing, deferred since v4.2.
