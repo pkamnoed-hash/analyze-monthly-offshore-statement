@@ -305,6 +305,17 @@ def _render_symbol_analysis_zones():
             ]
             st.session_state[refline_state_key] = lines
             st.session_state[refline_next_id_key] = len(lines)
+            # Real bug found while adding the "Passed R/S" column below: without seeding
+            # this here, a completely fresh session hydrating UNCHANGED lines straight
+            # from the DB still fails the DB-persistence block's snapshot check further
+            # down (nothing has been recorded as "already saved" yet in THIS session),
+            # triggering a needless resave that silently wipes every line's passed_at --
+            # merely opening this page for a symbol that had a real frozen "passed" alert
+            # erased it. Seeding the snapshot here to match what was just loaded makes
+            # that guard correctly recognize "nothing changed" on first render too.
+            st.session_state[f"refline_last_saved_{symbol}"] = tuple(
+                sorted((round(line["price"], 6), line["is_override"]) for line in lines)
+            )
             first_row = saved_for_symbol.iloc[0]
             st.session_state[refline_basis_key] = {
                 "timeline": first_row["Captured Timeline"] if pd.notna(first_row["Captured Timeline"]) else "—",
@@ -396,10 +407,19 @@ def _render_symbol_analysis_zones():
         db.save_reference_lines(
             symbol,
             [{"price": line["price"], "is_override": line["is_override"]} for line in current_lines],
+            latest_price=latest_price,
             captured_timeline=basis.get("timeline"),
             captured_interval=basis.get("interval"),
         )
         st.session_state[save_snapshot_key] = snapshot
+
+    # v4.4.1 tweak -- same passed-detection Monitor Stocks' cached summary tab uses
+    # (core.db.mark_reference_lines_passed), run here too so a symbol viewed directly
+    # (never through Monitor Stocks' own 5-minute-cached batch check) still gets an
+    # up-to-date "Passed R/S" reading in Zone 5 below, not a stale one. Runs
+    # unconditionally (not just inside the save guard above) since price can move
+    # even when the captured line set itself hasn't changed.
+    db.mark_reference_lines_passed({symbol: latest_price})
 
     # -------------------------------------------------------------------------------
     # Zone 4: Stochastic oscillator -- rendered inside the trendline_chart component
@@ -442,6 +462,16 @@ def _render_symbol_analysis_zones():
     shares_to_sell = shares * sell_pct / 100
     st.caption(f"= {shares_to_sell:,.4f} of {shares:,.4f} shares")
 
+    # "Passed R/S" per line -- looked up from the DB by price (rounded the same way the
+    # snapshot-equality check above does), not recomputed here: mark_reference_lines_passed
+    # above just ran against this line's own captured_side/passed_at record, the same
+    # source Monitor Stocks' summary tab reads, so the value shown here matches it exactly.
+    saved_reflines = db.fetch_reference_lines()
+    saved_for_symbol = saved_reflines[saved_reflines["Symbol"] == symbol] if not saved_reflines.empty else saved_reflines
+    passed_at_by_price = {
+        round(float(row["Price"]), 6): row["Passed At"] for _, row in saved_for_symbol.iterrows()
+    } if not saved_for_symbol.empty else {}
+
     sorted_lines = sorted(current_lines, key=lambda line: line["price"], reverse=True)
     levels_rows = []
     is_resistance_ordered = []  # parallel list, same order/index as levels_rows -- avoids a
@@ -456,7 +486,11 @@ def _render_symbol_analysis_zones():
         label = f"{'Resistance' if is_resistance else 'Support'} ({touch_count} touches)"
         total_pl = shares * (sell_pct / 100) * (price - avg_cost)
         pct_pl = (price - avg_cost) / avg_cost * 100 if avg_cost else float("nan")
-        levels_rows.append({"Level": label, "Price": price, "Total P/L": total_pl, "%": pct_pl})
+        passed_at = passed_at_by_price.get(round(price, 6))
+        levels_rows.append({
+            "Level": label, "Price": price, "Total P/L": total_pl, "%": pct_pl,
+            "Passed R/S": pd.Timestamp(passed_at) if passed_at and pd.notna(passed_at) else pd.NaT,
+        })
         is_resistance_ordered.append(is_resistance)
     levels_table = pd.DataFrame(levels_rows)
 
@@ -480,7 +514,10 @@ def _render_symbol_analysis_zones():
         st.caption("No Reference Lines captured -- click \"Regenerate\" above, or \"+ Add Reference Line\" to place one by hand.")
     else:
         styler = levels_table.style.apply(_highlight_nearest, axis=1).format(
-            {"Price": "${:,.2f}", "Total P/L": "${:+,.2f}", "%": "{:+.2f}%"},
+            {
+                "Price": "${:,.2f}", "Total P/L": "${:+,.2f}", "%": "{:+.2f}%",
+                "Passed R/S": lambda v: v.strftime("%d/%m/%Y") if pd.notna(v) else "—",
+            },
         )
         st.dataframe(styler, use_container_width=True, hide_index=True)
 

@@ -39,6 +39,112 @@ def _cached_fetch_stock_profile(symbols: list[str]) -> tuple[pd.DataFrame, datet
     return market_data.fetch_stock_profile(symbols), datetime.now()
 
 
+@st.cache_data(ttl=300)
+def _cached_reference_line_summary(symbols: list[str], latest_prices: dict) -> pd.DataFrame:
+    """v4.4.1 -- Monitor Stocks' Reference Lines summary tab. Builds the "Nearest
+    Resistance (R %)"/"Nearest Support (S %)" cell for every symbol WITHOUT requiring its
+    own Auto Trendline page be visited first: any symbol with no captured
+    `reference_lines` row yet gets auto-captured here (real price-history fetch +
+    calculations.compute_reference_lines + db.save_reference_lines, same YTD/Daily basis
+    the per-symbol page seeds a never-visited symbol with) -- the whole point of this tab.
+
+    Cached like _cached_fetch_stock_profile above (same 5-minute TTL, cleared by the same
+    "Refresh now" button) -- a cold run can mean dozens of real price-history fetches, but
+    once a symbol is captured this only costs a cheap DB read on every subsequent call
+    (auto-capture skips anything already present), so the TTL mainly governs how often the
+    "passed" check re-evaluates against a fresh price, not repeated capture work.
+    `latest_prices` is a plain {symbol: price} dict rather than the profile DataFrame --
+    st.cache_data hashes it directly, and since _cached_fetch_stock_profile is itself
+    cached with the same TTL, this dict is stable (and this function cache-hits) across
+    reruns within the same window, not just within one script pass.
+
+    db.mark_reference_lines_passed() runs every call (cheap -- reuses `latest_prices`
+    already fetched for the page, no extra network cost) so a line crossed since the last
+    cache refresh gets its passed_at set before this tab's cells are built.
+
+    Returns "_R Passed At"/"_S Passed At" alongside the visible columns -- hidden helper
+    columns (see the render loop below) carrying each side's own passed_at, so the
+    Nearest Resistance/Support cells can be highlighted individually rather than only
+    the shared "Passed R/S" date column.
+
+    Known, accepted edge case: a genuinely flat/ultra-low-volatility symbol (real example:
+    SGOV/SHV, near-zero price movement) can have ZERO swing candidates on either side, so
+    compute_reference_lines returns two empty lists and save_reference_lines's
+    delete-then-insert-all inserts nothing -- that symbol never shows up in `captured`,
+    so it's never seen as "already captured" and gets re-attempted (one more real
+    fetch_price_history call) every cache cycle instead of being permanently skipped.
+    Accepted rather than fixed with extra schema complexity (e.g. a sentinel row) -- in
+    practice this is a couple of symbols out of a real ~52-symbol portfolio, re-fetched at
+    most once per 5-minute TTL window, not on every rerun."""
+    captured = db.fetch_reference_lines()
+    captured_symbols = set(captured["Symbol"]) if not captured.empty else set()
+    today = pd.Timestamp.today().normalize()
+    cutoff = pd.Timestamp(year=today.year, month=1, day=1)  # YTD -- matches the per-symbol
+                                                              # page's own default basis for
+                                                              # a never-visited symbol.
+
+    for symbol in symbols:
+        if symbol in captured_symbols:
+            continue
+        latest_price = latest_prices.get(symbol)
+        if latest_price is None or pd.isna(latest_price):
+            continue  # unresolved symbol -- nothing to anchor a capture against
+        daily_history = market_data.fetch_price_history(symbol, 1825)
+        if daily_history.empty:
+            continue
+        resampled_full = calculations.resample_ohlc(daily_history, "D")
+        bars_in_range = int((resampled_full["Date"] >= cutoff).sum())
+        window = min(25, max(3, bars_in_range // 25))
+        reflines = calculations.compute_reference_lines(
+            resampled_full["Date"], resampled_full["High"], resampled_full["Low"],
+            latest_price, window=window, search_from=cutoff,
+        )
+        lines_to_save = [{"price": p, "is_override": False} for p in reflines["resistance"] + reflines["support"]]
+        db.save_reference_lines(
+            symbol, lines_to_save, latest_price=latest_price,
+            captured_timeline="YTD", captured_interval="Day",
+        )
+
+    db.mark_reference_lines_passed(latest_prices)
+
+    captured = db.fetch_reference_lines()  # re-fetch: includes anything just captured/marked passed
+    rows = []
+    for symbol in symbols:
+        latest_price = latest_prices.get(symbol)
+        symbol_lines = captured[captured["Symbol"] == symbol] if not captured.empty else captured
+        if latest_price is None or pd.isna(latest_price) or symbol_lines.empty:
+            rows.append({
+                "Symbol": symbol, "Nearest Resistance (R %)": "—", "Nearest Support (S %)": "—",
+                "Passed R/S": pd.NaT, "_R Passed At": pd.NaT, "_S Passed At": pd.NaT,
+            })
+            continue
+        line_dicts = [
+            {"price": row["Price"], "passed_at": row["Passed At"]} for _, row in symbol_lines.iterrows()
+        ]
+        resistance_lines = [d for d, side in zip(line_dicts, symbol_lines["Captured Side"]) if side == "resistance"]
+        support_lines = [d for d, side in zip(line_dicts, symbol_lines["Captured Side"]) if side == "support"]
+        r_cell = calculations.nearest_reference_cell(resistance_lines, "resistance", latest_price)
+        s_cell = calculations.nearest_reference_cell(support_lines, "support", latest_price)
+        # A symbol could, in principle, have both its nearest R and nearest S passed at
+        # once (price whipsawed through both since the last capture) -- "Passed R/S" is
+        # one column, so this surfaces the MORE RECENT of the two dates, the fresher alert.
+        passed_dates = [d for d in (r_cell["passed_at"], s_cell["passed_at"]) if d is not None]
+        rows.append({
+            "Symbol": symbol,
+            "Nearest Resistance (R %)": r_cell["text"],
+            "Nearest Support (S %)": s_cell["text"],
+            "Passed R/S": max(passed_dates) if passed_dates else pd.NaT,
+            # Hidden helper columns (never in a TAB_COLUMNS list, kept off-screen via
+            # column_order=cols below) -- "Passed R/S" alone can't tell the highlighter
+            # WHICH side passed, only the more recent date of whichever side(s) did. These
+            # carry each side's own passed_at so _highlight_passed_nearest_reference can
+            # light up exactly the cell that was actually reached.
+            "_R Passed At": r_cell["passed_at"] if r_cell["passed_at"] is not None else pd.NaT,
+            "_S Passed At": s_cell["passed_at"] if s_cell["passed_at"] is not None else pd.NaT,
+        })
+    return pd.DataFrame(rows)
+
+
 @st.cache_data
 def _blended_dividend_rows() -> pd.DataFrame:
     """Actual (not projected) dividend/distribution rows, all-time, blended xlsx history
@@ -95,6 +201,7 @@ holdings = holdings.rename(columns={"Allocation Type": "Category"})
 
 if st.button("Refresh now", help="Bypass the 5-minute cache and re-fetch live prices."):
     _cached_fetch_stock_profile.clear()
+    _cached_reference_line_summary.clear()
 
 profile, last_refreshed = _cached_fetch_stock_profile(holdings["Symbol"].tolist())
 st.caption(f"Last refreshed: {last_refreshed.strftime('%d/%m/%Y %H:%M')}")
@@ -143,6 +250,17 @@ for level, values in calculations.compute_pivot_points(
 ).items():
     holdings[level] = values
 holdings["Action"] = "view →"
+
+# v4.4.1 -- Reference Lines summary (Nearest Resistance (R %)/Nearest Support (S %)),
+# genuinely different from the Pivot Points columns above: swing-based, nearest to
+# current price rather than a fixed formula, and CAPTURED (persisted, frozen until the
+# symbol's own Auto Trendline page saves a change) rather than recomputed every render.
+# Auto-captures any symbol with nothing saved yet -- see _cached_reference_line_summary's
+# own docstring -- so every held symbol is watchable from this table without needing to
+# visit each one's own page first.
+latest_price_map = dict(zip(holdings["Symbol"], holdings["Latest Price"]))
+reference_line_summary = _cached_reference_line_summary(holdings["Symbol"].tolist(), latest_price_map)
+holdings = holdings.merge(reference_line_summary, on="Symbol", how="left")
 
 holdings["Position Value"] = holdings["Quantity"] * holdings["Latest Price"]
 total_value = holdings["Position Value"].sum()
@@ -401,22 +519,44 @@ if not view.empty:
         st.plotly_chart(fig_div, use_container_width=True)
 
 st.caption(
-    f"Showing {len(view)} of {len(holdings)} symbols. On Overview/Trendline, click a row's Action "
-    "cell (\"view →\") to open that symbol's price chart with its Support/Resistance levels drawn."
+    f"Showing {len(view)} of {len(holdings)} symbols. On Overall/Trendline/Reference Lines/Highlight, "
+    "click a row's Action cell (\"view →\") to open that symbol's price chart with its Support/"
+    "Resistance levels drawn."
 )
 
 # Split from one 23-column table into focused tabs (Finviz-style column presets) --
 # Symbol + History90D pinned in every tab so a row is always identifiable regardless
 # of which view you're on. Each tab reuses the same underlying `view` dataframe and
-# `column_config` below, just a different column subset. Overview shows every column
-# (the original unified table); the rest are focused slices of the same data.
+# `column_config` below, just a different column subset. Overall shows nearly every
+# column (the original unified table, renamed from "Overview" in v4.4.1 Improvement 3);
+# Pivot Points (S3/S2/S1/Pivot/R1/R2/R3) are deliberately left off it as of the tweak
+# below -- Nearest Resistance/Support already cover "where's the watch-worthy level"
+# more directly, and the dedicated Trendline tab still has the full Pivot Points ladder
+# for anyone who wants it. The rest are focused slices of the same data.
+#
+# "Highlight" is listed first (dict order == tab order, since st.tabs() reads
+# TAB_COLUMNS.keys() directly below) -- moved to the leftmost position as the
+# most-used "where do I need to pay attention" view.
 TAB_COLUMNS = {
-    "Overview": ["Symbol", "History90D", "Description", "Category", "Asset Class", "Portfolio Group", "Weight %",
-                 "Category Weight %", "Quantity", "Avg Cost", "Latest Price", "Cost Basis", "Position Value",
-                 "Unrealized", "Unrealized %", "Dividends Received", "Total P/L", "Total P/L %",
-                 "Holding Period (Years)", "Total P/L %/yr", "Dividend Yield %", "Dividend Frequency",
-                 "Ex-Date", "Expected Div Per Year", "Expected Div Per Month", "Beta",
-                 "Div Return Contribution %", "S3", "S2", "S1", "Pivot", "R1", "R2", "R3", "Action"],
+    # v4.4.1, Improvement 2 -- pulls the columns that matter most for "where do I need to
+    # pay attention" together from across the other tabs into one consolidated view,
+    # rather than checking each focused tab separately. Every column here already exists
+    # elsewhere on this page; no new computation. "Passed R/S" is included (not in the
+    # original ask) so it's shown as a real sortable date alongside the two cells whose
+    # highlight (now living directly on Nearest Resistance/Support, not this column) it
+    # explains. Action is included for the same reason every other data-rich tab has it --
+    # an attention-worthy row with no way to jump to that symbol's own chart would be a
+    # real usability gap.
+    "Highlight": ["Symbol", "History90D", "Ex-Date", "Expected Div Per Month", "Total P/L",
+                  "Total P/L %", "Dividend Yield %", "Nearest Resistance (R %)",
+                  "Nearest Support (S %)", "Passed R/S", "Action"],
+    "Overall": ["Symbol", "History90D", "Description", "Category", "Asset Class", "Portfolio Group", "Weight %",
+                "Category Weight %", "Quantity", "Avg Cost", "Latest Price", "Cost Basis", "Position Value",
+                "Unrealized", "Unrealized %", "Dividends Received", "Total P/L", "Total P/L %",
+                "Holding Period (Years)", "Total P/L %/yr", "Dividend Yield %", "Dividend Frequency",
+                "Ex-Date", "Expected Div Per Year", "Expected Div Per Month", "Beta",
+                "Div Return Contribution %",
+                "Nearest Resistance (R %)", "Nearest Support (S %)", "Passed R/S", "Action"],
     "Position": ["Symbol", "History90D", "Quantity", "Avg Cost", "Latest Price", "Cost Basis", "Position Value"],
     "Performance": ["Symbol", "History90D", "Unrealized", "Unrealized %", "Dividends Received", "Total P/L",
                      "Total P/L %", "Holding Period (Years)", "Total P/L %/yr"],
@@ -424,6 +564,8 @@ TAB_COLUMNS = {
                   "Expected Div Per Year", "Expected Div Per Month", "Div Return Contribution %"],
     "Classification": ["Symbol", "History90D", "Asset Class", "Portfolio Group", "Beta"],
     "Trendline": ["Symbol", "History90D", "Latest Price", "S3", "S2", "S1", "Pivot", "R1", "R2", "R3", "Action"],
+    "Reference Lines": ["Symbol", "History90D", "Latest Price", "Nearest Resistance (R %)",
+                         "Nearest Support (S %)", "Passed R/S", "Action"],
 }
 column_config = {
     "Description": st.column_config.TextColumn("Desc.", help="Description"),
@@ -498,6 +640,26 @@ column_config = {
     "Action": st.column_config.TextColumn(
         "Action", help="Click this cell to open a price chart with these levels drawn, and adjust them manually if you want.",
     ),
+    "Nearest Resistance (R %)": st.column_config.TextColumn(
+        help="The captured swing high nearest to current price, above it, with its live % distance. "
+             "Auto-captured on first load if you haven't visited this symbol's own Auto Trendline "
+             "page yet. Highlighted once current price has reached it -- see \"Passed R/S\" for "
+             "the exact date.",
+    ),
+    "Nearest Support (S %)": st.column_config.TextColumn(
+        help="The captured swing low nearest to current price, below it, with its live % distance. "
+             "Auto-captured on first load if you haven't visited this symbol's own Auto Trendline "
+             "page yet. Highlighted once current price has reached it -- see \"Passed R/S\" for "
+             "the exact date.",
+    ),
+    "Passed R/S": st.column_config.DateColumn(
+        format="DD/MM/YYYY",
+        help="The date current price first reached either Nearest Resistance or Nearest Support -- "
+             "blank if neither has been reached. If both have, shows the more recent of the two. "
+             "The highlight itself lives on the Nearest Resistance/Support cell, not here -- this "
+             "stays a plain, sortable date. Stays set until you Regenerate, drag, delete, or add a "
+             "line on that symbol's own Auto Trendline page.",
+    ),
 }
 
 def _highlight_ex_date_this_month(col: pd.Series) -> list[str]:
@@ -541,16 +703,47 @@ def _highlight_pivot_crosses(row: pd.Series) -> list[str]:
     return styles
 
 
+def _highlight_passed_nearest_reference(row: pd.Series) -> list[str]:
+    """Row-aware (axis=1), same shape as _highlight_pivot_crosses above -- highlights
+    "Nearest Resistance (R %)"/"Nearest Support (S %)" directly once THAT side's own line
+    has been passed, using the hidden "_R Passed At"/"_S Passed At" helper columns (added
+    to `table` alongside the visible columns below, then excluded from display via
+    column_order=cols) rather than the shared "Passed R/S" date column -- that column
+    alone can't tell which side passed, only the more recent date of whichever side(s)
+    did, so it can't drive a per-cell highlight on its own. "Passed R/S" itself is
+    intentionally left unstyled now -- still shown as a real, sortable date, just no
+    longer carrying its own highlight now that the cells it summarizes carry it directly."""
+    amber = "background-color: rgba(255, 193, 7, 0.28)"
+    styles = []
+    for col in row.index:
+        if col == "Nearest Resistance (R %)" and pd.notna(row.get("_R Passed At")):
+            styles.append(amber)
+        elif col == "Nearest Support (S %)" and pd.notna(row.get("_S Passed At")):
+            styles.append(amber)
+        else:
+            styles.append("")
+    return styles
+
+
 for tab_name, tab, cols in zip(TAB_COLUMNS.keys(), st.tabs(list(TAB_COLUMNS.keys())), TAB_COLUMNS.values()):
     with tab:
-        table = view[cols]
+        # "_R Passed At"/"_S Passed At" ride along in `table` (for the highlighter below
+        # to read) whenever either Nearest column is on this tab, but are never added to
+        # `cols` -- column_order=cols on st.dataframe() further down keeps them off-screen.
+        needs_passed_highlight = "Nearest Resistance (R %)" in cols or "Nearest Support (S %)" in cols
+        hidden_cols = ["_R Passed At", "_S Passed At"] if needs_passed_highlight else []
+        table = view[cols + hidden_cols]
         styler = None
         if "Ex-Date" in cols:
             styler = table.style.apply(_highlight_ex_date_this_month, subset=["Ex-Date"])
         if "S1" in cols:
             styler = (styler if styler is not None else table.style).apply(_highlight_pivot_crosses, axis=1)
+        if needs_passed_highlight:
+            styler = (styler if styler is not None else table.style).apply(
+                _highlight_passed_nearest_reference, axis=1,
+            )
 
-        # "Action" tabs (Trendline, Overview) get the "Action" cell specifically wired to
+        # "Action" tabs (Trendline, Overall, Reference Lines, Highlight) get the "Action" cell specifically wired to
         # Symbol Analysis -- see the comment above holdings["Action"]'s assignment for why
         # this is st.switch_page() driven, not a LinkColumn. selection_mode="single-cell"
         # (not "single-row") so clicking any OTHER cell in the row (Symbol, S3, etc.) just
@@ -564,6 +757,7 @@ for tab_name, tab, cols in zip(TAB_COLUMNS.keys(), st.tabs(list(TAB_COLUMNS.keys
                 use_container_width=True,
                 hide_index=True,
                 column_config=column_config,
+                column_order=cols,
                 on_select="rerun",
                 selection_mode="single-cell",
                 key=f"monitor_stocks_{tab_name}_table",
@@ -580,4 +774,5 @@ for tab_name, tab, cols in zip(TAB_COLUMNS.keys(), st.tabs(list(TAB_COLUMNS.keys
                 use_container_width=True,
                 hide_index=True,
                 column_config=column_config,
+                column_order=cols,
             )

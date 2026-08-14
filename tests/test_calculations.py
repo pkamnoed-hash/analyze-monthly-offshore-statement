@@ -20,6 +20,7 @@ from core.calculations import (
     estimate_sell_realized_pl,
     find_nearest_levels,
     find_swing_points,
+    nearest_reference_cell,
     resample_ohlc,
     to_heikin_ashi,
 )
@@ -1037,3 +1038,45 @@ class TestComputeReferenceLines:
             dates, high, low, latest_price=95.0, window=1, search_from=dates.iloc[9],
         )
         assert result["resistance"] == pytest.approx([150.0, 151.0])
+
+
+class TestNearestReferenceCell:
+    def test_empty_lines_shows_a_dash(self):
+        assert nearest_reference_cell([], "resistance", 100.0) == {"text": "—", "passed": False, "passed_at": None}
+
+    def test_live_resistance_reading_shows_price_and_positive_pct(self):
+        lines = [{"price": 105.0, "passed_at": None}]
+        result = nearest_reference_cell(lines, "resistance", 100.0)
+        assert result == {"text": "$105.00 (+5.0%)", "passed": False, "passed_at": None}
+
+    def test_live_support_reading_shows_price_and_negative_pct(self):
+        lines = [{"price": 95.0, "passed_at": None}]
+        result = nearest_reference_cell(lines, "support", 100.0)
+        assert result == {"text": "$95.00 (-5.0%)", "passed": False, "passed_at": None}
+
+    def test_picks_the_nearest_of_two_resistance_candidates(self):
+        lines = [{"price": 110.0, "passed_at": None}, {"price": 105.0, "passed_at": None}]
+        result = nearest_reference_cell(lines, "resistance", 100.0)
+        assert result["text"] == "$105.00 (+5.0%)"
+
+    def test_picks_the_nearest_of_two_support_candidates(self):
+        lines = [{"price": 90.0, "passed_at": None}, {"price": 95.0, "passed_at": None}]
+        result = nearest_reference_cell(lines, "support", 100.0)
+        assert result["text"] == "$95.00 (-5.0%)"
+
+    def test_passed_line_still_updates_its_live_pct_and_returns_a_real_timestamp(self):
+        lines = [{"price": 105.0, "passed_at": "2026-08-20"}]
+        # latest_price has moved past 105 -- the % keeps updating live (now negative,
+        # since a passed resistance's price is now below current price). passed_at comes
+        # back as a real pd.Timestamp (not baked into text), for the caller's own
+        # sortable date column.
+        result = nearest_reference_cell(lines, "resistance", 130.0)
+        assert result["text"] == "$105.00 (-19.2%)"
+        assert result["passed"] is True
+        assert result["passed_at"] == pd.Timestamp("2026-08-20")
+
+    def test_nan_passed_at_is_treated_as_not_passed(self):
+        # fetch_reference_lines() round-trips a SQL NULL through pandas as NaN, not None.
+        lines = [{"price": 105.0, "passed_at": float("nan")}]
+        result = nearest_reference_cell(lines, "resistance", 100.0)
+        assert result["passed"] is False
