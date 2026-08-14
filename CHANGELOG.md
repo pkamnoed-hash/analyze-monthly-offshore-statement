@@ -1,5 +1,32 @@
 # Changelog
 
+## Reduce Redundant Reloads + Durable yfinance DB Cache (v4.5)
+
+Traces and fixes three real causes of the app "always reloading" when
+navigating between pages, plus a durable fallback for a real
+production incident where Yahoo Finance rate-limited Streamlit
+Community Cloud's shared IP right after v4.4.1's first deploy,
+blanking every yfinance-derived column app-wide.
+
+- **`init_db()` now runs once per browser session** instead of on
+  every single navigation/rerun -- it was unconditionally re-running
+  its whole table-creation check every time.
+- **Trades/dividends/symbol type reads are now cached**, invalidated
+  explicitly the instant something is actually saved, edited, or
+  deleted -- previously uncached on 8 different pages, paying a real
+  database round trip on every load even when nothing had changed. A
+  save still shows up immediately; plain navigation no longer pays for
+  a redundant fetch.
+- **A new durable cache for yfinance's stock profile data**
+  (Description, Sector, Beta, Dividend fields, 90-day history): when a
+  live fetch fails, Monitor Stocks now falls back to the last
+  successfully captured values for that symbol instead of showing a
+  blank row, with a warning banner naming how many symbols fell back.
+  A symbol that's never successfully fetched at all still shows blank,
+  same as before.
+- No breaking changes.
+- Full test suite: 329/329 passing (12 new).
+
 ## Monitor Stocks Reference Line Summary, Highlight Tab, Overall Rename (v4.4.1)
 
 Portfolio-wide "nearest Reference Line" summary across all held

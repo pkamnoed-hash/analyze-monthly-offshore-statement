@@ -2317,6 +2317,175 @@ comparison, not a synthetic test.
 - Biometric login remains fully unscoped, deliberately deferred to its
   own future branch (see `docs/VERSION_CONTROL.md`'s quick-plan note).
 
+## V4.5: Reduce Redundant Reloads + Durable yfinance DB Cache
+
+Branch `v4.5-yfinance-cache`, cut from `main` after V4.4.1 merged in.
+Originally planned as two improvements on one branch (yfinance
+caching + biometric login, user's explicit choice to combine rather
+than split), but biometric login was deferred to its own future
+branch before any of it was built -- the branch was renamed from
+`v4.5-yfinance-cache-and-bio-login` to match, so only what actually
+shipped is reflected in its name.
+
+### Context
+
+User asked directly why the app "always reloads" navigating between
+Dashboard, Monitor Stocks, etc., and whether it's fixable. Traced (via
+grep across `app_pages/` and `core/db.py`, not guessed) to three
+separate, concrete causes:
+
+1. `init_db()` ran fully, unconditionally, on every single rerun --
+   called at `dashboard_app.py`'s module level with no guard, so every
+   navigation or widget interaction re-executed the whole
+   `SCHEMA_STATEMENTS` loop (one real Turso round trip per `CREATE
+   TABLE` statement) plus the reference_lines migration check.
+2. `db.fetch_trades()`/`fetch_dividends()`/`fetch_symbol_types()` were
+   deliberately uncached (so a just-saved trade shows up immediately),
+   but were called uncached from **8 different pages** -- Dashboard,
+   Monitor Stocks, Auto Trendline, Record Trade, Record Dividend,
+   Allocation Type, Reconciliation, Rebalance -- meaning every one of
+   those loads paid a real Turso round trip even when nothing had
+   changed.
+3. yfinance itself was already cached (`st.cache_data(ttl=300)`), so
+   it wasn't the main cause of the day-to-day feeling -- but that
+   in-memory cache starts empty on every fresh process, which is
+   exactly what turned a real production incident (Yahoo Finance
+   rate-limiting Streamlit Community Cloud's shared IP right after
+   V4.4.1's first deploy) into every yfinance-derived column going
+   blank app-wide, confirmed not a code defect (the identical fetch
+   worked cleanly from a local machine at the same moment).
+
+User confirmed via AskUserQuestion: fix all three together as one
+improvement, and for #2, use cache-and-invalidate-on-write (not a
+short TTL) so a save is never stale, not even briefly -- same pattern
+this app already used for yfinance's own "Refresh now" button.
+
+### Design decisions
+
+**#1 -- session-scoped `init_db()`.** Wrapped in a `st.session_state`
+guard in `dashboard_app.py`: runs exactly once per browser session
+instead of every rerun. A genuinely fresh session still initializes
+its schema correctly, since the guard is per-session state, not a
+one-time global flag.
+
+**#2 -- `cached_db.py`** (new file, project root -- not `core/` since it
+needs a `streamlit` import, which `core/` deliberately avoids; not
+`app_pages/` since it's shared infrastructure, not a page). Three
+`@st.cache_data`-wrapped readers (`cached_fetch_trades()`,
+`cached_fetch_dividends()`, `cached_fetch_symbol_types()`, each a thin
+wrapper around the matching `core.db` function) plus matching
+`invalidate_trades()`/`invalidate_dividends()`/`invalidate_symbol_types()`
+functions. Every read call site across all 8 pages swapped to the
+cached version; every **write** call site (found via grep:
+`insert_trade`/`insert_trades_bulk`/`delete_trade`/
+`delete_trades_by_source`, `insert_dividend`/`insert_dividends_bulk`/
+`delete_dividend`/`delete_dividends_by_source`, `set_symbol_type`/
+`clear_symbol_type`, and `mark_reconciled_bulk` -- which also writes to
+`trades`/`dividends` directly and needed the same treatment) gets the
+matching `invalidate_*()` call right after the write succeeds. Only 3
+files (`record_trade.py`, `record_dividend.py`, `allocation_type.py`,
+plus `reconciliation.py` for `mark_reconciled_bulk`) have write call
+sites, so this stayed a contained change despite touching every page
+as a reader. Verified directly against real data, not just unit
+tests: a write without invalidating stays invisible on the next read
+(proves the cache is real), then `invalidate_trades()` makes it appear
+immediately (proves invalidation actually works) -- both halves
+proven, not assumed.
+
+**#3 -- `market_profile_cache` table**, one new table in the existing
+Turso database (created automatically via `init_db()`'s existing
+`CREATE TABLE IF NOT EXISTS` loop, same as every other table -- no
+manual Turso step). `save_market_profile_cache()`/
+`fetch_market_profile_cache()` in `core/db.py`, same shape as
+`save_reference_lines`/`fetch_reference_lines` (`INSERT OR REPLACE`
+upsert batched into one `executescript()` call, since `symbol` is the
+table's primary key -- always one row per symbol). Orchestration
+stays in `app_pages/monitor_stocks.py`'s existing
+`_cached_fetch_stock_profile` (the only caller of
+`fetch_stock_profile`), matching how `_cached_reference_line_summary`
+already orchestrates both `market_data` and `db` calls at the page
+level rather than teaching `core/market_data.py` about persistence.
+`calculations.apply_market_profile_fallback()` (new, pure, no
+Streamlit/DB import) does the actual merge: a row's live fetch counts
+as failed when `Latest Price` is NaN -- the one field
+`fetch_stock_profile`'s success branch always sets and its `except`
+branch never does, a more reliable signal than `Description` (which a
+genuine success could theoretically still leave blank). A failed row
+with a cached counterpart gets every yfinance-derived field replaced
+from the cache and `Stale=True`; a failed row with nothing ever
+cached stays blank, exactly like before this existed -- no
+regression, just a better result when something WAS captured before.
+Rows that succeed live are upserted back into `market_profile_cache`
+right after (only the successful ones, so a still-blocked symbol never
+overwrites a real captured value with another blank). Monitor Stocks
+shows a warning caption naming how many symbols fell back, so stale
+data reads as "we know, here's what we last captured" rather than
+silently pretending to be current.
+
+Deliberately scoped to `fetch_stock_profile()` only (Description/
+Sector/Beta/Dividend fields/90D history) -- `fetch_price_history()`
+(candlestick OHLC data, used by Auto Trendline's chart) is NOT
+DB-cached this round; see Considered and deferred.
+
+### Implementation
+
+- **`dashboard_app.py`**: `init_db()` call wrapped in a
+  `st.session_state` guard.
+- **`cached_db.py`** (new): cached readers + invalidate functions for
+  trades/dividends/symbol_types.
+- **`core/db.py`**: `market_profile_cache` added to `SCHEMA_STATEMENTS`;
+  `save_market_profile_cache()`, `fetch_market_profile_cache()`.
+- **`core/calculations.py`**: `apply_market_profile_fallback()`.
+- **`app_pages/monitor_stocks.py`**: `_cached_fetch_stock_profile`
+  orchestrates fetch -> fallback-merge -> upsert; a `Stale`-count
+  warning caption added near the existing "Last refreshed" caption.
+- **Every `app_pages/*.py` file** reading trades/dividends/
+  symbol_types swapped to `cached_db.cached_*()`; **`record_trade.py`**,
+  **`record_dividend.py`**, **`allocation_type.py`**,
+  **`reconciliation.py`** add the matching `invalidate_*()` calls.
+
+### Testing and verification
+
+329 tests passing (12 new: `TestMarketProfileCache` in
+`tests/test_db.py`, `TestApplyMarketProfileFallback` in
+`tests/test_calculations.py`). `py_compile` on every changed file.
+Real-data verification at every step, not just synthetic unit tests:
+the cache-and-invalidate mechanism proven against a real throwaway
+trade insert/delete on the dev Turso branch; a real `fetch_stock_profile()`
+call for AAPL/SGOV round-tripped through `save_market_profile_cache`/
+`fetch_market_profile_cache` correctly (real Beta, real 90-day history,
+real dividend fields); a simulated live-fetch failure for AAPL
+correctly fell back to its real just-cached values with `Stale=True`,
+while SGOV (which succeeded live) was left untouched. `AppTest` runs
+against real data at every step -- all 8 touched pages, plus a full
+Monitor Stocks run across all ~52 real holdings -- zero exceptions
+throughout.
+
+### Considered and explicitly deferred
+
+- **Biometric login** -- originally this branch's planned Improvement
+  2, deferred to its own future branch before any of it was built
+  (branch renamed to drop "and-bio-login" from its name to match).
+  Number to be decided when actually built, not reserved in advance.
+- **`fetch_price_history()` (candlestick OHLC data) is not DB-cached**
+  -- much larger per-symbol volume (up to 1825 daily bars) than the
+  profile row, wasn't what broke in the actual incident, and the
+  existing per-symbol try/except in `fetch_stock_profile`/callers
+  already degrades reasonably. Revisit if this becomes a real pain
+  point on its own.
+- **`rebalance.py`'s `_dividends_received_by_symbol()` and
+  `monitor_stocks.py`'s `_blended_dividend_rows()`** each wrap their
+  own dividends read in a separate, indefinitely-cached
+  `@st.cache_data` function -- `cached_db.invalidate_dividends()`
+  clears `cached_fetch_dividends()` itself, but not these two outer
+  wrappers, so a saved dividend's dollar amount in those two specific
+  figures could stay stale for the rest of a session. Pre-existing
+  gap (predates this branch), not made worse by this change, not
+  fixed either -- flagged for a possible future fix.
+- **No deeper staleness UX** (e.g. per-cell "as of" tooltips, an
+  age-based color warning) beyond the simple warning caption -- keep
+  the first version simple, iterate if that's not enough in practice.
+
 ## Deferred / future
 
 - **Restore from a backup** -- see V2.3's "Considered and explicitly
