@@ -533,6 +533,18 @@ TAB_COLUMNS = {
     "Trendline": ["Symbol", "History90D", "Latest Price", "S3", "S2", "S1", "Pivot", "R1", "R2", "R3", "Action"],
     "Reference Lines": ["Symbol", "History90D", "Latest Price", "Nearest Resistance (R %)",
                          "Nearest Support (S %)", "Passed R/S", "Action"],
+    # v4.4.1, Improvement 2 -- pulls the columns that matter most for "where do I need to
+    # pay attention" together from across the other tabs into one consolidated view,
+    # rather than checking each focused tab separately. Every column here already exists
+    # elsewhere on this page; no new computation. "Passed R/S" is included (not in the
+    # original ask) so the amber "passed" highlight -- which lives on that column, not the
+    # Nearest R/S text cells themselves -- actually shows up here too; leaving it out would
+    # mean this tab silently lost the one highlight it was built to surface. Action is
+    # included for the same reason every other data-rich tab has it -- an attention-worthy
+    # row with no way to jump to that symbol's own chart would be a real usability gap.
+    "Highlight": ["Symbol", "History90D", "Ex-Date", "Expected Div Per Month", "Total P/L",
+                  "Total P/L %", "Dividend Yield %", "Nearest Resistance (R %)",
+                  "Nearest Support (S %)", "Passed R/S", "Action"],
 }
 column_config = {
     "Description": st.column_config.TextColumn("Desc.", help="Description"),
