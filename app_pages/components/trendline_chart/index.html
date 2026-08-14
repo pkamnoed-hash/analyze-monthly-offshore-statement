@@ -1,0 +1,619 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; background: transparent; font-family: -apple-system, Segoe UI, Roboto, Arial, sans-serif; }
+  #chart { position: relative; width: 100%; height: 460px; }
+  #osc-chart { position: relative; width: 100%; height: 130px; margin-top: 2px; }
+  #osc-label {
+    position: absolute; top: 4px; left: 8px; z-index: 10; font-size: 0.72rem; color: #9aa0a6;
+    pointer-events: none;
+  }
+  #chart-tooltip {
+    position: absolute; pointer-events: none; z-index: 20;
+    background: rgba(26, 29, 35, 0.95); border: 1px solid #33383f; border-radius: 6px;
+    padding: 8px 10px; font-size: 0.78rem; line-height: 1.5; color: #e6e6e6;
+    white-space: nowrap; display: none;
+  }
+  #chart-tooltip .tt-date { color: #9aa0a6; margin-bottom: 2px; }
+  .level-delete-btn {
+    position: absolute; right: 2px; width: 16px; height: 16px; margin-top: -8px;
+    background: rgba(11, 13, 18, 0.85); color: #e6e6e6; border: 1px solid #444b5c;
+    border-radius: 3px; font-size: 11px; line-height: 14px; text-align: center;
+    cursor: pointer; z-index: 15; user-select: none; display: none;
+  }
+  .level-delete-btn:hover { background: rgba(239, 83, 80, 0.9); border-color: #ef5350; color: #fff; }
+</style>
+</head>
+<body>
+<div id="chart"></div>
+<div id="osc-chart">
+  <div id="osc-label">Stochastic (14, 3)</div>
+</div>
+
+<script>
+// --- Minimal Streamlit component bridge -----------------------------------
+// Hand-written rather than pulling in the full streamlit-component-lib
+// bundle -- confirmed against this app's actual installed Streamlit
+// (ComponentInstance.<hash>.js) that the message types/shapes below
+// (componentReady/setFrameHeight/setComponentValue, each posted as
+// {isStreamlitMessage: true, type, ...}) match what the host frontend
+// really listens for. Only the 4 calls this component needs.
+const Streamlit = {
+  RENDER_EVENT: "streamlit:render",
+  events: new EventTarget(),
+  setComponentReady() {
+    window.parent.postMessage({ isStreamlitMessage: true, type: "streamlit:componentReady", apiVersion: 1 }, "*");
+  },
+  setFrameHeight(height) {
+    window.parent.postMessage({ isStreamlitMessage: true, type: "streamlit:setFrameHeight", height }, "*");
+  },
+  setComponentValue(value) {
+    window.parent.postMessage({ isStreamlitMessage: true, type: "streamlit:setComponentValue", value, dataType: "json" }, "*");
+  },
+};
+window.addEventListener("message", (event) => {
+  if (!event.data || event.data.type !== "streamlit:render") return;
+  Streamlit.events.dispatchEvent(new CustomEvent(Streamlit.RENDER_EVENT, { detail: event.data }));
+});
+
+// --- Chart setup (main price pane + a synced Stochastic oscillator pane) --
+const chartContainer = document.getElementById("chart");
+const oscContainer = document.getElementById("osc-chart");
+
+const baseOptions = {
+  layout: { background: { color: "#131722" }, textColor: "#d1d4dc" },
+  grid: { vertLines: { color: "#1e222d" }, horzLines: { color: "#1e222d" } },
+  rightPriceScale: { borderColor: "#33383f", scaleMargins: { top: 0.1, bottom: 0.1 } },
+  timeScale: { borderColor: "#33383f" },
+  autoSize: true,
+};
+const chart = LightweightCharts.createChart(chartContainer, baseOptions);
+const oscChart = LightweightCharts.createChart(oscContainer, {
+  ...baseOptions,
+  rightPriceScale: { borderColor: "#33383f", scaleMargins: { top: 0.15, bottom: 0.15 } },
+});
+
+// mainSeries is recreated (removed + re-added) only when chart_type actually flips between
+// "candle" and "line" -- lightweight-charts doesn't support changing a series' type in
+// place. Heikin Ashi isn't a separate case here: Python already transforms the candle data
+// before it arrives, so the JS side only ever distinguishes candlestick-shaped vs.
+// line-shaped data, never HA specifically.
+let mainSeries = null;
+let currentChartType = null;
+
+function ensureMainSeries(chartType) {
+  if (chartType === currentChartType && mainSeries) return;
+  if (mainSeries) chart.removeSeries(mainSeries);
+  mainSeries = chartType === "line"
+    ? chart.addLineSeries({ color: "#60a5fa", lineWidth: 1.6 })
+    : chart.addCandlestickSeries({
+        upColor: "#26a69a", downColor: "#ef5350", borderVisible: false,
+        wickUpColor: "#26a69a", wickDownColor: "#ef5350",
+      });
+  currentChartType = chartType;
+}
+
+// --- Moving Average overlays -- always real Close (computed in Python), never Heikin
+// Ashi-smoothed. addLineSeries, not createPriceLine, so these never participate in the
+// level-dragging/hit-testing logic further below. Created once; visibility and data are
+// updated on every render instead of being torn down and recreated.
+const MA_COLORS = { 50: "#ffa726", 100: "#26c6da", 200: "#ab47bc" };
+const maSeriesHandles = {};
+for (const period of [50, 100, 200]) {
+  maSeriesHandles[period] = chart.addLineSeries({
+    color: MA_COLORS[period], lineWidth: 1.4, lastValueVisible: true, priceLineVisible: false,
+    title: `MA ${period}`, visible: false,
+  });
+}
+
+// --- Stochastic oscillator pane --------------------------------------------
+const kSeries = oscChart.addLineSeries({
+  color: "#60a5fa", lineWidth: 1.4, title: "%K",
+  autoscaleInfoProvider: () => ({ priceRange: { minValue: 0, maxValue: 100 } }),
+});
+const dSeries = oscChart.addLineSeries({ color: "#f0a020", lineWidth: 1.4, title: "%D" });
+[20, 50, 80].forEach((level) => {
+  kSeries.createPriceLine({
+    price: level, color: level === 50 ? "#2a2f3d" : "#232838", lineWidth: 1,
+    lineStyle: LightweightCharts.LineStyle.Dotted, axisLabelVisible: false,
+  });
+});
+
+// Keep both panes' time axes in lockstep -- guarded against feedback loops (setting one
+// pane's range fires its own subscribeVisibleLogicalRangeChange callback, which would
+// otherwise re-set the other pane's range right back, ping-ponging forever).
+let syncingRanges = false;
+chart.timeScale().subscribeVisibleLogicalRangeChange((range) => {
+  if (syncingRanges || !range) return;
+  syncingRanges = true;
+  oscChart.timeScale().setVisibleLogicalRange(range);
+  syncingRanges = false;
+});
+oscChart.timeScale().subscribeVisibleLogicalRangeChange((range) => {
+  if (syncingRanges || !range) return;
+  syncingRanges = true;
+  chart.timeScale().setVisibleLogicalRange(range);
+  syncingRanges = false;
+});
+
+// --- Tooltip (candlestick- or line-aware, depending on chart_type) --------
+const tooltipEl = document.createElement("div");
+tooltipEl.id = "chart-tooltip";
+chartContainer.appendChild(tooltipEl);
+chart.subscribeCrosshairMove((param) => {
+  const containerRect = chartContainer.getBoundingClientRect();
+  if (!param.point || !param.time || param.point.x < 0 || param.point.y < 0) {
+    tooltipEl.style.display = "none";
+    return;
+  }
+  const bar = param.seriesData.get(mainSeries);
+  if (!bar) { tooltipEl.style.display = "none"; return; }
+  const d = new Date(param.time.year !== undefined
+    ? Date.UTC(param.time.year, param.time.month - 1, param.time.day)
+    : param.time * 1000);
+  const dateLabel = d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+  tooltipEl.innerHTML = bar.open !== undefined
+    ? `<div class="tt-date">${dateLabel}</div>
+       <div>O ${bar.open.toFixed(2)}&nbsp;&nbsp;H ${bar.high.toFixed(2)}</div>
+       <div>L ${bar.low.toFixed(2)}&nbsp;&nbsp;C ${bar.close.toFixed(2)}</div>`
+    : `<div class="tt-date">${dateLabel}</div><div>${bar.value.toFixed(2)}</div>`;
+  tooltipEl.style.display = "block";
+  let left = param.point.x + 16, top = param.point.y + 16;
+  if (left + 150 > containerRect.width) left = param.point.x - 166;
+  if (top + 70 > containerRect.height) top = param.point.y - 86;
+  tooltipEl.style.left = `${left}px`;
+  tooltipEl.style.top = `${top}px`;
+});
+
+// --- Cost/Sh (Pivot) and Latest Price -- two plain FACTS, never draggable/deletable.
+// Cost/Sh is your real average cost, drawn from `args.cost_per_share` (no longer riding
+// along inside a "levels" dict the way the old Pivot Points design worked -- Reference
+// Lines below replaced that whole dict-of-6 concept with a variable-length list). Latest
+// Price is the live market price. Both keep the same finer-dotted style, distinct from
+// Reference Lines' dashed style, to visually read as "facts" vs. "adjustable targets".
+let costPerShareLine = null;
+let latestPriceLine = null;
+// Last-received render args needed by the drag/delete handlers below (they run outside
+// the render handler's own closure, on real user input).
+let componentState = {
+  visibility: { pivot: true, latest: true },
+  locked: false,
+  showReferenceLines: true,
+  latestPrice: null,
+};
+
+function drawCostPerShareLine(costPerShare, show) {
+  if (costPerShareLine) { mainSeries.removePriceLine(costPerShareLine); costPerShareLine = null; }
+  if (!show || costPerShare == null) return;
+  costPerShareLine = mainSeries.createPriceLine({
+    price: costPerShare,
+    color: "#9e9e9e",
+    lineWidth: 1.3,
+    lineStyle: LightweightCharts.LineStyle.Dotted,
+    axisLabelVisible: true,
+    title: "Cost/Sh",
+  });
+}
+
+function drawLatestPriceLine() {
+  if (latestPriceLine) { mainSeries.removePriceLine(latestPriceLine); latestPriceLine = null; }
+  if (!componentState.visibility.latest || componentState.latestPrice == null) return;
+  latestPriceLine = mainSeries.createPriceLine({
+    price: componentState.latestPrice,
+    color: "#42a5f5",
+    lineWidth: 1.3,
+    lineStyle: LightweightCharts.LineStyle.Dotted,
+    axisLabelVisible: true,
+    title: "Latest",
+  });
+}
+
+// --- Reference Lines -- the page's single line concept (replaces the old Pivot Points
+// R1-R3/S1-S3 levels, the diagonal Trend Line, and the horizontal S/R Zones -- see the
+// legacy block at the bottom of this file for the code being replaced). Computed in
+// Python (calculations.compute_reference_lines): swing highs/lows nearest to CURRENT
+// price, captured at a moment rather than recomputed on every Timeline/Interval switch.
+// A variable-length list (0-N, no fixed names) -- each line identified by a small integer
+// `id` from Python's session state, not a name like the old "R1"/"S2". Side (resistance
+// vs. support) is deliberately NOT stored -- it's derived live from `price` vs.
+// `componentState.latestPrice` every time a line is drawn, colored, or dragged, so a line
+// that crosses latest_price (dragged, or because the market moved) recolors correctly
+// without any special-case handling.
+const REFERENCE_LINE_COLOR = { resistance: "#ef5350", support: "#66bb6a" };
+
+function referenceLineColor(price) {
+  return price > componentState.latestPrice ? REFERENCE_LINE_COLOR.resistance : REFERENCE_LINE_COLOR.support;
+}
+function referenceLineTitle(price) {
+  if (componentState.latestPrice == null) return `$${price.toFixed(2)}`;
+  const pct = (price - componentState.latestPrice) / componentState.latestPrice * 100;
+  const sign = pct >= 0 ? "+" : "";
+  return `$${price.toFixed(2)} (${sign}${pct.toFixed(1)}%)`;
+}
+
+let referenceLineHandles = {};  // id -> price line handle currently drawn
+let referenceLinePrices = {};   // id -> current price, kept in sync with the chart (drag/hit-test)
+
+function drawReferenceLines(lines, show) {
+  for (const id of Object.keys(referenceLineHandles)) mainSeries.removePriceLine(referenceLineHandles[id]);
+  referenceLineHandles = {};
+  referenceLinePrices = {};
+  if (!show || !lines) return;
+  for (const line of lines) {
+    const id = String(line.id);
+    referenceLinePrices[id] = line.price;
+    referenceLineHandles[id] = mainSeries.createPriceLine({
+      price: line.price,
+      color: referenceLineColor(line.price),
+      lineWidth: 1.5,
+      lineStyle: LightweightCharts.LineStyle.Dashed,
+      axisLabelVisible: true,
+      title: referenceLineTitle(line.price),
+    });
+  }
+}
+
+// --- Per-reference-line delete buttons ---------------------------------------
+// Real DOM overlay elements, positioned via priceToCoordinate() and kept in sync with a
+// requestAnimationFrame loop, since lightweight-charts doesn't expose a "price scale
+// changed" event to hook into directly (only time-axis pan/zoom has one). Keyed by `id`
+// (a line can be created/deleted freely, unlike the old fixed R1-R3/S1-S3 name set) --
+// buttons for ids no longer present are hidden, not removed, same as before (cheap for
+// the handful of buttons this page ever has).
+const deleteButtons = {};
+function ensureDeleteButton(id) {
+  if (deleteButtons[id]) return deleteButtons[id];
+  const btn = document.createElement("div");
+  btn.className = "level-delete-btn";
+  btn.textContent = "×";
+  btn.title = "Remove this reference line";
+  btn.addEventListener("pointerdown", (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    Streamlit.setComponentValue({ action: "delete", id });
+  });
+  chartContainer.appendChild(btn);
+  deleteButtons[id] = btn;
+  return btn;
+}
+function repositionDeleteButtons() {
+  const rect = chartContainer.getBoundingClientRect();
+  const activeIds = componentState.showReferenceLines ? Object.keys(referenceLinePrices) : [];
+  const activeSet = new Set(activeIds);
+  for (const id of Object.keys(deleteButtons)) {
+    if (!activeSet.has(id)) deleteButtons[id].style.display = "none";
+  }
+  for (const id of activeIds) {
+    const btn = ensureDeleteButton(id);
+    const y = mainSeries.priceToCoordinate(referenceLinePrices[id]);
+    if (y == null || y < 0 || y > rect.height) {
+      btn.style.display = "none";
+    } else {
+      btn.style.display = "block";
+      btn.style.top = `${y}px`;
+    }
+  }
+  requestAnimationFrame(repositionDeleteButtons);
+}
+requestAnimationFrame(repositionDeleteButtons);
+
+// --- Manual dragging of Reference Lines -------------------------------------
+// Pointer Events + setPointerCapture, not raw mouse events on window. Streamlit renders
+// every custom component inside its own iframe (that's the whole point of
+// declare_component -- isolation), so a plain window.addEventListener("mouseup", ...)
+// can miss the release if a fast drag crosses the iframe's edge before the mouse button
+// comes back up. Pointer capture guarantees the up/move events keep reaching this
+// element regardless of where the cursor physically ends up.
+const HIT_THRESHOLD_PX = 6;
+const dragState = { active: false, id: null };
+
+function relativeY(event) {
+  return event.clientY - chartContainer.getBoundingClientRect().top;
+}
+function findLineAt(y) {
+  if (componentState.locked || !componentState.showReferenceLines) return null;
+  for (const id of Object.keys(referenceLinePrices)) {
+    const coord = mainSeries.priceToCoordinate(referenceLinePrices[id]);
+    if (coord != null && Math.abs(coord - y) <= HIT_THRESHOLD_PX) return id;
+  }
+  return null;
+}
+
+// Delete buttons sit directly on top of their line (vertically centered on it, per
+// repositionDeleteButtons()), so a click on the button is ALSO within HIT_THRESHOLD_PX
+// of that same line. This listener runs in the CAPTURE phase (fires before the event
+// reaches the button's own bubble-phase listener), so without this guard it would call
+// stopPropagation() first and swallow the click entirely -- the × button would start a
+// drag instead of ever triggering its own "delete" handler. event.target is always the
+// real innermost element clicked, even during capture, so this check is reliable.
+function isDeleteButtonEvent(event) {
+  return !!(event.target && event.target.closest && event.target.closest(".level-delete-btn"));
+}
+
+chartContainer.addEventListener("pointerdown", (event) => {
+  if (isDeleteButtonEvent(event)) return;
+  const id = findLineAt(relativeY(event));
+  if (!id) return;
+  dragState.active = true;
+  dragState.id = id;
+  chart.applyOptions({ handleScroll: false, handleScale: false });
+  chartContainer.setPointerCapture(event.pointerId);
+  event.preventDefault();
+  event.stopPropagation();
+}, true);
+
+chartContainer.addEventListener("pointermove", (event) => {
+  if (!dragState.active) {
+    chartContainer.style.cursor = (!isDeleteButtonEvent(event) && findLineAt(relativeY(event))) ? "ns-resize" : "default";
+    return;
+  }
+  const price = mainSeries.coordinateToPrice(relativeY(event));
+  if (price == null) return;
+  referenceLinePrices[dragState.id] = price;
+  // Recolor/retitle live during the drag itself -- side is derived from price vs.
+  // latest_price, so a line dragged across latest_price should flip red/green
+  // immediately, not just after the next Python rerun.
+  referenceLineHandles[dragState.id].applyOptions({
+    price, color: referenceLineColor(price), title: referenceLineTitle(price),
+  });
+});
+
+function endDrag(event) {
+  if (!dragState.active) return;
+  dragState.active = false;
+  chart.applyOptions({ handleScroll: true, handleScale: true });
+  if (event && event.pointerId != null && chartContainer.hasPointerCapture(event.pointerId)) {
+    chartContainer.releasePointerCapture(event.pointerId);
+  }
+  Streamlit.setComponentValue({ action: "drag", id: dragState.id, price: referenceLinePrices[dragState.id] });
+  dragState.id = null;
+}
+chartContainer.addEventListener("pointerup", endDrag);
+chartContainer.addEventListener("pointercancel", endDrag);
+
+// --- Render handler: receives candles + Reference Lines + everything else from Python --
+// Re-fits the visible time range whenever the underlying data WINDOW actually changes
+// (new symbol, Interval, or Timeline -- signature = bar count + first/last date), not just
+// once ever per component mount. A symbol/Interval/Timeline change reuses this SAME
+// component instance (same `key`, no remount), so a one-time "only on first render" fit
+// left the chart showing whatever zoom level was set for the PREVIOUS, differently-shaped
+// data window -- e.g. switching Timeline from 1Y to YTD kept the 1Y zoom, leaving a block
+// of empty space where the extra year used to be. A dragged line, a toggled checkbox, or
+// the sell-% simulator all re-render with the SAME candles, so their signature is
+// unchanged and the user's own manual zoom/pan is left alone, as it should be.
+let lastCandleSignature = null;
+
+function candleSignature(candles) {
+  if (!candles || !candles.length) return "empty";
+  return candles.length + "|" + candles[0].time + "|" + candles[candles.length - 1].time;
+}
+
+Streamlit.events.addEventListener(Streamlit.RENDER_EVENT, (event) => {
+  const args = event.detail.args;
+  componentState = {
+    visibility: args.visibility || { pivot: true, latest: true },
+    locked: !!args.locked,
+    showReferenceLines: !!args.show_reference_lines,
+    latestPrice: args.latest_price,
+  };
+
+  ensureMainSeries(args.chart_type === "line" ? "line" : "candle");
+  mainSeries.setData(
+    args.chart_type === "line"
+      ? args.candles.map((c) => ({ time: c.time, value: c.close }))
+      : args.candles
+  );
+
+  for (const period of [50, 100, 200]) {
+    const handle = maSeriesHandles[period];
+    const visible = !!(args.ma_visible && args.ma_visible[period]);
+    handle.applyOptions({ visible });
+    if (visible && args.ma_series && args.ma_series[period]) {
+      handle.setData(args.ma_series[period]);
+    }
+  }
+
+  if (args.stochastic) {
+    kSeries.setData(args.stochastic.k || []);
+    dSeries.setData(args.stochastic.d || []);
+  }
+
+  const signature = candleSignature(args.candles);
+  if (signature !== lastCandleSignature) {
+    const isFirstLoad = lastCandleSignature === null;
+    lastCandleSignature = signature;
+    const fit = () => {
+      chart.timeScale().fitContent();
+      oscChart.timeScale().fitContent();
+    };
+    if (isFirstLoad) {
+      // First paint inside a freshly-mounted component iframe -- the container may not
+      // have settled into its final width yet (Streamlit negotiates iframe sizing
+      // asynchronously), so calling fitContent() synchronously here can compute against
+      // a stale/too-narrow width and lock in a range that leaves blank space once the
+      // container reaches its real size. Deferring one frame lets layout settle first.
+      requestAnimationFrame(fit);
+    } else {
+      fit();
+    }
+  }
+
+  drawCostPerShareLine(args.cost_per_share, componentState.visibility.pivot);
+  drawLatestPriceLine();
+  drawReferenceLines(args.reference_lines, componentState.showReferenceLines);
+  Streamlit.setFrameHeight(620);
+});
+
+Streamlit.setComponentReady();
+Streamlit.setFrameHeight(620);
+
+/* ---------------------------------------------------------------------------------------
+ * LEGACY (Point 9 replacement -- commented out, not deleted, so it's easy to bring back):
+ * the previous Pivot Points R1-R3/S1-S3 draggable-levels implementation, the diagonal
+ * Trend Line overlay, and the horizontal S/R Zones overlay. All three were replaced by the
+ * single "Reference Lines" concept above (swing highs/lows nearest to current price,
+ * captured at a moment, id-based drag/delete). Kept here verbatim for reference.
+ *
+ * // --- Swing-based trend lines -- classic technical-analysis auto trend lines (connects
+ * // the 2 most recent confirmed swing highs/lows, computed in Python), genuinely different
+ * // from the R/S price lines below: those are a fixed Pivot Points formula anchored to
+ * // Cost/Sh, these are pure market structure (where price has actually reversed). Neutral
+ * // white/gray on purpose, so a diagonal structural line never reads as one of the colored
+ * // cost-basis levels. addLineSeries with exactly the 3 points Python sends (2 real swing
+ * // points + 1 extended point) -- lightweight-charts draws straight segments between
+ * // consecutive points, so 3 points is enough for "two connected, projected" lines.
+ * const trendLineSeriesHandles = {
+ *   resistance: chart.addLineSeries({ color: "#d1d4dc", lineWidth: 1.3, lastValueVisible: false, priceLineVisible: false, visible: false }),
+ *   support: chart.addLineSeries({ color: "#d1d4dc", lineWidth: 1.3, lastValueVisible: false, priceLineVisible: false, visible: false }),
+ * };
+ *
+ * // --- Levels (S3/S2/S1/Pivot/R1/R2/R3), drawn as price lines ----------------
+ * const LEVEL_ORDER = ["S3", "S2", "S1", "Pivot", "R1", "R2", "R3"];
+ * const DRAGGABLE_LEVELS = ["S3", "S2", "S1", "R1", "R2", "R3"];  // Pivot is always locked
+ * const LEVEL_STYLE = {
+ *   R3: "#c62828", R2: "#e53935", R1: "#ef5350",
+ *   Pivot: "#9e9e9e",
+ *   S1: "#66bb6a", S2: "#43a047", S3: "#2e7d32",
+ * };
+ *
+ * let priceLines = {};
+ * let currentLevels = {};
+ *
+ * function drawLevels(levels) {
+ *   for (const name of Object.keys(priceLines)) mainSeries.removePriceLine(priceLines[name]);
+ *   priceLines = {};
+ *   currentLevels = { ...levels };
+ *   for (const name of LEVEL_ORDER) {
+ *     if (componentState.deletedLevels.includes(name)) continue;
+ *     if (name === "Pivot" ? !componentState.visibility.pivot : !componentState.visibility.rs) continue;
+ *     priceLines[name] = mainSeries.createPriceLine({
+ *       price: levels[name],
+ *       color: LEVEL_STYLE[name],
+ *       lineWidth: name === "Pivot" ? 2 : 1,
+ *       lineStyle: LightweightCharts.LineStyle.Dashed,
+ *       axisLabelVisible: true,
+ *       title: name,
+ *     });
+ *   }
+ * }
+ *
+ * // --- Horizontal S/R Zones -- price CLUSTERS from repeated swing highs/lows -----------
+ * let srZoneLines = [];
+ *
+ * function drawSrZones(zones, show) {
+ *   for (const line of srZoneLines) mainSeries.removePriceLine(line);
+ *   srZoneLines = [];
+ *   if (!show || !zones) return;
+ *   for (const side of ["resistance", "support"]) {
+ *     for (const zone of zones[side] || []) {
+ *       srZoneLines.push(mainSeries.createPriceLine({
+ *         price: zone.price,
+ *         color: "#c9a227",
+ *         lineWidth: 1.5,
+ *         lineStyle: LightweightCharts.LineStyle.Solid,
+ *         axisLabelVisible: true,
+ *         title: `S/R (${zone.count})`,
+ *       }));
+ *     }
+ *   }
+ * }
+ *
+ * // --- Per-level delete buttons (name-keyed) -----------------------------------
+ * const deleteButtons = {};
+ * function ensureDeleteButton(name) {
+ *   if (deleteButtons[name]) return deleteButtons[name];
+ *   const btn = document.createElement("div");
+ *   btn.className = "level-delete-btn";
+ *   btn.textContent = "×";
+ *   btn.title = `Remove ${name}`;
+ *   btn.addEventListener("pointerdown", (e) => {
+ *     e.preventDefault();
+ *     e.stopPropagation();
+ *     Streamlit.setComponentValue({ action: "delete", name });
+ *   });
+ *   chartContainer.appendChild(btn);
+ *   deleteButtons[name] = btn;
+ *   return btn;
+ * }
+ * function repositionDeleteButtons() {
+ *   const rect = chartContainer.getBoundingClientRect();
+ *   for (const name of DRAGGABLE_LEVELS) {
+ *     const shouldShow = mainSeries && priceLines[name] != null
+ *       && !componentState.deletedLevels.includes(name) && componentState.visibility.rs;
+ *     const btn = shouldShow ? ensureDeleteButton(name) : deleteButtons[name];
+ *     if (!shouldShow) {
+ *       if (btn) btn.style.display = "none";
+ *       continue;
+ *     }
+ *     const y = mainSeries.priceToCoordinate(currentLevels[name]);
+ *     if (y == null || y < 0 || y > rect.height) {
+ *       btn.style.display = "none";
+ *     } else {
+ *       btn.style.display = "block";
+ *       btn.style.top = `${y}px`;
+ *     }
+ *   }
+ *   requestAnimationFrame(repositionDeleteButtons);
+ * }
+ *
+ * // --- Manual dragging of R/S price lines (name-keyed) -------------------------------
+ * const dragState = { active: false, name: null };
+ * function findLineAt(y) {
+ *   if (componentState.locked || !componentState.visibility.rs) return null;
+ *   for (const name of DRAGGABLE_LEVELS) {
+ *     if (componentState.deletedLevels.includes(name)) continue;
+ *     const coord = mainSeries.priceToCoordinate(currentLevels[name]);
+ *     if (coord != null && Math.abs(coord - y) <= HIT_THRESHOLD_PX) return name;
+ *   }
+ *   return null;
+ * }
+ * chartContainer.addEventListener("pointerdown", (event) => {
+ *   const name = findLineAt(relativeY(event));
+ *   if (!name) return;
+ *   dragState.active = true;
+ *   dragState.name = name;
+ *   chart.applyOptions({ handleScroll: false, handleScale: false });
+ *   chartContainer.setPointerCapture(event.pointerId);
+ *   event.preventDefault();
+ *   event.stopPropagation();
+ * }, true);
+ * chartContainer.addEventListener("pointermove", (event) => {
+ *   if (!dragState.active) {
+ *     chartContainer.style.cursor = findLineAt(relativeY(event)) ? "ns-resize" : "default";
+ *     return;
+ *   }
+ *   const price = mainSeries.coordinateToPrice(relativeY(event));
+ *   if (price == null) return;
+ *   currentLevels[dragState.name] = price;
+ *   priceLines[dragState.name].applyOptions({ price });
+ * });
+ * function endDrag(event) {
+ *   if (!dragState.active) return;
+ *   dragState.active = false;
+ *   chart.applyOptions({ handleScroll: true, handleScale: true });
+ *   if (event && event.pointerId != null && chartContainer.hasPointerCapture(event.pointerId)) {
+ *     chartContainer.releasePointerCapture(event.pointerId);
+ *   }
+ *   Streamlit.setComponentValue({ action: "drag", levels: { ...currentLevels } });
+ * }
+ * chartContainer.addEventListener("pointerup", endDrag);
+ * chartContainer.addEventListener("pointercancel", endDrag);
+ *
+ * // --- render handler additions that used to run alongside the current code ------------
+ * // for (const side of ["resistance", "support"]) {
+ * //   const handle = trendLineSeriesHandles[side];
+ * //   const showTrendLines = !!args.show_trend_lines;
+ * //   const points = args.trend_lines && args.trend_lines[side];
+ * //   handle.applyOptions({ visible: showTrendLines && !!points });
+ * //   if (showTrendLines && points) handle.setData(points);
+ * // }
+ * // drawLevels(args.levels);
+ * // drawSrZones(args.sr_zones, args.show_sr_zones);
+ * --------------------------------------------------------------------------------------- */
+</script>
+</body>
+</html>

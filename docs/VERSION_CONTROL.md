@@ -23,12 +23,13 @@ not an aspirational process, a record of what's been done.
 | `v4.2-monitor-stocks-ex-date` | V4.2 feature branch. Cut from `main` after v4.1.2 was merged in, originally as `v4.2-auto-trend-line` -- explored automatic trend line drawing via discussion and a live MSFT proof-of-concept (published as a standalone Artifact, not part of this repo), confirming the approach (Plotly + numpy linear regression, no external chart API) but never implementing it in the app. Redirected mid-branch to a different, real gap instead: adds an `Ex-Date` column to Monitor Stocks (Overview + Dividends tabs), highlighted when it falls in the current month. A companion "Payout Date" column was tried and removed after `yfinance`'s `info["dividendDate"]` was found blank for most funds and stale for at least one ETF (SHV). Renamed to match what shipped. No `core/db.py`/schema changes. Merged into `main`. |
 | `v4.3-rebalance-columns` | V4.3 feature branch. Cut from `main` after v4.2 was merged in. Splits Rebalance & Reallocate's single wide table into 5 tabs (Overview/Weight/Dividend Impact/Performance/Analyze) -- Analyze ended up as the sole editable tab (Overview flipped to read-only once Analyze needed editing too, avoiding two simultaneous editable forms). Adds `Dividends Received`/`Total P/L`/`Total P/L %` (mirroring Monitor Stocks), a `Beta` column, a standalone THB->USD reference calculator, and a Current/New KPI redesign for the Summary section. Also adds a Monitor Stocks Monthly Dividend chart (validated against a real broker statement PDF) and fixes a real Streamlit `$`-pair-as-inline-math rendering bug across 4 pages. No `core/db.py`/schema changes. Merged into `main`. |
 | `v4.3.1` (no branch -- direct to `main`) | Two small follow-ups to V4.3, applied directly to `main` per explicit user request rather than a feature branch: reorders Rebalance & Reallocate's tabs (Analyze first), and adds an `Ex-Date` column (Overview + Analyze) with the same current-month amber highlight as Monitor Stocks. Commits `c9f423d`/`fa1a24d`. No `core/db.py`/schema changes. |
+| `v4.4-support-resistance-analysis` | V4.4 feature branch. Cut from `main` after v4.3.1 was applied. Adds Monitor Stocks' Trendline tab (Pivot Points S3-R3, all 52 holdings, anchored to Avg Cost) with an `Action` cell linking to a new per-symbol "Auto Trendline" page. That page's chart went through several overlay iterations (diagonal Trend Line, clustered S/R Zones, a Nearest R/S readout) before consolidating -- per direct user feedback after live-testing the readout ("too many competing line concepts") -- into a single **Reference Line** concept: swing highs/lows nearest to current price, captured at a deliberate moment (not recomputed on Timeline/Interval navigation) via a "Regenerate" button, with full drag/delete/create editing and DB persistence (`reference_lines` table). Fixed two real bugs found via live testing (a ~1.6s DB write on every drag, and a delete-button click silently swallowed by the chart's own drag-detection listener). 299/299 tests passing. Full design history in `docs/ROADMAP.md` (V4.4). One commit so far (`48b4dd2`), not yet merged into `main`. |
 
 Naming convention: `vN-short-description` (or `vN.M-short-description` for a
 smaller, additive feature that doesn't warrant a new whole version number),
 capital V on whole versions, hyphen-separated.
 
-## My version quick note
+## My version quick plan note
 Version planning
 - 1 - basic "record trade and dividend"
 - 2 - intermediate "reconciliation", "tools v1"
@@ -46,6 +47,9 @@ Version planning
 	○ 4.2 (`v4.2-monitor-stocks-ex-date`) Monitor Stocks Ex-Date column + current-month highlighting; automatic trend line explored (live demo, not yet built) -- deferred
 	○ 4.3 (`v4.3-rebalance-columns`) Rebalance & Reallocate 5-tab split (Analyze is the sole editable tab), Total P/L, Beta, THB calculator, Summary KPI redesign; Monitor Stocks Monthly Dividend chart; $-pair rendering bug fixed across 4 pages
 	○ 4.3.1 (direct to `main`, no branch) Rebalance & Reallocate tab reorder (Analyze first) + Ex-Date column with current-month highlighting
+  ○ 4.4 (`v4.4-support-resistance-analysis`) Monitor Stocks Trendline tab (Pivot Points, all 52 holdings) + new "Auto Trendline" per-symbol page, consolidated down to a single "Reference Line" concept (swing-based, nearest-to-price, captured-at-a-moment, drag/delete/create, DB-persisted) after iterating through Trend Line/S-R Zones/Nearest-R-S overlays first. Committed (`48b4dd2`), not yet merged into `main` -- see `docs/ROADMAP.md` for the full arc.
+  ○ 4.4.1 bio login (face or finger) -- not started
+  ○ 4.5 (proposed) portfolio-wide "nearest Reference Line" summary table across all held symbols, computed on first load rather than requiring each symbol's own page be visited first -- see ROADMAP.md's V4.4 "Considered and explicitly deferred" note; a live preview of this table (read-only, real data, not yet built into the app) was shown in chat and confirmed working
 - 5 - cosmetic
 - 6 - tax management
 
@@ -94,24 +98,31 @@ tip commit was already an ancestor of `main`). Feature branches that are
 still useful as a labeled reference point (`V1-record-trade-and-view`,
 `v2-Reconciliation`) are kept rather than deleted by default.
 
-## Current status (as of `v4.3.1`)
+## Current status (as of `v4.4-support-resistance-analysis`, unmerged)
 
 `main` has V1, V2, V2.1, V2.2, V2.3, V2.4, V3, V3.1, V4, V4.1.1, V4.1,
-V4.1.2, V4.2, V4.3, and V4.3.1 merged in (231/231 passing on `main`).
-V4.3 overhauls Rebalance & Reallocate (5-tab split, Analyze as the
-sole editable tab, Total P/L, Beta, THB calculator, Summary KPI
-redesign), adds a Monitor Stocks Monthly Dividend chart (validated
-against a real broker statement PDF), and fixes a real Streamlit
-rendering bug (bare `$` pairs read as inline math) across 4 pages.
-V4.3.1 is two small direct-to-`main` follow-ups (no feature branch,
-per explicit request): reorders Rebalance & Reallocate's tabs (Analyze
-first) and adds an `Ex-Date` column (Overview + Analyze) with the same
-current-month highlight Monitor Stocks already has. A live production
-`KeyError` seen right after V4.3's initial deploy turned out to be
-Streamlit Community Cloud's incremental-redeploy leaving stale
+V4.1.2, V4.2, V4.3, and V4.3.1 merged in (231/231 passing on `main` at
+that point). V4.3 overhauls Rebalance & Reallocate (5-tab split,
+Analyze as the sole editable tab, Total P/L, Beta, THB calculator,
+Summary KPI redesign), adds a Monitor Stocks Monthly Dividend chart
+(validated against a real broker statement PDF), and fixes a real
+Streamlit rendering bug (bare `$` pairs read as inline math) across 4
+pages. V4.3.1 is two small direct-to-`main` follow-ups (no feature
+branch, per explicit request): reorders Rebalance & Reallocate's tabs
+(Analyze first) and adds an `Ex-Date` column (Overview + Analyze) with
+the same current-month highlight Monitor Stocks already has. A live
+production `KeyError` seen right after V4.3's initial deploy turned out
+to be Streamlit Community Cloud's incremental-redeploy leaving stale
 `__pycache__` bytecode, not a code defect -- resolved via a full app
-Reboot, no code change needed. Still open from earlier versions:
-automatic trend line drawing (v4.2's original scope, validated via a
-live MSFT proof-of-concept but not built into the app), and whether to
-apply the "Total Return" concept (Total P/L/%) to the Dashboard page
-(raised during v4.1).
+Reboot, no code change needed.
+
+**Not yet merged**: `v4.4-support-resistance-analysis` (299/299 passing
+on that branch) finally builds what V4.2 deferred -- automatic trend
+line drawing -- as Monitor Stocks' Trendline tab (Pivot Points) plus a
+new per-symbol "Auto Trendline" page, whose chart consolidated down to
+a single "Reference Line" concept after iterating through several
+overlays first. See `docs/ROADMAP.md`'s V4.4 section for the full
+build and bug-fix history. Still open: whether to apply the "Total
+Return" concept (Total P/L/%) to the Dashboard page (raised during
+v4.1); the portfolio-wide Reference Line summary table (proposed as
+v4.5, see the quick-plan note above).

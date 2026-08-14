@@ -33,7 +33,9 @@ class FakeYfModule:
 
 
 def _history(closes):
-    return pd.DataFrame({"Close": closes})
+    # High/Low default to Close -- degenerate but harmless here, this module's tests
+    # don't assert on High90D/Low90D (see tests/test_market_data.py for those).
+    return pd.DataFrame({"Open": closes, "High": closes, "Low": closes, "Close": closes})
 
 
 def _dividends(payouts: dict):

@@ -82,6 +82,31 @@ SCHEMA_STATEMENTS = [
         PRIMARY KEY (plan_id, symbol)
     )
     """,
+    """
+    CREATE TABLE IF NOT EXISTS trendline_levels (
+        symbol      TEXT PRIMARY KEY,
+        s3          REAL NOT NULL,
+        s2          REAL NOT NULL,
+        s1          REAL NOT NULL,
+        pivot       REAL NOT NULL,
+        r1          REAL NOT NULL,
+        r2          REAL NOT NULL,
+        r3          REAL NOT NULL,
+        is_override INTEGER NOT NULL DEFAULT 0,
+        updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS reference_lines (
+        id                INTEGER PRIMARY KEY AUTOINCREMENT,
+        symbol            TEXT NOT NULL,
+        price             REAL NOT NULL,
+        is_override       INTEGER NOT NULL DEFAULT 0,
+        captured_timeline TEXT,
+        captured_interval TEXT,
+        updated_at        TEXT NOT NULL DEFAULT (datetime('now'))
+    )
+    """,
 ]
 
 TRADE_COLUMNS = [
@@ -104,6 +129,17 @@ def _with_connection(conn):
     if conn is not None:
         return conn, False
     return get_connection(), True
+
+
+def _sql_literal(value):
+    """Formats `value` as a safe inline SQL text literal, for the rare case (see
+    save_reference_lines) where multiple heterogeneous statements are batched into one
+    executescript() call and '?' parameter binding isn't available. None becomes SQL
+    NULL; anything else is stringified and single-quotes are escaped by doubling them,
+    the standard SQL-text escaping rule."""
+    if value is None:
+        return "NULL"
+    return "'" + str(value).replace("'", "''") + "'"
 
 
 def _read_sql(c, query):
@@ -318,6 +354,114 @@ def fetch_symbol_types(conn=None):
     merged = all_symbols.merge(types, on="Symbol", how="left")
     merged["Allocation Type"] = merged["Allocation Type"].fillna("Others")
     return merged
+
+
+def save_trendline_levels(symbol, levels: dict, *, is_override: bool = False, conn=None):
+    """Upserts a symbol's Pivot Point levels (S3/S2/S1/Pivot/R1/R2/R3), same
+    upsert-one-row-per-symbol shape as set_symbol_type() above. `is_override`
+    distinguishes "auto-calculated, last seen" (False) from "user deliberately
+    moved/typed this" (True) -- a future notification checker cares which one
+    it's watching. Symbol Analysis calls this with is_override=False on every
+    meaningful recompute (page load, timeframe/interval change), and
+    is_override=True on every drag-end or manual level edit."""
+    c, should_close = _with_connection(conn)
+    c.execute(
+        "INSERT INTO trendline_levels (symbol, s3, s2, s1, pivot, r1, r2, r3, is_override, updated_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now')) "
+        "ON CONFLICT(symbol) DO UPDATE SET "
+        "s3=excluded.s3, s2=excluded.s2, s1=excluded.s1, pivot=excluded.pivot, "
+        "r1=excluded.r1, r2=excluded.r2, r3=excluded.r3, "
+        "is_override=excluded.is_override, updated_at=excluded.updated_at",
+        (symbol, levels["S3"], levels["S2"], levels["S1"], levels["Pivot"],
+         levels["R1"], levels["R2"], levels["R3"], int(is_override)),
+    )
+    c.commit()
+    if should_close:
+        c.close()
+
+
+def fetch_trendline_levels(conn=None):
+    """Returns a DataFrame (Symbol, S3, S2, S1, Pivot, R1, R2, R3, Is Override,
+    Updated At) for every symbol that's had levels saved. Symbol Analysis uses
+    this to seed a symbol's levels on page load instead of always recomputing
+    from scratch; a future notification checker would scan this same table
+    against live prices. Unlike fetch_symbol_types() above, this does NOT
+    default-fill every traded symbol -- a symbol with no saved row just isn't a
+    row here, since there's no meaningful default Pivot Point levels the way
+    "Others" is a meaningful default Allocation Type."""
+    c, should_close = _with_connection(conn)
+    df = _read_sql(c, "SELECT symbol, s3, s2, s1, pivot, r1, r2, r3, is_override, updated_at FROM trendline_levels")
+    if should_close:
+        c.close()
+    return df.rename(columns={
+        "symbol": "Symbol", "s3": "S3", "s2": "S2", "s1": "S1", "pivot": "Pivot",
+        "r1": "R1", "r2": "R2", "r3": "R3", "is_override": "Is Override", "updated_at": "Updated At",
+    })
+
+
+def save_reference_lines(symbol, lines: list, *, captured_timeline=None, captured_interval=None, conn=None):
+    """Replaces a symbol's whole captured set of Reference Lines -- delete-then-insert-all
+    scoped to `symbol`, the simplest way to sync a variable-length list (unlike Pivot
+    Points' fixed 7 columns, there's no fixed set of column names to upsert against).
+    Called on every Regenerate/drag/delete/add, never on a bare Timeline/Interval switch --
+    Reference Lines are captured at a moment, not recomputed on navigation.
+
+    `lines` is a list of {"price": float, "is_override": bool} dicts. `captured_timeline`/
+    `captured_interval` describe what basis produced this set (shown back to the user as a
+    caption) -- informational only, not part of what identifies the set; left None for a
+    manually-added line that wasn't part of a Regenerate call.
+
+    Uses executescript() (one DELETE + N INSERTs sent as a single multi-statement batch)
+    rather than separate execute()/executemany() calls -- a real, measured difference
+    against the remote Turso connection this app uses (each call pays its own network
+    round trip): two separate calls took ~1.6s, executescript's single round trip took
+    ~500ms, matching set_symbol_type/save_trendline_levels' single-upsert speed. This
+    matters because this function runs synchronously on every drag/delete/add/Regenerate,
+    inside the same @st.fragment rerun the chart redraws in -- the extra ~1s was directly
+    visible as the whole toolbar hanging before the fragment finished re-rendering.
+    executescript() doesn't support '?' parameter binding across statements, so values are
+    inlined as escaped SQL literals instead (see _sql_literal below) -- safe here since
+    every value is either a float/int the caller computed, or one of a small fixed set of
+    internal Timeline/Interval labels, never freeform user text."""
+    c, should_close = _with_connection(conn)
+    statements = [f"DELETE FROM reference_lines WHERE symbol={_sql_literal(symbol)};"]
+    for line in lines:
+        statements.append(
+            "INSERT INTO reference_lines "
+            "(symbol, price, is_override, captured_timeline, captured_interval, updated_at) "
+            f"VALUES ({_sql_literal(symbol)}, {float(line['price'])!r}, {int(line['is_override'])}, "
+            f"{_sql_literal(captured_timeline)}, {_sql_literal(captured_interval)}, datetime('now'));"
+        )
+    try:
+        c.executescript("\n".join(statements))
+        c.commit()
+    except Exception:
+        c.rollback()
+        raise
+    finally:
+        if should_close:
+            c.close()
+
+
+def fetch_reference_lines(conn=None):
+    """Returns a DataFrame (Symbol, Price, Is Override, Captured Timeline, Captured
+    Interval, Updated At) -- one row per currently-captured Reference Line, across every
+    symbol that has any. Symbol Analysis uses this to load a symbol's last-captured set on
+    a fresh session (instead of a blank chart); a future notification checker would scan
+    this same table against live prices to know what each symbol's watched levels are.
+    A symbol with nothing captured yet just isn't present here."""
+    c, should_close = _with_connection(conn)
+    df = _read_sql(
+        c, "SELECT symbol, price, is_override, captured_timeline, captured_interval, updated_at "
+        "FROM reference_lines",
+    )
+    if should_close:
+        c.close()
+    return df.rename(columns={
+        "symbol": "Symbol", "price": "Price", "is_override": "Is Override",
+        "captured_timeline": "Captured Timeline", "captured_interval": "Captured Interval",
+        "updated_at": "Updated At",
+    })
 
 
 def fetch_unreconciled_trades(cutoff, conn=None):

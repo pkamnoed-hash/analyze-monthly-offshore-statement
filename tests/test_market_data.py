@@ -1,7 +1,7 @@
 import pandas as pd
 import pytest
 
-from core.market_data import fetch_stock_profile, fetch_usd_thb_rate
+from core.market_data import fetch_price_history, fetch_stock_profile, fetch_usd_thb_rate
 
 
 class FakeTicker:
@@ -27,8 +27,17 @@ class FakeYfModule:
         return self._tickers[symbol]
 
 
-def _history(closes):
-    return pd.DataFrame({"Close": closes})
+def _history(closes, highs=None, lows=None):
+    # High/Low default to the same values as Close -- degenerate but harmless for every
+    # existing test here, none of which assert on High90D/Low90D. Tests that specifically
+    # exercise High90D/Low90D pass highs/lows explicitly (see TestFetchStockProfile's
+    # dedicated tests below).
+    return pd.DataFrame({
+        "Open": closes,
+        "High": highs if highs is not None else closes,
+        "Low": lows if lows is not None else closes,
+        "Close": closes,
+    })
 
 
 def _dividends(payouts: dict):
@@ -225,6 +234,8 @@ class TestFetchStockProfile:
         bad = result[result["Symbol"] == "BAD"].iloc[0]
         assert pd.isna(bad["Beta"])
         assert pd.isna(bad["Latest Price"])
+        assert pd.isna(bad["High90D"])
+        assert pd.isna(bad["Low90D"])
         assert bad["History90D"] == []
         assert pd.isna(bad["Dividend Per Year"])
         assert pd.isna(bad["Dividend Yield %"])
@@ -243,6 +254,17 @@ class TestFetchStockProfile:
         yf_module = FakeYfModule({"EMPTY": FakeTicker(info={"longName": "Empty Co"}, history_df=_history([]))})
         result = fetch_stock_profile(["EMPTY"], yf_module=yf_module)
         assert pd.isna(result.iloc[0]["Latest Price"])
+
+    def test_high90d_and_low90d_are_the_max_high_and_min_low_over_the_window(self):
+        yf_module = FakeYfModule({
+            "X": FakeTicker(
+                info={"longName": "X Corp"},
+                history_df=_history([100.0, 105.0, 102.0], highs=[101.0, 108.0, 103.0], lows=[98.0, 104.0, 99.5]),
+            ),
+        })
+        result = fetch_stock_profile(["X"], yf_module=yf_module).iloc[0]
+        assert result["High90D"] == pytest.approx(108.0)
+        assert result["Low90D"] == pytest.approx(98.0)
 
     def test_requests_a_90_calendar_day_window_not_yfinances_period_shorthand(self):
         # Regression test: yfinance's period="90d" shorthand actually returns 90 *trading*
@@ -264,10 +286,48 @@ class TestFetchStockProfile:
         result = fetch_stock_profile([], yf_module=FakeYfModule({}))
         assert result.empty
         assert list(result.columns) == ["Symbol", "Description", "Sector", "Industry", "Quote Type", "Beta",
-                                         "History90D", "Latest Price", "Dividend Per Year", "Dividend Yield %",
-                                         "Dividend Frequency", "Ex-Date"]
+                                         "History90D", "Latest Price", "High90D", "Low90D", "Dividend Per Year",
+                                         "Dividend Yield %", "Dividend Frequency", "Ex-Date"]
         assert result["Beta"].dtype == "float64"
         assert result["Symbol"].dtype == "object"
+
+
+class TestFetchPriceHistory:
+    def test_happy_path_returns_date_ohlc_columns(self):
+        idx = pd.date_range("2026-05-01", periods=3, freq="D")
+        history_df = pd.DataFrame(
+            {"Open": [100.0, 101.0, 103.0], "High": [102.0, 104.0, 105.0],
+             "Low": [99.0, 100.5, 102.0], "Close": [101.0, 103.0, 104.5]},
+            index=idx,
+        )
+        yf_module = FakeYfModule({"X": FakeTicker(history_df=history_df)})
+
+        result = fetch_price_history("X", 90, yf_module=yf_module)
+
+        assert list(result.columns) == ["Date", "Open", "High", "Low", "Close"]
+        assert len(result) == 3
+        assert result.iloc[-1]["Close"] == pytest.approx(104.5)
+        assert result.iloc[0]["Date"] == idx[0]
+
+    def test_unresolvable_symbol_returns_empty_frame_not_a_crash(self):
+        yf_module = FakeYfModule({"BAD": FakeTicker(history_df=None)})
+        result = fetch_price_history("BAD", 90, yf_module=yf_module)
+        assert result.empty
+        assert list(result.columns) == ["Date", "Open", "High", "Low", "Close"]
+
+    def test_network_failure_returns_empty_frame_not_a_crash(self):
+        yf_module = FakeYfModule({"BOOM": FakeTicker(raise_on_history=True)})
+        result = fetch_price_history("BOOM", 90, yf_module=yf_module)
+        assert result.empty
+
+    def test_requests_the_given_day_window(self):
+        ticker = FakeTicker(history_df=pd.DataFrame({"Open": [1.0], "High": [1.0], "Low": [1.0], "Close": [1.0]}, index=pd.date_range("2026-01-01", periods=1)))
+        yf_module = FakeYfModule({"X": ticker})
+
+        fetch_price_history("X", 365, yf_module=yf_module)
+
+        span_days = (ticker.history_call_kwargs["end"] - ticker.history_call_kwargs["start"]).days
+        assert span_days == 366  # 365 days back + 1 (end is exclusive)
 
 
 class TestFetchUsdThbRate:

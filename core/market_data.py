@@ -19,6 +19,8 @@ _EMPTY_COLUMNS = {
     "Beta": "float64",
     "History90D": "object",
     "Latest Price": "float64",
+    "High90D": "float64",
+    "Low90D": "float64",
     "Dividend Per Year": "float64",
     "Dividend Yield %": "float64",
     "Dividend Frequency": "object",
@@ -121,6 +123,11 @@ def fetch_stock_profile(symbols: list[str], *, yf_module=None) -> pd.DataFrame:
     returned 2018-04-06 for a fund paying monthly in 2026 -- so it was
     removed rather than shown unreliably.)
 
+    `High90D`/`Low90D` are the max High / min Low over that same 90-day
+    history -- no separate fetch, just two more aggregates off the `history`
+    DataFrame already pulled for `History90D`/`Latest Price`. Feeds
+    calculations.compute_pivot_points() for Monitor Stocks' Trendline tab.
+
     Deliberately uses explicit `start`/`end` dates (calendar days), not
     yfinance's `period="90d"` shorthand -- confirmed by direct comparison
     that `period="90d"` actually returns 90 *trading* days, spanning ~131
@@ -152,6 +159,8 @@ def fetch_stock_profile(symbols: list[str], *, yf_module=None) -> pd.DataFrame:
             if history is None or history.empty:
                 raise ValueError(f"No price history returned for {symbol}")
             history_90d = history["Close"].tolist()
+            high_90d = float(history["High"].max())
+            low_90d = float(history["Low"].min())
             # Beta is equity-specific too, same as Sector/Industry above -- yfinance's
             # standard `beta` (Yahoo's 5-year-monthly figure) is blank for most ETFs;
             # `beta3Year` (Yahoo's 3-year-monthly figure, the convention funds are
@@ -184,6 +193,8 @@ def fetch_stock_profile(symbols: list[str], *, yf_module=None) -> pd.DataFrame:
                 "Beta": float(beta) if beta is not None else float("nan"),
                 "History90D": history_90d,
                 "Latest Price": latest_price,
+                "High90D": high_90d,
+                "Low90D": low_90d,
                 "Dividend Per Year": dividend_per_year,
                 "Dividend Yield %": dividend_yield_pct,
                 "Dividend Frequency": _frequency_label(payout_count),
@@ -199,6 +210,8 @@ def fetch_stock_profile(symbols: list[str], *, yf_module=None) -> pd.DataFrame:
                 "Beta": float("nan"),
                 "History90D": [],
                 "Latest Price": float("nan"),
+                "High90D": float("nan"),
+                "Low90D": float("nan"),
                 "Dividend Per Year": float("nan"),
                 "Dividend Yield %": float("nan"),
                 "Dividend Frequency": None,
@@ -208,3 +221,37 @@ def fetch_stock_profile(symbols: list[str], *, yf_module=None) -> pd.DataFrame:
     if not rows:
         return pd.DataFrame({col: pd.Series([], dtype=dtype) for col, dtype in _EMPTY_COLUMNS.items()})
     return pd.DataFrame(rows)
+
+
+_PRICE_HISTORY_COLUMNS = ["Date", "Open", "High", "Low", "Close"]
+
+
+def fetch_price_history(symbol: str, days: int, *, yf_module=None) -> pd.DataFrame:
+    """Daily OHLC for a single symbol over the trailing `days` calendar days --
+    used by the Symbol Analysis drill-down page (app_pages/symbol_analysis.py)
+    for its candlestick chart. Distinct from fetch_stock_profile() above,
+    which batches many symbols but returns only one aggregated row each (a
+    Close-price list, plus 90-day High/Low scalars) -- this returns the full
+    per-day series for one symbol, with a `days` window the caller controls
+    (the page fetches 365 once, then slices for its 90D/6M/1Y toggle).
+
+    Returns an empty DataFrame (right columns, zero rows) on any failure
+    (unresolved symbol, network error) rather than raising -- matches
+    fetch_stock_profile()'s "never abort, return something inspectable"
+    convention. `yf_module` can be injected for testing (see
+    tests/test_market_data.py); production callers always omit it."""
+    yf_module = yf_module or _yfinance
+    today = pd.Timestamp.today().normalize()
+    start = today - pd.Timedelta(days=days)
+    end = today + pd.Timedelta(days=1)
+
+    try:
+        history = yf_module.Ticker(symbol).history(start=start, end=end)
+        if history is None or history.empty:
+            return pd.DataFrame({col: pd.Series([], dtype="float64" if col != "Date" else "datetime64[ns]") for col in _PRICE_HISTORY_COLUMNS})
+    except Exception:
+        return pd.DataFrame({col: pd.Series([], dtype="float64" if col != "Date" else "datetime64[ns]") for col in _PRICE_HISTORY_COLUMNS})
+
+    out = history[["Open", "High", "Low", "Close"]].copy()
+    out.insert(0, "Date", pd.to_datetime(out.index).tz_localize(None))
+    return out.reset_index(drop=True)

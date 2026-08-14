@@ -1,5 +1,31 @@
 # Changelog
 
+## Auto Trendline: Monitor Stocks Trendline tab + Reference Lines (v4.4)
+
+Finally builds automatic support/resistance drawing, deferred since v4.2.
+
+- **Monitor Stocks Trendline tab** -- classic Pivot Points (S3/S2/S1/
+  Pivot/R1/R2/R3) for every current holding, anchored to your average
+  cost rather than a market average, with amber highlighting when the
+  latest price reaches a level. A "view" cell opens a new per-symbol
+  chart page.
+- **New "Auto Trendline" page** -- candlestick chart, MA 50/100/200,
+  a Stochastic oscillator, Heikin Ashi, Day/Week/Month intervals, and
+  1M-through-All timelines.
+- **"Reference Lines"** -- the chart's support/resistance concept,
+  consolidated from several earlier iterations into one: swing highs
+  and lows nearest to your current price (not a fixed formula),
+  captured at a moment you choose via a "Regenerate" button rather than
+  constantly recomputing while you browse, fully editable (drag,
+  delete, or add your own), and saved so a future notification feature
+  can watch them without this page needing to be rebuilt.
+- Two real bugs found in live testing, both fixed: dragging a line felt
+  sluggish (a slow database write was blocking every redraw); clicking
+  a line's remove button sometimes did nothing (the chart's own drag
+  detection was intercepting the click first).
+- No breaking changes.
+- Full test suite: 299/299 passing (68 new).
+
 ## Rebalance & Reallocate: tab reorder, Ex-Date column (v4.3.1)
 
 Two small follow-ups to v4.3, applied directly to `main` (no feature

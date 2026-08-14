@@ -376,6 +376,40 @@ class TestSymbolTypes:
         assert list(result.columns) == ["Symbol", "Allocation Type"]
 
 
+SAMPLE_LEVELS = {"S3": 70.0, "S2": 80.0, "S1": 90.0, "Pivot": 100.0, "R1": 110.0, "R2": 120.0, "R3": 130.0}
+
+
+class TestTrendlineLevels:
+    def test_save_trendline_levels_inserts(self, conn):
+        db.save_trendline_levels("VRIG", SAMPLE_LEVELS, conn=conn)
+        row = conn.execute("SELECT s3, pivot, r3, is_override FROM trendline_levels WHERE symbol='VRIG'").fetchone()
+        assert row == (70.0, 100.0, 130.0, 0)
+
+    def test_save_trendline_levels_upserts_an_existing_symbol(self, conn):
+        db.save_trendline_levels("PLTR", SAMPLE_LEVELS, conn=conn)
+        moved = dict(SAMPLE_LEVELS, Pivot=105.0)
+        db.save_trendline_levels("PLTR", moved, is_override=True, conn=conn)
+        rows = conn.execute("SELECT pivot, is_override FROM trendline_levels WHERE symbol='PLTR'").fetchall()
+        assert rows == [(105.0, 1)]  # exactly one row, updated in place -- not a duplicate insert
+
+    def test_is_override_flag_round_trips(self, conn):
+        db.save_trendline_levels("AAA", SAMPLE_LEVELS, is_override=True, conn=conn)
+        result = db.fetch_trendline_levels(conn=conn)
+        assert result.loc[result["Symbol"] == "AAA", "Is Override"].iloc[0] == 1
+
+    def test_fetch_trendline_levels_does_not_default_fill_unsaved_symbols(self, conn):
+        # Unlike fetch_symbol_types(), a symbol with no saved row simply isn't a row here --
+        # there's no meaningful "default" Pivot Point levels to fill in.
+        db.insert_trade(trade_date="2026-01-05", side="buy", symbol="BBB", quantity=1, price=1.0, conn=conn)
+        result = db.fetch_trendline_levels(conn=conn)
+        assert "BBB" not in set(result["Symbol"])
+
+    def test_fetch_trendline_levels_returns_empty_frame_without_error_when_nothing_saved(self, conn):
+        result = db.fetch_trendline_levels(conn=conn)
+        assert result.empty
+        assert list(result.columns) == ["Symbol", "S3", "S2", "S1", "Pivot", "R1", "R2", "R3", "Is Override", "Updated At"]
+
+
 class TestRebalancePlan:
     def test_get_active_rebalance_plan_returns_none_when_none_exists(self, conn):
         assert db.get_active_rebalance_plan(conn=conn) is None
