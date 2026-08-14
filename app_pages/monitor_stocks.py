@@ -113,6 +113,37 @@ holdings["Classification"] = holdings["Portfolio Group"].where(
     holdings["Quote Type"] == "EQUITY", holdings["Asset Class"]
 )
 
+# Pivot Points (S3/S2/S1/Pivot/R1/R2/R3) off the same 90-day High/Low window
+# History90D already uses -- see calculations.compute_pivot_points's own docstring
+# for the formula. "Pivot" is "Avg Cost" (Cost/Sh) passed straight through,
+# not the classic (High+Low+Close)/3 average -- these levels answer "where
+# does price sit relative to what I actually paid," a buy/sell decision aid,
+# not the classic "where is price in its own recent range" reading. The
+# column_config below relabels "Pivot" to "Cost/Sh" for display, since that's
+# literally what it now holds -- the separate original Avg Cost column is
+# deliberately left out of the Trendline tab (would just be a duplicate of
+# this one). The cross-highlight further below still compares each level
+# against Latest Price (the current market price is what's actually moving,
+# not the static cost basis). "Action" is just a static visual label here --
+# the actual navigation is cell-selection further below (st.dataframe's
+# on_select="rerun" + selection_mode="single-cell", checking whether the
+# selected cell's column is "Action" + st.switch_page), not a LinkColumn. A LinkColumn's
+# href is a plain HTML anchor rendered inside the data grid's own component
+# frame, so clicking it triggers a full browser navigation rather than
+# Streamlit's in-session routing -- confirmed this breaks the app's auth
+# gate two ways: (1) a hard navigation spins up a brand-new, unauthenticated
+# session, and (2) even after logging back in, dashboard_app.py's auth
+# check calls st.stop() BEFORE st.navigation() ever runs, so the router
+# never learns about the deep-linked URL and falls back to the default page
+# (Dashboard)
+# instead of Symbol Analysis. st.switch_page(..., query_params=...) stays
+# entirely within the current session, sidestepping both problems.
+for level, values in calculations.compute_pivot_points(
+    holdings["High90D"], holdings["Low90D"], holdings["Avg Cost"]
+).items():
+    holdings[level] = values
+holdings["Action"] = "view →"
+
 holdings["Position Value"] = holdings["Quantity"] * holdings["Latest Price"]
 total_value = holdings["Position Value"].sum()
 holdings["Weight %"] = (holdings["Position Value"] / total_value * 100) if total_value else 0.0
@@ -369,7 +400,10 @@ if not view.empty:
         fig_div.update_layout(yaxis_title="USD", xaxis_title="Month")
         st.plotly_chart(fig_div, use_container_width=True)
 
-st.caption(f"Showing {len(view)} of {len(holdings)} symbols.")
+st.caption(
+    f"Showing {len(view)} of {len(holdings)} symbols. On Overview/Trendline, click a row's Action "
+    "cell (\"view →\") to open that symbol's price chart with its Support/Resistance levels drawn."
+)
 
 # Split from one 23-column table into focused tabs (Finviz-style column presets) --
 # Symbol + History90D pinned in every tab so a row is always identifiable regardless
@@ -382,13 +416,14 @@ TAB_COLUMNS = {
                  "Unrealized", "Unrealized %", "Dividends Received", "Total P/L", "Total P/L %",
                  "Holding Period (Years)", "Total P/L %/yr", "Dividend Yield %", "Dividend Frequency",
                  "Ex-Date", "Expected Div Per Year", "Expected Div Per Month", "Beta",
-                 "Div Return Contribution %"],
+                 "Div Return Contribution %", "S3", "S2", "S1", "Pivot", "R1", "R2", "R3", "Action"],
     "Position": ["Symbol", "History90D", "Quantity", "Avg Cost", "Latest Price", "Cost Basis", "Position Value"],
     "Performance": ["Symbol", "History90D", "Unrealized", "Unrealized %", "Dividends Received", "Total P/L",
                      "Total P/L %", "Holding Period (Years)", "Total P/L %/yr"],
     "Dividends": ["Symbol", "History90D", "Dividend Yield %", "Dividend Frequency", "Ex-Date",
                   "Expected Div Per Year", "Expected Div Per Month", "Div Return Contribution %"],
     "Classification": ["Symbol", "History90D", "Asset Class", "Portfolio Group", "Beta"],
+    "Trendline": ["Symbol", "History90D", "Latest Price", "S3", "S2", "S1", "Pivot", "R1", "R2", "R3", "Action"],
 }
 column_config = {
     "Description": st.column_config.TextColumn("Desc.", help="Description"),
@@ -444,6 +479,25 @@ column_config = {
     "Div Return Contribution %": st.column_config.NumberColumn(
         "Div Contrib %", format="%.2f%%", help=f"Div Return Contribution %. {DIVIDEND_TAX_HELP}",
     ),
+    "Pivot": st.column_config.NumberColumn(
+        "Cost/Sh", format="$%.4f",
+        help="Your average cost per share -- the basis every R/S level here is built outward from, "
+             "so these levels show where price sits relative to what you actually paid.",
+    ),
+    "R1": st.column_config.NumberColumn(format="$%.2f", help="Resistance 1, above your cost basis. Highlighted when Latest Price has reached or crossed this level."),
+    "R2": st.column_config.NumberColumn(format="$%.2f", help="Resistance 2, above your cost basis. Highlighted when Latest Price has reached or crossed this level."),
+    "R3": st.column_config.NumberColumn(format="$%.2f", help="Resistance 3, above your cost basis. Highlighted when Latest Price has reached or crossed this level."),
+    "S1": st.column_config.NumberColumn(format="$%.2f", help="Support 1, below your cost basis. Highlighted when Latest Price has reached or crossed this level."),
+    "S2": st.column_config.NumberColumn(format="$%.2f", help="Support 2, below your cost basis. Highlighted when Latest Price has reached or crossed this level."),
+    "S3": st.column_config.NumberColumn(
+        format="$%.2f",
+        help="Support 3, below your cost basis. Highlighted when Latest Price has reached or crossed this "
+             "level. Can go negative for a volatile symbol with a wide 90-day range -- a real output of "
+             "the formula, not an error.",
+    ),
+    "Action": st.column_config.TextColumn(
+        "Action", help="Click this cell to open a price chart with these levels drawn, and adjust them manually if you want.",
+    ),
 }
 
 def _highlight_ex_date_this_month(col: pd.Series) -> list[str]:
@@ -459,14 +513,71 @@ def _highlight_ex_date_this_month(col: pd.Series) -> list[str]:
     ]
 
 
-for tab, cols in zip(st.tabs(list(TAB_COLUMNS.keys())), TAB_COLUMNS.values()):
+def _highlight_pivot_crosses(row: pd.Series) -> list[str]:
+    """Row-aware (axis=1), unlike _highlight_ex_date_this_month's column-aware
+    (subset=[...]) shape above -- a cross depends on comparing each level to
+    THAT row's own Latest Price, not a fixed reference like "today". No
+    subset is passed to .style.apply() below, so this receives (and must
+    return styles for) every column in the tab, not just S1..R3 -- everything
+    outside S1/S2/S3/R1/R2/R3 gets "" (no style). Pivot itself is never
+    highlighted -- a plain reference value, not a support/resistance level."""
+    amber = "background-color: rgba(255, 193, 7, 0.28)"
+    price = row.get("Latest Price")
+    styles = []
+    for col, val in row.items():
+        # Only S1/S2/S3/R1/R2/R3 are ever evaluated -- other columns in this row can hold
+        # non-scalar values (History90D is a Python list for the sparkline), and pd.isna()
+        # on a list returns an array, not a bool, which breaks a plain `if` outright.
+        if col not in ("R1", "R2", "R3", "S1", "S2", "S3"):
+            styles.append("")
+        elif pd.isna(price) or pd.isna(val):
+            styles.append("")
+        elif col in ("R1", "R2", "R3") and price >= val:
+            styles.append(amber)
+        elif col in ("S1", "S2", "S3") and price <= val:
+            styles.append(amber)
+        else:
+            styles.append("")
+    return styles
+
+
+for tab_name, tab, cols in zip(TAB_COLUMNS.keys(), st.tabs(list(TAB_COLUMNS.keys())), TAB_COLUMNS.values()):
     with tab:
         table = view[cols]
+        styler = None
         if "Ex-Date" in cols:
-            table = table.style.apply(_highlight_ex_date_this_month, subset=["Ex-Date"])
-        st.dataframe(
-            table,
-            use_container_width=True,
-            hide_index=True,
-            column_config=column_config,
-        )
+            styler = table.style.apply(_highlight_ex_date_this_month, subset=["Ex-Date"])
+        if "S1" in cols:
+            styler = (styler if styler is not None else table.style).apply(_highlight_pivot_crosses, axis=1)
+
+        # "Action" tabs (Trendline, Overview) get the "Action" cell specifically wired to
+        # Symbol Analysis -- see the comment above holdings["Action"]'s assignment for why
+        # this is st.switch_page() driven, not a LinkColumn. selection_mode="single-cell"
+        # (not "single-row") so clicking any OTHER cell in the row (Symbol, S3, etc.) just
+        # focuses/highlights it like a normal read-only grid, matching the original ask --
+        # only the "Action" cell itself triggers navigation. Row selection was tried first;
+        # it required clicking a checkbox in a new leftmost column, not the "view" cell
+        # itself, which didn't match "click view" at all.
+        if "Action" in cols:
+            event = st.dataframe(
+                styler if styler is not None else table,
+                use_container_width=True,
+                hide_index=True,
+                column_config=column_config,
+                on_select="rerun",
+                selection_mode="single-cell",
+                key=f"monitor_stocks_{tab_name}_table",
+            )
+            selected_cells = event.selection.cells
+            if selected_cells:
+                row_idx, col_name = selected_cells[0]
+                if col_name == "Action":
+                    selected_symbol = table.iloc[row_idx]["Symbol"]
+                    st.switch_page("app_pages/symbol_analysis.py", query_params={"symbol": selected_symbol})
+        else:
+            st.dataframe(
+                styler if styler is not None else table,
+                use_container_width=True,
+                hide_index=True,
+                column_config=column_config,
+            )

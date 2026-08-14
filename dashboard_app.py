@@ -52,6 +52,13 @@ pg = st.navigation({
         st.Page("app_pages/backup.py", title="System Backup"),
         st.Page("app_pages/rebalance.py", title="Rebalance & Reallocate"),
     ],
+    "Analysis": [
+        # Reachable both ways -- directly from the sidebar (shows its own symbol picker
+        # when opened with no "symbol" query param, see app_pages/symbol_analysis.py) and
+        # via the "view" cell on Monitor Stocks' Trendline tab (st.switch_page(...,
+        # query_params={"symbol": ...}), which pre-selects a symbol and skips the picker).
+        st.Page("app_pages/symbol_analysis.py", title="Auto Trendline", url_path="symbol-analysis"),
+    ],
 })
 pg.run()
 

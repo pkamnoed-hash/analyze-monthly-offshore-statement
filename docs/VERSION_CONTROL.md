@@ -28,7 +28,7 @@ Naming convention: `vN-short-description` (or `vN.M-short-description` for a
 smaller, additive feature that doesn't warrant a new whole version number),
 capital V on whole versions, hyphen-separated.
 
-## My version quick note
+## My version quick plan note
 Version planning
 - 1 - basic "record trade and dividend"
 - 2 - intermediate "reconciliation", "tools v1"
@@ -46,6 +46,8 @@ Version planning
 	○ 4.2 (`v4.2-monitor-stocks-ex-date`) Monitor Stocks Ex-Date column + current-month highlighting; automatic trend line explored (live demo, not yet built) -- deferred
 	○ 4.3 (`v4.3-rebalance-columns`) Rebalance & Reallocate 5-tab split (Analyze is the sole editable tab), Total P/L, Beta, THB calculator, Summary KPI redesign; Monitor Stocks Monthly Dividend chart; $-pair rendering bug fixed across 4 pages
 	○ 4.3.1 (direct to `main`, no branch) Rebalance & Reallocate tab reorder (Analyze first) + Ex-Date column with current-month highlighting
+  ○ 4.4 ... still on deveopment currently (please comeback to update later) ...  
+  ○ 4.4.1 bio login (face or finger)
 - 5 - cosmetic
 - 6 - tax management
 

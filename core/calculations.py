@@ -6,6 +6,7 @@ Kept free of Streamlit imports so they can be unit tested in isolation
 
 from collections import deque
 
+import numpy as np
 import pandas as pd
 
 
@@ -302,3 +303,395 @@ def compute_roi(investment_gain: float, capital_base: float, period_days: int):
             annualized_roi_pct = ((1 + roi_pct / 100) ** (1 / years) - 1) * 100
 
     return roi_pct, annualized_roi_pct
+
+
+def compute_pivot_points(high, low, pivot):
+    """Pivot Points -- 6 support/resistance levels (R1-R3/S1-S3) built outward
+    from a caller-supplied `pivot` and a High/Low range. Works on plain
+    floats or same-shaped pandas Series alike (pure +/-/* arithmetic plus
+    np.minimum/np.maximum, vectorizes for free). Returns a dict keyed
+    "Pivot"/"R1"/"R2"/"R3"/"S1"/"S2"/"S3" -- values matching the input type
+    (float in, float out; Series in, Series out); "Pivot" is `pivot` passed
+    straight through, included so callers get a complete, self-consistent
+    set of 7 values back.
+
+    Deliberately does NOT derive `pivot` internally (e.g. the classic floor-
+    trader average of High/Low/Close) -- the caller decides what basis the
+    levels are built around. Monitor Stocks passes Avg Cost (Cost/Sh)
+    directly, anchoring every level to what was actually paid rather than
+    the current market price, so the R/S levels double as a buy/sell
+    reference against cost basis, not just "where price sits in its own
+    recent range."
+
+    Clamped and resorted so the ordering S3 <= S2 <= S1 <= Pivot <= R1 <=
+    R2 <= R3 always holds. With `pivot` decoupled from `high`/`low` (real
+    for a cost basis that sits entirely outside the 90-day trading range --
+    confirmed on RKLB, where a much-lower cost basis than the recent range
+    put the raw R1 formula result *below* Pivot), the raw classic formulas
+    can produce a "resistance" level below Pivot or a "support" level above
+    it, and the three same-side values can land out of order relative to
+    each other even when none of them cross Pivot. Clamping floors every
+    raw R candidate at `pivot` and ceils every raw S candidate at `pivot`
+    (a level can never end up on the wrong side); resorting then assigns
+    the smallest of the three clamped R candidates to R1 (closest to
+    Pivot) through the largest to R3, and the largest S candidate to S1
+    (closest to Pivot) through the smallest to S3. A well-behaved case
+    (Pivot already between Low and High) is unaffected -- the raw values
+    are already in this order, so clamping and resorting are no-ops. An
+    extreme-but-correctly-signed value (e.g. a very negative S3 for a
+    volatile symbol) is also unaffected -- still shown as-is, informational
+    rather than a realistic price target.
+
+    NaN propagates naturally through every level that actually depends on the
+    NaN input, no special-casing needed -- notably, `pivot` is independent of
+    `high`/`low`, so a symbol with a valid Avg Cost but missing market data
+    (an unresolved yfinance fetch, where High90D/Low90D come back NaN
+    together) still gets a real "Pivot" value back, just NaN for the 6
+    levels that need a High/Low range."""
+    r_candidates = [
+        np.maximum(2 * pivot - low, pivot),
+        np.maximum(pivot + (high - low), pivot),
+        np.maximum(high + 2 * (pivot - low), pivot),
+    ]
+    s_candidates = [
+        np.minimum(2 * pivot - high, pivot),
+        np.minimum(pivot - (high - low), pivot),
+        np.minimum(low - 2 * (high - pivot), pivot),
+    ]
+
+    # Median-of-three via min/max comparisons only (max(min(a,b), min(max(a,b),c))) --
+    # NOT sum(candidates) - min - max, which was the original approach here and is
+    # numerically fragile: when two of the three candidates clamp to the exact same
+    # `pivot` float (a real, common case -- e.g. AIQ's real 90-day data at a 1M Timeline
+    # window), that sum-then-subtract arithmetic can reconstruct a value off by 1 ULP
+    # from `pivot` instead of exactly `pivot`, which broke the S3<=...<=R3 ordering
+    # invariant by a sub-cent amount (confirmed against real holdings, not synthetic
+    # data -- see tests/test_calculations.py's regression test). The min/max formula
+    # never combines values arithmetically -- it always returns one of the three exact
+    # input floats, so two identical clamped candidates produce an exactly identical mid.
+    r_min = np.minimum(np.minimum(r_candidates[0], r_candidates[1]), r_candidates[2])
+    r_max = np.maximum(np.maximum(r_candidates[0], r_candidates[1]), r_candidates[2])
+    r_mid = np.maximum(
+        np.minimum(r_candidates[0], r_candidates[1]),
+        np.minimum(np.maximum(r_candidates[0], r_candidates[1]), r_candidates[2]),
+    )
+
+    s_min = np.minimum(np.minimum(s_candidates[0], s_candidates[1]), s_candidates[2])
+    s_max = np.maximum(np.maximum(s_candidates[0], s_candidates[1]), s_candidates[2])
+    s_mid = np.maximum(
+        np.minimum(s_candidates[0], s_candidates[1]),
+        np.minimum(np.maximum(s_candidates[0], s_candidates[1]), s_candidates[2]),
+    )
+
+    return {
+        "Pivot": pivot,
+        "R1": r_min, "R2": r_mid, "R3": r_max,
+        "S1": s_max, "S2": s_mid, "S3": s_min,
+    }
+
+
+def compute_stochastic_oscillator(high: pd.Series, low: pd.Series, close: pd.Series,
+                                   k_period: int = 14, d_period: int = 3) -> dict:
+    """Standard "Full Stochastic" (14, 3) oscillator: %K measures where Close sits within
+    the trailing k_period High/Low range (0-100), %D is a d_period simple moving average
+    of %K. Both are plain pandas rolling ops -- `.rolling(k_period)` already returns NaN
+    for the first k_period-1 rows (not enough history yet), same "no data until the window
+    fills" behavior every other windowed figure in this module relies on implicitly.
+
+    A flat window (Highest High == Lowest Low -- e.g. a completely flat price run) would
+    otherwise divide by zero; reads as 50 (the midpoint) instead, an arbitrary but sane
+    stand-in for "no range to measure position within." Returns a dict with "%K"/"%D"
+    Series, aligned to the input index -- same dict-of-Series shape as compute_pivot_points."""
+    highest_high = high.rolling(k_period).max()
+    lowest_low = low.rolling(k_period).min()
+    span = highest_high - lowest_low
+    percent_k = ((close - lowest_low) / span * 100).where(span != 0, 50.0)
+    percent_d = percent_k.rolling(d_period).mean()
+    return {"%K": percent_k, "%D": percent_d}
+
+
+def count_touches(high: pd.Series, low: pd.Series, level_price: float, tolerance_pct: float = 0.012) -> int:
+    """How many bars in the given window came within `tolerance_pct` of `level_price`, or
+    whose full High-Low range crossed through it -- a rough strength indicator for a Pivot
+    Points R/S level, distinct from the level itself (a level can be mathematically valid
+    but never actually have been tested by real price action). Floored at 2 so a level
+    never reads as completely untested. tolerance_pct=0.012 (1.2%) and the floor of 2 are
+    first-pass values carried over from the design mockup, not independently tuned against
+    real data -- a reasonable starting point, worth revisiting if it reads as too
+    loose/tight in practice."""
+    tolerance = max(level_price * tolerance_pct, 0.01)
+    near_high = (high - level_price).abs() <= tolerance
+    near_low = (low - level_price).abs() <= tolerance
+    crossed = (low <= level_price) & (high >= level_price)
+    return max(int((near_high | near_low | crossed).sum()), 2)
+
+
+def compute_moving_average(close: pd.Series, period: int) -> pd.Series:
+    """Simple moving average of Close over `period` bars -- a thin, explicit wrapper
+    around `.rolling(period).mean()` rather than inlining it at each call site, so the
+    Symbol Analysis page's MA 50/100/200 overlay reads as one concept in one place. NaN
+    for the first period-1 rows, same convention as compute_stochastic_oscillator above."""
+    return close.rolling(period).mean()
+
+
+_INTERVAL_RESAMPLE_RULE = {"D": None, "W": "W", "M": "ME"}
+
+
+def resample_ohlc(daily: pd.DataFrame, interval: str) -> pd.DataFrame:
+    """Groups daily OHLC bars (Date/Open/High/Low/Close, the shape
+    market_data.fetch_price_history returns) into weekly or monthly bars -- Interval
+    (Day/Week/Month), distinct from the Symbol Analysis page's Timeline picker (how much
+    history is shown). interval="D" returns `daily` unchanged (a copy, so callers can't
+    accidentally mutate the caller's frame through the returned one).
+
+    Open/High/Low/Close aggregate the standard OHLC way (first/max/min/last) via pandas'
+    own `.resample()` on a DatetimeIndex -- no hand-rolled bucketing needed, unlike a
+    from-scratch JS port would require. Weekly buckets end on Sunday (pandas' default "W"
+    rule) -- an arbitrary but standard convention, not meant to match any particular
+    trading calendar. `.dropna()` after resampling drops any bucket with no trading days
+    in it (shouldn't happen for a contiguous daily series, but guards against a gap)."""
+    if interval not in _INTERVAL_RESAMPLE_RULE:
+        raise ValueError(f"Unknown interval {interval!r} -- expected 'D', 'W', or 'M'")
+    if interval == "D":
+        return daily.copy()
+
+    indexed = daily.set_index("Date")
+    resampled = indexed.resample(_INTERVAL_RESAMPLE_RULE[interval]).agg(
+        {"Open": "first", "High": "max", "Low": "min", "Close": "last"}
+    ).dropna()
+    return resampled.reset_index()
+
+
+def to_heikin_ashi(daily: pd.DataFrame) -> pd.DataFrame:
+    """Heikin Ashi smoothing -- a display transform, not real traded prices (Pivot Points
+    and the Stochastic oscillator must always be computed from real OHLC, never this).
+    Standard recursive formula: HA-Close is the average of the real bar's own O/H/L/C;
+    HA-Open is the midpoint of the *previous* HA bar's Open/Close (seeded from the real
+    bar's own O/C on the very first row, since there's no previous HA bar yet); HA-High/
+    Low extend the real High/Low to also include the HA Open/Close, so the smoothed
+    candle body never pokes outside its own wick.
+
+    Genuinely recursive (each row depends on the previous output row), so this is a plain
+    Python loop, not a vectorized pandas op -- same shape as the mockup's JS port. Must be
+    called on the FULL series before slicing to a visible window: seeding a mid-series
+    row's HA-Open from a raw (non-Heikin-Ashi) previous bar would be wrong."""
+    opens, highs, lows, closes = [], [], [], []
+    prev_open, prev_close = None, None
+    for row in daily.itertuples():
+        ha_close = (row.Open + row.High + row.Low + row.Close) / 4
+        ha_open = (prev_open + prev_close) / 2 if prev_open is not None else (row.Open + row.Close) / 2
+        ha_high = max(row.High, ha_open, ha_close)
+        ha_low = min(row.Low, ha_open, ha_close)
+        opens.append(ha_open); highs.append(ha_high); lows.append(ha_low); closes.append(ha_close)
+        prev_open, prev_close = ha_open, ha_close
+
+    out = daily[["Date"]].copy()
+    out["Open"] = opens
+    out["High"] = highs
+    out["Low"] = lows
+    out["Close"] = closes
+    return out
+
+
+def find_swing_points(high: pd.Series, low: pd.Series, window: int = 3) -> tuple[pd.Series, pd.Series]:
+    """Fractal-style local-extreme check: a bar is a "swing high" if its High is the max
+    within a CENTERED window of `window` bars on each side (2*window+1 bars total,
+    including the bar itself); a "swing low" the mirror image via Low/min. This is the
+    standard building block traditional charting tools use to auto-draw trend lines --
+    genuinely different from this page's Pivot Points levels, which are a fixed formula
+    off Avg Cost, not derived from where price has actually reversed.
+
+    Returns (is_swing_high, is_swing_low), two boolean Series aligned to the input index.
+    `.rolling(..., center=True)` can't fill in the first/last `window` bars (not enough
+    bars on one side yet) -- those rows come back NaN from the rolling max/min, so the
+    `==` comparison against them is always False, correctly leaving the most recent
+    `window` bars unconfirmed rather than guessing. A real trend line doesn't chase the
+    last candle -- this is expected behavior, not a bug."""
+    window_size = 2 * window + 1
+    rolling_max = high.rolling(window_size, center=True).max()
+    rolling_min = low.rolling(window_size, center=True).min()
+    is_swing_high = high == rolling_max
+    is_swing_low = low == rolling_min
+    return is_swing_high, is_swing_low
+
+
+def compute_swing_trend_lines(
+    dates: pd.Series, high: pd.Series, low: pd.Series, window: int = 3,
+    search_from: pd.Timestamp | None = None,
+) -> dict:
+    """Classic technical-analysis auto trend lines: connects the two most recent confirmed
+    swing highs into a resistance trend line, and the two most recent confirmed swing lows
+    into a support trend line -- the simple, standard version (deliberately not best-fit-
+    through-many-points or violation-counting, real added complexity for a marginal
+    accuracy gain). Each line is extended in a straight line through to the most recent
+    bar's date, so it reads as a projected line rather than a stub stopping at the second
+    swing point.
+
+    `search_from`, if given, restricts which CONFIRMED swing points are eligible to be
+    picked as one of the "two most recent" (e.g. the caller's selected Timeline cutoff) --
+    but swing detection itself (`find_swing_points`) still runs over the FULL `high`/`low`
+    given, not just the restricted range, same "detect with full context, then scope the
+    result" rule this page's MA/Stochastic already follow (a swing point right at the edge
+    of the window still needs real history on both sides to be confirmed correctly). The
+    line still always extends to the last date in the FULL series (real "today"), not the
+    last date within `search_from` -- Timeline scopes which swings are eligible, not how
+    far forward the projection reaches.
+
+    Returns {"resistance": [...] | None, "support": [...] | None} -- each present side is a
+    list of 3 {"time": "yyyy-mm-dd", "value": float} dicts (the two swing points plus the
+    extended point), ready to hand straight to the trendline_chart component as line-series
+    data. A side is None when fewer than 2 eligible confirmed swing points exist (e.g. a
+    short Timeline window) -- not an error, just nothing to draw yet."""
+    is_swing_high, is_swing_low = find_swing_points(high, low, window)
+    if search_from is not None:
+        in_range = dates >= search_from
+        is_swing_high = is_swing_high & in_range
+        is_swing_low = is_swing_low & in_range
+    swing_highs = list(zip(dates[is_swing_high], high[is_swing_high]))
+    swing_lows = list(zip(dates[is_swing_low], low[is_swing_low]))
+
+    def _extended_line(points, last_date):
+        if len(points) < 2:
+            return None
+        (t1, p1), (t2, p2) = points[-2], points[-1]
+        days_between = (t2 - t1).days
+        if days_between == 0:
+            return None
+        slope_per_day = (p2 - p1) / days_between
+        extended_price = p2 + slope_per_day * (last_date - t2).days
+        return [
+            {"time": t1.strftime("%Y-%m-%d"), "value": float(p1)},
+            {"time": t2.strftime("%Y-%m-%d"), "value": float(p2)},
+            {"time": last_date.strftime("%Y-%m-%d"), "value": float(extended_price)},
+        ]
+
+    last_date = dates.iloc[-1]
+    return {
+        "resistance": _extended_line(swing_highs, last_date),
+        "support": _extended_line(swing_lows, last_date),
+    }
+
+
+def cluster_price_levels(prices, tolerance_pct: float = 0.015) -> list[dict]:
+    """Groups nearby prices into clusters -- a generic building block for
+    "where has price actually clustered/repeated," not specific to swing points. Sorts
+    `prices` ascending, then greedily grows a cluster: each price joins the CURRENT
+    (most recently opened) cluster if it's within `tolerance_pct` of that cluster's
+    running average, otherwise starts a new one. Since input is processed in sorted
+    order, a new price can only possibly belong to the most recent cluster -- no earlier
+    cluster's average is ever closer, so a single backward comparison is sufficient
+    (no need to check every existing cluster).
+
+    Returns a list of {"price": float, "count": int} -- one entry per cluster, `price`
+    the cluster's average, `count` how many input prices joined it -- sorted by `count`
+    descending (the most-touched level first). Empty input returns an empty list."""
+    sorted_prices = sorted(float(p) for p in prices)
+    clusters = []  # list of [running_sum, count]
+    for price in sorted_prices:
+        if clusters:
+            cluster_avg = clusters[-1][0] / clusters[-1][1]
+            tolerance = max(cluster_avg * tolerance_pct, 0.01)
+            if abs(price - cluster_avg) <= tolerance:
+                clusters[-1][0] += price
+                clusters[-1][1] += 1
+                continue
+        clusters.append([price, 1])
+
+    result = [{"price": total / count, "count": count} for total, count in clusters]
+    result.sort(key=lambda c: c["count"], reverse=True)
+    return result
+
+
+def compute_horizontal_sr_zones(
+    dates: pd.Series, high: pd.Series, low: pd.Series, window: int = 3,
+    search_from: pd.Timestamp | None = None, tolerance_pct: float = 0.015, max_per_side: int = 2,
+) -> dict:
+    """Horizontal support/resistance ZONES -- genuinely different from both Pivot Points
+    (a fixed formula anchored to Cost/Sh) and compute_swing_trend_lines (a diagonal read
+    on the current slope): this finds prices where the market has actually reversed
+    MULTIPLE times, via the same swing-point detection plus clustering (see
+    find_swing_points/cluster_price_levels above). Resistance zones cluster confirmed
+    swing HIGHS; support zones cluster confirmed swing LOWS. Only clusters with 2+
+    members are returned -- a single, unrepeated swing point isn't a "zone" (that
+    concept is already covered by compute_swing_trend_lines), it's just noise here.
+    Kept to the `max_per_side` strongest (most-touched) zones per side so the chart
+    doesn't fill up with every minor cluster.
+
+    `window`/`search_from` mean exactly what they mean in compute_swing_trend_lines --
+    swing detection runs over the FULL `high`/`low` given (real context for confirmation
+    near the search_from boundary), `search_from` then restricts which confirmed swings
+    are eligible to be clustered. Callers should pass the SAME `window` (typically scaled
+    to how many bars are in the selected range) and `search_from` they use for the trend
+    line, so both overlays reflect the same swing-significance scale for a given Timeline.
+
+    Returns {"resistance": [{"price", "count"}, ...], "support": [...]}, each list
+    already sorted strongest-first and trimmed to `max_per_side` -- ready to hand
+    straight to the trendline_chart component."""
+    is_swing_high, is_swing_low = find_swing_points(high, low, window)
+    if search_from is not None:
+        in_range = dates >= search_from
+        is_swing_high = is_swing_high & in_range
+        is_swing_low = is_swing_low & in_range
+
+    def _top_zones(prices):
+        clusters = cluster_price_levels(prices, tolerance_pct)
+        return [c for c in clusters if c["count"] >= 2][:max_per_side]
+
+    return {
+        "resistance": _top_zones(high[is_swing_high]),
+        "support": _top_zones(low[is_swing_low]),
+    }
+
+
+def find_nearest_levels(latest_price: float, candidates) -> tuple[float | None, float | None]:
+    """Given a pool of candidate price levels -- the caller decides what's in it (Pivot
+    Points R/S, S/R Zones' cluster prices, whatever else), this makes no assumption about
+    where they came from -- finds the nearest one ABOVE latest_price ("nearest
+    resistance") and the nearest one BELOW ("nearest support"). A candidate exactly equal
+    to latest_price counts as neither -- it's already been reached, not something still
+    ahead to watch for.
+
+    Returns (nearest_resistance, nearest_support), either element None if no candidate
+    exists on that side (price has broken through everything, or the pool was empty)."""
+    above = [c for c in candidates if c > latest_price]
+    below = [c for c in candidates if c < latest_price]
+    return (min(above) if above else None, max(below) if below else None)
+
+
+def compute_reference_lines(
+    dates: pd.Series, high: pd.Series, low: pd.Series, latest_price: float, window: int = 3,
+    search_from: pd.Timestamp | None = None, max_per_side: int = 2,
+) -> dict:
+    """Reference Lines -- swing highs/lows selected by proximity to CURRENT price, not by
+    recency (compute_swing_trend_lines' rule) or cluster strength (compute_horizontal_sr_zones'
+    rule). Replaces both of those, plus the Pivot Points R/S levels, as the page's single
+    line concept: resistance candidates are confirmed swing highs ABOVE latest_price, support
+    candidates are confirmed swing lows BELOW latest_price -- each sorted by distance to
+    latest_price and trimmed to `max_per_side`. A side with zero candidates (e.g. price at a
+    new high, so no swing high sits above it) simply returns an empty list, not an error --
+    there's nothing there to reference yet.
+
+    `window`/`search_from` mean exactly what they mean in compute_swing_trend_lines/
+    compute_horizontal_sr_zones -- swing detection runs over the FULL `high`/`low` given,
+    `search_from` then restricts which confirmed swings are eligible to be picked. No
+    minimum-spacing rule between the two picks on a side -- deliberately kept simple, plain
+    closest-N by distance.
+
+    Returns {"resistance": [price, ...], "support": [price, ...]}, each sorted
+    nearest-to-latest_price-first, ready for the caller to assign ids and seed session
+    state with."""
+    is_swing_high, is_swing_low = find_swing_points(high, low, window)
+    if search_from is not None:
+        in_range = dates >= search_from
+        is_swing_high = is_swing_high & in_range
+        is_swing_low = is_swing_low & in_range
+
+    resistance_candidates = [float(p) for p in high[is_swing_high] if p > latest_price]
+    support_candidates = [float(p) for p in low[is_swing_low] if p < latest_price]
+    resistance_candidates.sort(key=lambda p: p - latest_price)
+    support_candidates.sort(key=lambda p: latest_price - p)
+
+    return {
+        "resistance": resistance_candidates[:max_per_side],
+        "support": support_candidates[:max_per_side],
+    }

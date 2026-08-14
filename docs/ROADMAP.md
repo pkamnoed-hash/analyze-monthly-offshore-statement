@@ -1770,6 +1770,384 @@ Committed straight to `main`: `c9f423d` (tab reorder), `fa1a24d`
 (Ex-Date column). Retroactively tagged `v4.3.1` when this doc gap was
 closed.
 
+## V4.4: Auto Trendline -- Pivot Point Support/Resistance Analysis
+
+### Context
+
+Finally builds the "automatic trend line drawing" item deferred at the
+end of V4.2 (see that section's "Considered and explicitly deferred"
+above) -- but as classic **Pivot Points** (`S3/S2/S1/Pivot/R1/R2/R3`),
+not the linear-regression/cluster approach V4.2's proof-of-concept
+explored. Landed on through real back-and-forth: a live 10-symbol
+mockup shown in chat first (real 90-day OHLC via yfinance) to validate
+the numbers and highlight convention, then an interactive layout
+mockup (a standalone HTML/Canvas Artifact, since Artifacts can't load
+the real `lightweight-charts` CDN script) to validate the 5-zone
+Symbol Analysis page redesign cheaply before writing the real
+multi-file build -- roughly 10 rounds of screenshot feedback against
+that mockup before starting real implementation.
+
+### Design decisions
+
+**`Pivot = Avg Cost` (Cost/Sh), not the classic High/Low/Close
+average** -- anchors every level to what was actually paid, not just
+where price sits in its own recent range, so R/S levels double as a
+buy/sell reference against cost basis.
+`core/calculations.py::compute_pivot_points(high, low, pivot)`'s third
+parameter is literally named `pivot`; the caller decides the basis.
+Clamped and resorted so `S3<=S2<=S1<=Pivot<=R1<=R2<=R3` always holds,
+even when Pivot sits entirely outside the High/Low range (confirmed
+real on RKLB, whose cost basis below its 90-day range made the raw
+formula produce a "resistance" below Pivot). The clamp/resort's "mid"
+candidate was originally `sum(candidates) - min - max`, which a
+real-data check (not the unit tests' round numbers) caught losing 1
+float ULP of precision on AIQ when two candidates clamp to the exact
+same value -- fixed with a branchless min/max median-of-three formula
+instead, which only ever returns one of the three exact input floats.
+
+**Monitor Stocks' Trendline tab**: all 52 holdings, Pivot Points
+computed off a fixed **90-day rolling window** (`High90D`/`Low90D`,
+piggybacking the window `History90D` already fetches -- no new
+yfinance call). Amber cross-highlight (`_highlight_pivot_crosses`,
+row-aware `Styler.apply(axis=1)`) on R1-R3 when Latest Price has
+reached/crossed above, S1-S3 when reached/crossed below -- same amber
+convention as V4.2's Ex-Date highlight. An `Action` column
+("view →") navigates to the Symbol Analysis drill-down page via
+`st.dataframe(..., on_select="rerun", selection_mode="single-cell")`
++ `st.switch_page(..., query_params=...)` -- **not** a `LinkColumn`,
+which was tried first and confirmed broken by this app's auth gate (a
+`LinkColumn` href is a real `<a>` tag inside the grid's own iframe, so
+clicking it triggers a full browser navigation, blowing away session
+state and never reaching `st.navigation()`'s router since the auth
+check's `st.stop()` runs first).
+
+**Symbol Analysis, a 5-zone redesign** (`app_pages/symbol_analysis.py`
++ `app_pages/components/trendline_chart/`, reached via Monitor Stocks'
+"view" cell or directly from a new "Analysis" sidebar group):
+
+- **Zone 1** -- category filter (reusing Monitor Stocks' own
+  Dividend/Growth/Others vocabulary) -> symbol picker (skipped when
+  arriving via `?symbol=`) -> a stats row (Latest Price, Cost/Sh,
+  Shares, Unrealized $, Unrealized %, the last two using Monitor
+  Stocks' own `delta_color="off"` cross-reference convention).
+- **Zone 2** -- three independent controls, TradingView-named:
+  **Chart type** (Candlestick/Heikin Ashi/Line), **Interval** (Day/
+  Week/Month -- what one bar represents; "minute" deliberately not
+  offered, since this app only ever fetches daily OHLC), and
+  **Timeline** (1M/3M/6M/YTD/1Y/2Y/All -- how much history is shown).
+  A 5-year `HISTORY_DAYS` fetch covers every Timeline option in one
+  network call; "All" means the full ~5-year fetch, not literally
+  every day since the symbol started trading.
+- **Zone 3** -- the chart itself (`trendline_chart` custom component,
+  `lightweight-charts` under a hand-written Streamlit postMessage
+  bridge, same technique as a sibling standalone project's
+  `lab_chart/app.js`): draggable R1-R3/S1-S3 price lines (Pivot is
+  always locked -- it's a fact, not a target), a non-draggable Latest
+  Price reference line, per-level **×** delete buttons (real
+  positioned DOM overlays, kept in sync via `requestAnimationFrame`
+  since the library has no "price scale changed" event to hook), an
+  **MA 50/100/200** overlay (always real Close, never Heikin
+  Ashi-smoothed), and Show R/S / Show Latest / Show Cost/Sh / **Lock
+  R/S levels** checkboxes (lock blocks dragging only -- delete stays
+  live, since removing a level is always deliberate). Manual
+  number-input editing (7 fields, pre-filled from the auto-calculated
+  values) stays alongside dragging as a keyboard-accessible
+  alternative. Zoom/pan/crosshair/axis-drag-to-stretch are native
+  `lightweight-charts` behavior, no extra code. **R/S levels follow
+  the selected Timeline's real High/Low**, not a fixed window --
+  switching Timeline genuinely recomputes the levels, diverging from
+  Monitor Stocks' table (which keeps a fixed 90-day window by design).
+  Drag/delete/hit-testing use the Pointer Events API with
+  `setPointerCapture`, not raw mouse events on `window` -- Streamlit's
+  `declare_component` always iframe-isolates a component, so a fast
+  drag whose release lands outside the iframe can silently miss a
+  plain `mouseup` listener, leaving the drag permanently stuck. (This
+  exact bug was first found and fixed in the design-mockup Artifact,
+  which is *also* iframe-rendered for the same reason -- porting the
+  fix into the real component preemptively, rather than waiting to
+  hit it live, once the shared root cause was recognized.)
+- **Zone 4** -- a Stochastic oscillator (`%K`/`%D`, standard 14/3
+  settings), a second `lightweight-charts` instance inside the same
+  component, time-axis-synced to the main chart both ways. Always real
+  OHLC, resampled to the selected Interval, never Heikin Ashi-smoothed.
+- **Zone 5** -- a Level/Price/Total P/L/% table (Total P/L = "if price
+  reached this level and I sold my current position there," scaled by
+  a **% to sell** slider + number input + a "= N of M shares" readout;
+  % is per-share and doesn't scale with the simulator). Live BUY/SELL
+  highlight reuses Monitor Stocks' own row-aware Styler technique --
+  this **is** the BUY/HOLD/SELL signal (originally scoped as a
+  separate badge, resolved as a table highlight instead: richer than a
+  flat 3-tier label, since it lights up per-level rather than
+  collapsing a deep cross into the same verdict as a shallow one).
+  Each R/S row also shows a touch count ("R1 (4 touches)") -- a rough
+  strength indicator (`count_touches`, floored at 2, 1.2% tolerance --
+  a first-pass heuristic carried over from the mockup, not
+  independently tuned against real data).
+
+**Levels persist to a new `trendline_levels` table** (one row per
+symbol, `is_override` flag distinguishing "auto-calculated, last
+seen" from "user deliberately moved/typed this"), upserted on every
+meaningful render -- not because notifications are being built now,
+but so that future feature doesn't need this page rebuilt to support
+it. Scoped to symbol only, not per-Timeline: reflects "the levels last
+viewed for this symbol," which is what a future notification checker
+would scan, not a per-Timeline history.
+
+### Implementation
+
+- **`core/calculations.py`**: `compute_pivot_points` (existing,
+  precision-fixed as above), `compute_stochastic_oscillator`,
+  `compute_moving_average`, `resample_ohlc` (Day/Week/Month via
+  pandas' own `.resample()`), `to_heikin_ashi` (recursive, a plain
+  Python loop -- genuinely sequential, not vectorizable), and
+  `count_touches`.
+- **`core/db.py`**: `trendline_levels` table,
+  `save_trendline_levels()`/`fetch_trendline_levels()`, matching
+  `set_symbol_type()`/`fetch_symbol_types()`'s upsert pattern exactly.
+- **`core/market_data.py`**: `fetch_stock_profile()` gained
+  `High90D`/`Low90D` (aggregates of the already-fetched 90-day
+  history, no new call); new `fetch_price_history(symbol, days)` for
+  the drill-down page's own longer, single-symbol OHLC fetch.
+- **`app_pages/monitor_stocks.py`**: Trendline tab + Overview
+  superset columns, `_highlight_pivot_crosses`, the `Action`
+  cell-selection navigation.
+- **`app_pages/symbol_analysis.py`**: the 5-zone page, new "Analysis"
+  sidebar group (`dashboard_app.py`).
+- **`app_pages/components/trendline_chart/index.html` +
+  `trendline_chart_component.py`**: the chart component described
+  above. Returns `{"action": "drag", "levels": {...}}` or
+  `{"action": "delete", "name": "R1"}` (or `None` most reruns) --
+  Python owns all state (visibility/lock/deleted levels/overrides),
+  the component is a renderer plus a drag/delete event source, not an
+  independent state holder.
+
+### Testing and verification
+
+273 tests passing (`compute_pivot_points`'s existing suite plus new
+coverage for `compute_stochastic_oscillator`, `compute_moving_average`,
+`resample_ohlc`, `to_heikin_ashi`, `count_touches`, and
+`trendline_levels`'s save/fetch, including a regression test locking
+in the floating-point precision fix using AIQ's real
+High/Low/Pivot values). `py_compile` on every changed file; JS syntax
+verified via Node's `new Function()` on the component's script.
+Real-data smoke tests (outside Streamlit, against live Turso holdings
++ live yfinance data, not just synthetic unit-test numbers) run the
+full pipeline -- Pivot Points, MA, Stochastic, touch counts, Heikin
+Ashi, Interval resampling, and a real `trendline_levels` DB
+round-trip -- across 6 real held symbols and every Timeline x
+Interval x Chart Type combination; this is what caught the AIQ
+precision bug in the first place. Local dev server (port 8502)
+started clean on every change. Not independently verified: an actual
+browser click-through of the finished page (handed to the user as
+this feature's own UI test, same as every other version's manual
+verification step).
+
+### Considered and explicitly deferred
+
+**"Line" chart type doesn't get its own distinct visual treatment
+beyond a straight Close-price line** -- built as specified, no further
+polish (e.g. area fill) requested.
+
+**Notification delivery itself** -- `trendline_levels` establishes the
+durable storage a future price-crossed-a-level checker would read
+from; the checker/scheduler/delivery mechanism is out of scope here.
+
+**New/prospective (not-yet-held) stock support** -- raised and
+designed early (Pivot = Latest Price for an unheld symbol), then
+explicitly dropped: "just focus on holding stocks in portfolios for
+now, not new stock." The existing `if position_row.empty: st.stop()`
+guard is unchanged.
+
+**Per-Timeline level history in `trendline_levels`** -- the schema
+is one row per symbol; a Timeline switch overwrites that row with
+whatever's currently shown, rather than keeping a separate saved set
+per Timeline. Revisit if the future notification feature turns out to
+need Timeline-specific watching.
+
+**Overview's duplicate "Cost/Sh" columns** -- Overview's original,
+pre-existing `Avg Cost` column (labeled "Cost/Sh" via its own
+long-standing `column_config`) now sits alongside the Trendline
+columns' `Pivot` (also relabeled "Cost/Sh", since `Pivot = Avg Cost`
+exactly). Both hold identical values, so not factually wrong, just
+visually redundant -- flagged, not resolved.
+
+## V4.4.1: Reference Line Consolidation
+
+### Context
+
+After V4.4 shipped (Pivot Points R1-R3/S1-S3, Zones 1-5), the Symbol
+Analysis chart grew three more overlays in quick succession, each real
+and independently validated: a fragment-scoping fix for the
+double-rerun-per-drag pattern (`@st.fragment` + `st.rerun(scope="fragment")`,
+after discovering Streamlit fragments can't render widgets into
+externally-created containers -- forced Chart Type/Interval/Timeline
+into the same fragment as the toggle controls, a documented tradeoff);
+UI polish (removed manual number-input level editing in favor of
+drag-only + Reset/Restore, MA 100 default-on, Timeline default YTD); a
+TradingView-style single-row toolbar (from a draft mockup the user
+reviewed and gave feedback on before real implementation); a swing-based
+diagonal **Trend Line** overlay (`find_swing_points`/
+`compute_swing_trend_lines` -- connects the 2 most recent confirmed
+swing highs/lows); horizontal **S/R Zones** (`cluster_price_levels`/
+`compute_horizontal_sr_zones` -- clusters repeated swing highs/lows,
+top 2 per side); and a **Nearest Resistance/Support** readout
+(`find_nearest_levels`).
+
+A real bug was found and fixed along this arc via the user's own
+screenshots (not synthetic tests): the Trend Line looked visually
+identical across every Timeline, because swing detection used a fixed
+window (3) -- "2 most recent swings" trivially favored the same short-
+term squiggles regardless of how wide the Timeline's search range was.
+Fixed by scaling the window with how many bars are actually in the
+selected Timeline (`min(25, max(3, bars_in_range // 25))`), reused by
+every swing-based feature afterward so the bug couldn't recur.
+
+By the time Nearest R/S shipped, the chart had **four** separate line
+concepts stacked on top of each other (Pivot Points anchored to Cost/Sh,
+diagonal Trend Line, clustered S/R Zones, plus the readout) -- reported
+back by the user as "I don't think that was what I want" immediately
+after testing it live. Discussed item-by-item (a 10-point list covering
+selection logic, manual editing, persistence, and UI); the real ask was
+a **single, consolidated** line concept, not a 5th feature added on top.
+
+### Design decisions
+
+**One concept -- "Reference Lines" -- replaces Pivot Points R1-R3/S1-S3,
+Trend Line, and S/R Zones entirely** on the Symbol Analysis chart (old
+code commented out in `trendline_chart/index.html`, not deleted). A
+Reference Line is a confirmed swing high/low (reusing
+`find_swing_points`) selected by **proximity to current price** --
+resistance candidates are swing highs above `latest_price`, support
+candidates are swing lows below it, each sorted nearest-first and
+capped at 2 per side (`compute_reference_lines`). A side with nothing
+nearby (e.g. price at a new high) simply has no line -- a free
+consequence of the above/below split, not a special case. Cost/Sh
+(`avg_cost`) stops being a computed "Pivot" level and is passed to the
+chart directly as its own fact, alongside Latest Price -- both
+non-draggable.
+
+**Side is derived live from price, never stored.** A line's color
+(red/green) and its Zone 5 table classification come from `price vs.
+latest_price` at render/drag time, not a fixed field -- so a line
+dragged (or that the market moves) across `latest_price` recolors
+correctly with no special-casing, and incidentally reproduces a real
+TA principle for free (a broken resistance becomes support). One
+consequence embraced deliberately: a "reached" highlight state is
+structurally impossible under this rule (the instant price reaches a
+line, it reclassifies), so Zone 5's table highlights the *nearest*
+line on each side instead of trying to detect a crossing.
+
+**Captured at a moment, not auto-recomputed on navigation** -- revised
+after the user flagged that keying state by `(symbol, Timeline,
+Interval)` meant simply browsing to a different Timeline silently
+swapped in a new set. State is keyed by **symbol only**; switching
+Chart type/Interval/Timeline only changes what the chart displays, never
+the captured lines. A **"Regenerate"** button re-runs
+`compute_reference_lines()` against whichever Timeline/Interval is
+selected *at that moment* and overwrites the whole set -- the deliberate
+capture action. First-ever view of a symbol (nothing captured yet, in
+session state or the DB) auto-runs Regenerate once so the chart isn't
+empty; every change after that is explicit.
+
+**Full manual editing**: drag (id-keyed, not name-keyed, since lines
+are created/deleted freely -- a small per-symbol id counter in session
+state), delete (×, reusing the existing per-level button/positioning
+mechanism), and **create** (new -- a "+ Add Reference Line" button
+places one 2% above current price, dragged into place; deliberately a
+button rather than click-on-chart, to reuse the existing drag protocol
+instead of building new click-to-price coordinate handling).
+
+**Persistence: a new `reference_lines` table** (one row per line,
+variable count, keyed by symbol only -- not the fixed 7-column shape
+`trendline_levels` used), `captured_timeline`/`captured_interval`
+stored as informational-only metadata (a caption, not part of the
+identity). `trendline_levels` and its functions are left in place,
+unused, rather than migrated or dropped.
+
+### Implementation
+
+- **`core/calculations.py`**: `compute_reference_lines(dates, high, low,
+  latest_price, window, search_from, max_per_side=2)`. `find_swing_points`,
+  `compute_swing_trend_lines`, `cluster_price_levels`,
+  `compute_horizontal_sr_zones`, `find_nearest_levels` all stay, unused
+  by `symbol_analysis.py` after this change.
+- **`core/db.py`**: `reference_lines` table, `save_reference_lines()`/
+  `fetch_reference_lines()`.
+- **`app_pages/components/trendline_chart/index.html`**: one dynamic-count
+  price-line renderer (id-keyed drag/delete, color + price-tag %
+  computed live from price vs. latest price) replaces the fixed-name
+  Pivot Points renderer, the Trend Line series, and the S/R Zones
+  renderer -- all three kept as one commented-out block at the bottom of
+  the file, not deleted.
+- **`app_pages/components/trendline_chart_component.py`**: `levels`
+  (dict)/`trend_lines`/`show_trend_lines`/`sr_zones`/`show_sr_zones`
+  params replaced with `reference_lines` (list)/`show_reference_lines`/
+  `cost_per_share`.
+- **`app_pages/symbol_analysis.py`**: toolbar down to 7 columns (Chart
+  type/Interval/Timeline/Levels popover/Reference Lines toggle/Lock/
+  Indicators); Zone 5's P/L table rewritten to iterate the Reference
+  Line list instead of the fixed R3..S3 rows (built in the same round
+  as the chart/toolbar rewrite once it became clear the table couldn't
+  avoid touching the same state without crashing).
+
+### Testing and verification
+
+299 tests passing (6 new for `compute_reference_lines`). `py_compile`
++ Node `new Function()` JS syntax check on every change. Real-data
+smoke tests against real Turso holdings + live yfinance data at each
+stage, including a printed side-by-side comparison of the new
+proximity-based selection against the old Trend Line/S/R Zones output
+before any UI depended on it. Streamlit's `AppTest` harness ran the
+actual page script (not just the pure calculation functions) against 5
+real symbols with zero exceptions, including specifically re-testing
+the "load an already-captured set back from the DB" path, not just
+first-time auto-capture -- caught and fixed one real inconsistency this
+way (the DB-loaded and freshly-captured paths formatted the "captured
+on" date differently).
+
+Two real bugs found via live user testing after all automated checks
+passed, both fixed and re-verified:
+- **Every drag caused a visible whole-toolbar flash.** Root cause:
+  `save_reference_lines()` did a `DELETE` + a separate `executemany`
+  INSERT, each its own network round trip to the remote Turso dev
+  instance (~1.6s combined) -- and this write runs synchronously inside
+  the same fragment rerun that redraws the chart after a drag. Measured
+  directly against the real database before/after; fixed by batching
+  both statements into one `executescript()` call (~500ms, matching the
+  old single-upsert `save_trendline_levels()` speed). Values are inlined
+  as escaped SQL literals rather than parameter-bound, since
+  `executescript()` doesn't support `?` binding across statements --
+  safe here since every inlined value is either a computed float/int or
+  one of a small fixed set of internal Timeline/Interval labels, never
+  freeform user text; verified with a value containing an embedded
+  quote.
+- **Clicking a line's × did nothing.** The delete button sits directly
+  on top of its line, and the chart's drag-detection listener runs in
+  the pointerdown event's *capture* phase -- which fires before the
+  click ever reaches the button's own listener. The drag handler was
+  finding the line underneath the button, calling `stopPropagation()`,
+  and swallowing the click before delete ever ran. This bug existed
+  identically in the original Pivot Points delete buttons too (same
+  architecture), just never specifically caught before. Fixed by
+  checking `event.target.closest(".level-delete-btn")` first and
+  stepping aside if the click actually landed on a delete button.
+
+### Considered and explicitly deferred
+
+- **A portfolio-wide summary table** ("reference column... next focus,"
+  so every held symbol's nearest Reference Line is scannable in one
+  table, likely on Monitor Stocks) -- explicitly requested as a later
+  step, not this round. `fetch_reference_lines()` is what it would
+  query.
+- **Notification delivery** -- unchanged from V4.4's own deferred note;
+  `reference_lines` (superseding `trendline_levels` for this purpose)
+  is the durable storage a future price-crossed-a-line checker would
+  read from.
+- **Minimum spacing between the 2 auto-selected candidates on a side**
+  -- discussed directly (a close pair could waste a slot on a
+  near-duplicate); explicitly kept simple (plain closest-N, no spacing
+  rule) per the user's own choice.
+
 ## Deferred / future
 
 - **Restore from a backup** -- see V2.3's "Considered and explicitly

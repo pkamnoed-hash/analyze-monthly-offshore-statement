@@ -4,12 +4,24 @@ import pytest
 from core.calculations import (
     blended_dividends,
     blended_realized_pl,
+    cluster_price_levels,
     compute_current_positions,
     compute_fifo_realized_pl,
     compute_holding_period_start,
+    compute_horizontal_sr_zones,
+    compute_moving_average,
+    compute_pivot_points,
     compute_realized_pl,
+    compute_reference_lines,
     compute_roi,
+    compute_stochastic_oscillator,
+    compute_swing_trend_lines,
+    count_touches,
     estimate_sell_realized_pl,
+    find_nearest_levels,
+    find_swing_points,
+    resample_ohlc,
+    to_heikin_ashi,
 )
 
 
@@ -499,3 +511,529 @@ class TestComputeRoi:
         roi_pct, annualized = compute_roi(investment_gain=-500, capital_base=10000, period_days=365)
         assert roi_pct == pytest.approx(-5.0)
         assert annualized == pytest.approx(-5.0, abs=0.1)
+
+
+class TestComputePivotPoints:
+    def test_matches_hand_computed_levels(self):
+        # High 110, Low 90, Pivot 100 -> Pivot passed straight through, clean round numbers.
+        result = compute_pivot_points(high=110.0, low=90.0, pivot=100.0)
+        assert result["Pivot"] == pytest.approx(100.0)
+        assert result["R1"] == pytest.approx(110.0)
+        assert result["S1"] == pytest.approx(90.0)
+        assert result["R2"] == pytest.approx(120.0)
+        assert result["S2"] == pytest.approx(80.0)
+        assert result["R3"] == pytest.approx(130.0)
+        assert result["S3"] == pytest.approx(70.0)
+
+    def test_wide_range_relative_to_price_gives_negative_s3(self):
+        # Real shape from a volatile small-cap (RKLB-like): 90-day High far
+        # above Low relative to Pivot -- S3 going negative is a genuine
+        # output of the formula, not a bug, so this locks that behavior in
+        # rather than treating it as a regression to "fix" later.
+        result = compute_pivot_points(high=151.0, low=58.2, pivot=81.75)
+        assert result["S3"] < 0
+        assert result["S3"] == pytest.approx(58.2 - 2 * (151.0 - 81.75))
+
+    def test_missing_high_low_leaves_pivot_valid_but_derived_levels_nan(self):
+        # Matches the real unresolved-symbol shape: market_data.fetch_stock_profile
+        # sets High90D/Low90D to NaN together on a fetch failure, but Avg Cost (the
+        # pivot basis passed in here) comes from trade history, not the market
+        # fetch -- unaffected. Pivot stays a real number (your own cost is still
+        # known even when the market data isn't); every level that needs High/Low
+        # goes NaN since there's no range to build from. A real improvement over
+        # the old (High+Low+Close)/3 average, which would have poisoned Pivot too.
+        result = compute_pivot_points(high=float("nan"), low=float("nan"), pivot=100.0)
+        assert result["Pivot"] == pytest.approx(100.0)
+        assert pd.isna(result["R1"])
+        assert pd.isna(result["S1"])
+        assert pd.isna(result["R2"])
+        assert pd.isna(result["S2"])
+        assert pd.isna(result["R3"])
+        assert pd.isna(result["S3"])
+
+    def test_nan_pivot_propagates_to_every_derived_level(self):
+        result = compute_pivot_points(high=110.0, low=90.0, pivot=float("nan"))
+        assert all(pd.isna(v) for v in result.values())
+
+    def test_cost_basis_below_entire_trading_range_gets_clamped_and_resorted(self):
+        # Real shape confirmed on RKLB: Pivot (Avg Cost) decoupled from High/Low means
+        # it can sit entirely below (or above) the 90-day range. Raw formula: R1 = 2*50
+        # - 100 = 0, which is BELOW Pivot (50) -- nonsensical as "resistance." Clamping
+        # floors it at Pivot, then resorting (R1<=R2<=R3, S1>=S2>=S3) fixes the internal
+        # ordering too, which clamping alone wouldn't -- the 3 raw R candidates here
+        # (0, 150, 100) are out of order even before considering the clamp.
+        result = compute_pivot_points(high=200.0, low=100.0, pivot=50.0)
+        assert result["Pivot"] == pytest.approx(50.0)
+        assert result["R1"] == pytest.approx(50.0)  # clamped to Pivot exactly
+        assert result["R2"] == pytest.approx(100.0)
+        assert result["R3"] == pytest.approx(150.0)
+        assert result["S1"] == pytest.approx(-50.0)
+        assert result["S2"] == pytest.approx(-100.0)
+        assert result["S3"] == pytest.approx(-200.0)
+
+    def test_ordering_invariant_always_holds(self):
+        # S3 <= S2 <= S1 <= Pivot <= R1 <= R2 <= R3, regardless of how Pivot relates to
+        # High/Low -- the guarantee this clamp+resort step exists to provide.
+        for high, low, pivot in [(110.0, 90.0, 100.0), (151.0, 58.2, 81.75), (200.0, 100.0, 50.0), (100.0, 90.0, 500.0)]:
+            result = compute_pivot_points(high=high, low=low, pivot=pivot)
+            ordered = [result["S3"], result["S2"], result["S1"], result["Pivot"], result["R1"], result["R2"], result["R3"]]
+            assert ordered == sorted(ordered)
+
+    def test_well_behaved_case_is_unaffected_by_clamping(self):
+        # Pivot already between Low and High -- clamping/resorting should be a no-op,
+        # producing the exact same values as the raw classic formula.
+        result = compute_pivot_points(high=110.0, low=90.0, pivot=100.0)
+        assert result["R1"] == pytest.approx(110.0)
+        assert result["R2"] == pytest.approx(120.0)
+        assert result["R3"] == pytest.approx(130.0)
+        assert result["S1"] == pytest.approx(90.0)
+        assert result["S2"] == pytest.approx(80.0)
+        assert result["S3"] == pytest.approx(70.0)
+
+    def test_pivot_is_passed_through_unchanged_not_averaged_with_high_low(self):
+        # Deliberately NOT the classic floor-trader (High+Low+Close)/3 average --
+        # Monitor Stocks relies on Pivot being exactly whatever basis it passed in
+        # (Avg Cost), not something recomputed from High/Low.
+        result = compute_pivot_points(high=200.0, low=50.0, pivot=90.0)
+        assert result["Pivot"] == pytest.approx(90.0)
+
+    def test_vectorizes_over_pandas_series(self):
+        high = pd.Series([110.0, 220.0])
+        low = pd.Series([90.0, 180.0])
+        pivot = pd.Series([100.0, 200.0])
+        result = compute_pivot_points(high, low, pivot)
+        assert isinstance(result["Pivot"], pd.Series)
+        assert result["Pivot"].tolist() == pytest.approx([100.0, 200.0])
+        assert result["R1"].tolist() == pytest.approx([110.0, 220.0])
+
+    def test_two_clamped_candidates_produce_an_exactly_identical_mid_not_a_1ulp_drift(self):
+        # Regression: real AIQ data (High/Low over a real 1M Timeline window, Avg Cost as
+        # Pivot) produced R1 == 47.43141522814266 (== Pivot, correctly clamped) and R2 (the
+        # "mid") == 47.43141522814265 -- one ULP below Pivot, breaking the S3<=...<=R3
+        # ordering invariant by a sub-cent amount. Root cause: the old sum(candidates) -
+        # min - max formula for "mid" doesn't reconstruct an exact float when two of the
+        # three raw candidates clamp to precisely the same `pivot` value. These are the
+        # exact real values that reproduced it -- caught by a real-data smoke test, not a
+        # synthetic case, since round test numbers don't expose this floating-point collision.
+        high, low, pivot = 64.16999816894531, 55.91999816894531, 47.43141522814266
+        result = compute_pivot_points(high=high, low=low, pivot=pivot)
+        ordered = [result["S3"], result["S2"], result["S1"], result["Pivot"], result["R1"], result["R2"], result["R3"]]
+        assert ordered == sorted(ordered)
+        # Both R1 and R2 clamp to Pivot here -- should be bit-exactly Pivot, not "close to" it.
+        assert result["R1"] == pivot
+        assert result["R2"] == pivot
+
+
+def make_ohlc(closes, *, start="2026-01-01"):
+    """Build a Date/Open/High/Low/Close DataFrame (fetch_price_history's own shape) from
+    a plain list of closes -- Open=prev close (or same on day 1), High/Low = Open/Close
+    +/- 1, so every bar has a real (non-degenerate) range without needing to spell out
+    all four fields by hand for every test."""
+    dates = pd.date_range(start, periods=len(closes), freq="D")
+    opens = [closes[0]] + closes[:-1]
+    df = pd.DataFrame({
+        "Date": dates,
+        "Open": opens,
+        "Close": closes,
+    })
+    df["High"] = df[["Open", "Close"]].max(axis=1) + 1
+    df["Low"] = df[["Open", "Close"]].min(axis=1) - 1
+    return df[["Date", "Open", "High", "Low", "Close"]]
+
+
+class TestComputeStochasticOscillator:
+    def test_first_k_period_minus_one_rows_are_nan(self):
+        close = pd.Series([float(i) for i in range(1, 21)])
+        result = compute_stochastic_oscillator(close + 1, close - 1, close, k_period=14, d_period=3)
+        assert result["%K"].iloc[:13].isna().all()
+        assert result["%K"].iloc[13:].notna().all()
+
+    def test_close_at_top_of_range_gives_k_near_100(self):
+        high = pd.Series([100.0] * 14)
+        low = pd.Series([90.0] * 14)
+        close = pd.Series([90.0] * 13 + [100.0])
+        result = compute_stochastic_oscillator(high, low, close, k_period=14, d_period=3)
+        assert result["%K"].iloc[-1] == pytest.approx(100.0)
+
+    def test_close_at_bottom_of_range_gives_k_near_0(self):
+        high = pd.Series([100.0] * 14)
+        low = pd.Series([90.0] * 14)
+        close = pd.Series([100.0] * 13 + [90.0])
+        result = compute_stochastic_oscillator(high, low, close, k_period=14, d_period=3)
+        assert result["%K"].iloc[-1] == pytest.approx(0.0)
+
+    def test_flat_window_reads_as_midpoint_not_a_divide_by_zero_error(self):
+        high = pd.Series([100.0] * 14)
+        low = pd.Series([100.0] * 14)
+        close = pd.Series([100.0] * 14)
+        result = compute_stochastic_oscillator(high, low, close, k_period=14, d_period=3)
+        assert result["%K"].iloc[-1] == pytest.approx(50.0)
+
+    def test_percent_d_is_a_moving_average_of_percent_k(self):
+        close = pd.Series([float(i) for i in range(1, 21)])
+        result = compute_stochastic_oscillator(close + 1, close - 1, close, k_period=14, d_period=3)
+        k, d = result["%K"], result["%D"]
+        assert d.iloc[15] == pytest.approx(k.iloc[13:16].mean())
+
+
+class TestCountTouches:
+    def test_bars_crossing_through_the_level_count(self):
+        high = pd.Series([105.0, 106.0, 95.0])
+        low = pd.Series([95.0, 104.0, 90.0])
+        # Bar 0's range (95-105) crosses 100; bar 1 (104-106) doesn't; bar 2 (90-95) doesn't.
+        assert count_touches(high, low, 100.0) == 2  # floored at 2 even though only 1 real touch
+
+    def test_near_misses_within_tolerance_count_as_touches(self):
+        high = pd.Series([101.1, 101.1, 101.1])
+        low = pd.Series([100.5, 100.5, 100.5])
+        # 101.1 is within 1.2% of 100 (tolerance = 1.2), so every bar's High counts.
+        assert count_touches(high, low, 100.0) == 3
+
+    def test_floors_at_two_when_nothing_real_is_close(self):
+        high = pd.Series([200.0, 205.0])
+        low = pd.Series([190.0, 195.0])
+        assert count_touches(high, low, 100.0) == 2
+
+    def test_larger_tolerance_widens_the_count(self):
+        # 4 bars, each 8-10% away from the level -- a tight tolerance floors at 2 (nothing
+        # real qualifies), a loose tolerance picks up the real near-misses instead.
+        high = pd.Series([108.0, 109.0, 110.0, 108.5])
+        low = pd.Series([107.0, 108.0, 109.0, 107.5])
+        assert count_touches(high, low, 100.0, tolerance_pct=0.01) == 2  # floored, nothing within 1%
+        assert count_touches(high, low, 100.0, tolerance_pct=0.15) == 4  # all 4 within 15%
+
+
+class TestComputeMovingAverage:
+    def test_matches_hand_computed_average(self):
+        close = pd.Series([1.0, 2.0, 3.0, 4.0, 5.0])
+        result = compute_moving_average(close, period=3)
+        assert result.iloc[:2].isna().all()
+        assert result.iloc[2] == pytest.approx(2.0)
+        assert result.iloc[3] == pytest.approx(3.0)
+        assert result.iloc[4] == pytest.approx(4.0)
+
+    def test_period_longer_than_series_is_all_nan_not_an_error(self):
+        close = pd.Series([1.0, 2.0, 3.0])
+        result = compute_moving_average(close, period=200)
+        assert result.isna().all()
+
+
+class TestResampleOhlc:
+    def test_day_interval_returns_an_unmutated_copy(self):
+        daily = make_ohlc([10.0, 11.0, 12.0])
+        result = resample_ohlc(daily, "D")
+        pd.testing.assert_frame_equal(result, daily)
+        result.loc[0, "Close"] = 999.0
+        assert daily.loc[0, "Close"] == pytest.approx(10.0)  # caller's frame untouched
+
+    def test_week_interval_aggregates_ohlc_correctly(self):
+        # 14 daily closes -> should collapse into weekly buckets whose Open/High/Low/Close
+        # are the standard first/max/min/last aggregation over each bucket's member days.
+        daily = make_ohlc([float(i) for i in range(1, 15)], start="2026-01-05")  # a Monday
+        weekly = resample_ohlc(daily, "W")
+        assert len(weekly) < len(daily)
+        assert weekly["Close"].iloc[-1] == pytest.approx(daily["Close"].iloc[-1])
+        assert weekly["Open"].iloc[0] == pytest.approx(daily["Open"].iloc[0])
+        assert weekly["High"].sum() <= daily["High"].sum()  # fewer, wider bars
+
+    def test_month_interval_aggregates_ohlc_correctly(self):
+        daily = make_ohlc([float(i) for i in range(1, 61)], start="2026-01-01")  # ~2 months
+        monthly = resample_ohlc(daily, "M")
+        assert len(monthly) in (2, 3)
+        assert monthly["Close"].iloc[-1] == pytest.approx(daily["Close"].iloc[-1])
+
+    def test_unknown_interval_raises(self):
+        daily = make_ohlc([10.0, 11.0])
+        with pytest.raises(ValueError):
+            resample_ohlc(daily, "min")
+
+
+class TestToHeikinAshi:
+    def test_first_bar_open_is_seeded_from_real_open_close_midpoint(self):
+        daily = make_ohlc([10.0, 11.0, 12.0])
+        ha = to_heikin_ashi(daily)
+        expected_open = (daily["Open"].iloc[0] + daily["Close"].iloc[0]) / 2
+        assert ha["Open"].iloc[0] == pytest.approx(expected_open)
+
+    def test_close_is_ohlc_average_of_the_real_bar(self):
+        daily = make_ohlc([10.0, 11.0, 12.0])
+        ha = to_heikin_ashi(daily)
+        row = daily.iloc[1]
+        expected_close = (row.Open + row.High + row.Low + row.Close) / 4
+        assert ha["Close"].iloc[1] == pytest.approx(expected_close)
+
+    def test_second_bar_open_is_midpoint_of_first_ha_bar(self):
+        daily = make_ohlc([10.0, 11.0, 12.0])
+        ha = to_heikin_ashi(daily)
+        expected_open = (ha["Open"].iloc[0] + ha["Close"].iloc[0]) / 2
+        assert ha["Open"].iloc[1] == pytest.approx(expected_open)
+
+    def test_high_low_always_contain_the_ha_body(self):
+        daily = make_ohlc([10.0, 14.0, 9.0, 20.0, 5.0])
+        ha = to_heikin_ashi(daily)
+        for i in range(len(ha)):
+            assert ha["Low"].iloc[i] <= min(ha["Open"].iloc[i], ha["Close"].iloc[i])
+            assert ha["High"].iloc[i] >= max(ha["Open"].iloc[i], ha["Close"].iloc[i])
+
+    def test_preserves_row_count_and_date_column(self):
+        daily = make_ohlc([10.0, 11.0, 12.0, 13.0])
+        ha = to_heikin_ashi(daily)
+        assert len(ha) == len(daily)
+        assert list(ha["Date"]) == list(daily["Date"])
+
+
+class TestFindSwingPoints:
+    def test_confirms_a_swing_high_at_the_peak_of_a_symmetric_v(self):
+        high = pd.Series([1.0, 2.0, 3.0, 4.0, 5.0, 4.0, 3.0, 2.0, 1.0])
+        low = pd.Series([0.0] * 9)  # irrelevant to this assertion
+        is_high, _ = find_swing_points(high, low, window=3)
+        assert list(is_high[is_high]) == [True]
+        assert is_high.idxmax() == 4  # the peak, value 5.0
+
+    def test_confirms_a_swing_low_at_the_bottom_of_a_symmetric_v(self):
+        high = pd.Series([0.0] * 9)  # irrelevant to this assertion
+        low = pd.Series([10.0, 9.0, 8.0, 7.0, 6.0, 7.0, 8.0, 9.0, 10.0])
+        _, is_low = find_swing_points(high, low, window=3)
+        confirmed = low.index[is_low]
+        assert list(confirmed) == [4]  # the trough, value 6.0
+
+    def test_strictly_monotonic_series_has_no_confirmed_swing_highs(self):
+        # Every interior bar's local max is always the bar just ahead of it, never itself --
+        # a strictly increasing run never produces a confirmed local extreme.
+        high = pd.Series([float(i) for i in range(1, 10)])
+        low = pd.Series([0.0] * 9)
+        is_high, _ = find_swing_points(high, low, window=1)
+        assert not is_high.any()
+
+    def test_most_recent_window_bars_are_never_confirmed(self):
+        # Even a genuine peak right at the tail end can't be confirmed -- not enough
+        # lookahead yet. Real trend lines don't chase the last candle.
+        high = pd.Series([1.0, 2.0, 3.0, 10.0, 3.0, 2.0])  # peak at index 3, only 2 bars after it
+        low = pd.Series([0.0] * 6)
+        is_high, _ = find_swing_points(high, low, window=3)
+        assert not is_high.any()
+
+
+class TestComputeSwingTrendLines:
+    def test_connects_the_two_most_recent_swing_highs_and_lows(self):
+        # window=1 zigzags -- highs peak at indices 1/3/5/7 (values 2/3/4/2), lows trough at
+        # the same indices (values 8/7/6/8). The two MOST RECENT of each: highs at
+        # index5 (Jan6, 4.0) and index7 (Jan8, 2.0); lows at index5 (Jan6, 6.0) and index7
+        # (Jan8, 8.0).
+        dates = pd.Series(pd.date_range("2026-01-01", periods=9, freq="D"))
+        high = pd.Series([1.0, 2.0, 1.0, 3.0, 1.0, 4.0, 1.0, 2.0, 1.0])
+        low = pd.Series([9.0, 8.0, 9.0, 7.0, 9.0, 6.0, 9.0, 8.0, 9.0])
+
+        result = compute_swing_trend_lines(dates, high, low, window=1)
+
+        assert result["resistance"] == [
+            {"time": "2026-01-06", "value": 4.0},
+            {"time": "2026-01-08", "value": 2.0},
+            {"time": "2026-01-09", "value": 1.0},  # extended: slope -1/day from the last 2 points
+        ]
+        assert result["support"] == [
+            {"time": "2026-01-06", "value": 6.0},
+            {"time": "2026-01-08", "value": 8.0},
+            {"time": "2026-01-09", "value": 9.0},  # extended: slope +1/day
+        ]
+
+    def test_fewer_than_two_swing_points_gives_none_not_an_error(self):
+        # Strictly monotonic -- zero confirmed swing highs.
+        dates = pd.Series(pd.date_range("2026-01-01", periods=9, freq="D"))
+        high = pd.Series([float(i) for i in range(1, 10)])
+        low = pd.Series([float(i) for i in range(1, 10)])
+        result = compute_swing_trend_lines(dates, high, low, window=1)
+        assert result["resistance"] is None
+        assert result["support"] is None
+
+    def test_exactly_one_swing_point_still_gives_none(self):
+        dates = pd.Series(pd.date_range("2026-01-01", periods=7, freq="D"))
+        high = pd.Series([1.0, 2.0, 3.0, 10.0, 3.0, 2.0, 1.0])  # single peak at index 3
+        low = pd.Series([0.0] * 7)
+        result = compute_swing_trend_lines(dates, high, low, window=1)
+        assert result["resistance"] is None
+
+    def test_search_from_restricts_eligible_swings_but_detects_with_full_context(self):
+        # Same zigzag as the main test above -- swing highs at index 1/3/5/7 (values
+        # 2/3/4/2, dates Jan2/Jan4/Jan6/Jan8).
+        dates = pd.Series(pd.date_range("2026-01-01", periods=9, freq="D"))
+        high = pd.Series([1.0, 2.0, 1.0, 3.0, 1.0, 4.0, 1.0, 2.0, 1.0])
+        low = pd.Series([0.0] * 9)
+
+        unrestricted = compute_swing_trend_lines(dates, high, low, window=1)
+        assert unrestricted["resistance"][1] == {"time": "2026-01-08", "value": 2.0}
+
+        # search_from=Jan7 excludes the swing at index5 (Jan6) -- only index7 (Jan8)
+        # remains eligible, fewer than 2, so the line drops to None even though swing
+        # DETECTION still ran with full context (index5 is still a real, confirmed swing
+        # point -- find_swing_points would report it True -- it's just not eligible to be
+        # picked as one of the "two most recent" for this search_from).
+        restricted = compute_swing_trend_lines(dates, high, low, window=1, search_from=dates.iloc[6])
+        assert restricted["resistance"] is None
+
+        # A cutoff after every real swing leaves zero eligible.
+        too_late = compute_swing_trend_lines(dates, high, low, window=1, search_from=dates.iloc[8])
+        assert too_late["resistance"] is None
+
+
+class TestClusterPriceLevels:
+    def test_groups_prices_within_tolerance_and_sorts_by_count_descending(self):
+        prices = [100.0, 100.5, 99.8, 200.0, 201.0]
+        result = cluster_price_levels(prices, tolerance_pct=0.02)
+        assert len(result) == 2
+        assert result[0]["count"] == 3
+        assert result[0]["price"] == pytest.approx(100.1)
+        assert result[1]["count"] == 2
+        assert result[1]["price"] == pytest.approx(200.5)
+
+    def test_price_just_outside_tolerance_starts_a_new_cluster(self):
+        prices = [100.0, 103.0]  # 3% apart
+        result = cluster_price_levels(prices, tolerance_pct=0.01)  # 1% tolerance
+        assert len(result) == 2
+        assert all(c["count"] == 1 for c in result)
+
+    def test_empty_input_returns_empty_list(self):
+        assert cluster_price_levels([]) == []
+
+
+class TestComputeHorizontalSrZones:
+    def test_finds_resistance_clusters_from_repeated_swing_highs(self):
+        # Swing highs (window=1) at index 1/4/7 (~100/101/99 -- one cluster) and index
+        # 10/13 (~150/151 -- a second, weaker cluster). Low is strictly increasing, so
+        # (per TestFindSwingPoints) it produces zero confirmed swing lows.
+        dates = pd.Series(pd.date_range("2026-01-01", periods=15, freq="D"))
+        high = pd.Series([1.0, 100.0, 1.0, 1.0, 101.0, 1.0, 1.0, 99.0, 1.0, 1.0, 150.0, 1.0, 1.0, 151.0, 1.0])
+        low = pd.Series([float(i) for i in range(15)])
+
+        result = compute_horizontal_sr_zones(dates, high, low, window=1, tolerance_pct=0.02, max_per_side=2)
+
+        assert len(result["resistance"]) == 2
+        assert result["resistance"][0]["count"] == 3
+        assert result["resistance"][0]["price"] == pytest.approx(100.0)
+        assert result["resistance"][1]["count"] == 2
+        assert result["resistance"][1]["price"] == pytest.approx(150.5)
+        assert result["support"] == []
+
+    def test_max_per_side_trims_to_the_strongest_zones(self):
+        dates = pd.Series(pd.date_range("2026-01-01", periods=15, freq="D"))
+        high = pd.Series([1.0, 100.0, 1.0, 1.0, 101.0, 1.0, 1.0, 99.0, 1.0, 1.0, 150.0, 1.0, 1.0, 151.0, 1.0])
+        low = pd.Series([float(i) for i in range(15)])
+
+        result = compute_horizontal_sr_zones(dates, high, low, window=1, tolerance_pct=0.02, max_per_side=1)
+
+        assert len(result["resistance"]) == 1
+        assert result["resistance"][0]["count"] == 3  # the stronger cluster wins
+
+    def test_singleton_swings_are_not_returned_as_zones(self):
+        # Only ONE confirmed swing high anywhere -- never clusters with anything, so it
+        # shouldn't be returned as a "zone" (a zone means the same price was tested more
+        # than once; a lone swing is already covered by compute_swing_trend_lines).
+        dates = pd.Series(pd.date_range("2026-01-01", periods=7, freq="D"))
+        high = pd.Series([1.0, 2.0, 3.0, 100.0, 3.0, 2.0, 1.0])
+        low = pd.Series([float(i) for i in range(7)])
+        result = compute_horizontal_sr_zones(dates, high, low, window=1)
+        assert result["resistance"] == []
+
+    def test_search_from_restricts_eligible_swings(self):
+        dates = pd.Series(pd.date_range("2026-01-01", periods=15, freq="D"))
+        high = pd.Series([1.0, 100.0, 1.0, 1.0, 101.0, 1.0, 1.0, 99.0, 1.0, 1.0, 150.0, 1.0, 1.0, 151.0, 1.0])
+        low = pd.Series([float(i) for i in range(15)])
+
+        # Restrict to Jan10 onward -- excludes the ~100 cluster (index1/4/7, all before
+        # Jan10), leaving only the ~150 cluster (index10/13) eligible.
+        result = compute_horizontal_sr_zones(
+            dates, high, low, window=1, tolerance_pct=0.02, search_from=dates.iloc[9],
+        )
+        assert len(result["resistance"]) == 1
+        assert result["resistance"][0]["count"] == 2
+        assert result["resistance"][0]["price"] == pytest.approx(150.5)
+
+
+class TestFindNearestLevels:
+    def test_picks_the_closest_candidate_on_each_side(self):
+        candidates = [90.0, 95.0, 105.0, 110.0]
+        resistance, support = find_nearest_levels(100.0, candidates)
+        assert resistance == pytest.approx(105.0)
+        assert support == pytest.approx(95.0)
+
+    def test_empty_pool_gives_none_on_both_sides(self):
+        assert find_nearest_levels(100.0, []) == (None, None)
+
+    def test_only_candidates_above_leaves_support_none(self):
+        resistance, support = find_nearest_levels(100.0, [105.0, 110.0])
+        assert resistance == pytest.approx(105.0)
+        assert support is None
+
+    def test_only_candidates_below_leaves_resistance_none(self):
+        resistance, support = find_nearest_levels(100.0, [90.0, 95.0])
+        assert resistance is None
+        assert support == pytest.approx(95.0)
+
+    def test_candidate_exactly_at_latest_price_counts_as_neither(self):
+        # Already reached -- not "ahead to watch for" on either side.
+        resistance, support = find_nearest_levels(100.0, [100.0, 105.0, 95.0])
+        assert resistance == pytest.approx(105.0)
+        assert support == pytest.approx(95.0)
+
+
+class TestComputeReferenceLines:
+    def test_picks_swings_above_and_below_latest_price(self):
+        # One clear confirmed swing high (a V-shaped peak at index 3) above latest_price,
+        # one clear confirmed swing low (a V-shaped trough at index 3) below it.
+        dates = pd.Series(pd.date_range("2026-01-01", periods=7, freq="D"))
+        high = pd.Series([1.0, 2.0, 3.0, 130.0, 3.0, 2.0, 1.0])
+        low = pd.Series([50.0, 40.0, 30.0, 20.0, 30.0, 40.0, 50.0])
+
+        result = compute_reference_lines(dates, high, low, latest_price=100.0, window=1)
+
+        assert result["resistance"] == pytest.approx([130.0])
+        assert result["support"] == pytest.approx([20.0])
+
+    def test_new_high_gives_no_resistance_candidates(self):
+        # latest_price above every confirmed swing high -- nothing overhead to reference.
+        dates = pd.Series(pd.date_range("2026-01-01", periods=7, freq="D"))
+        high = pd.Series([1.0, 2.0, 3.0, 100.0, 3.0, 2.0, 1.0])
+        low = pd.Series([1.0, 0.5, 0.2, 0.1, 0.2, 0.5, 1.0])
+
+        result = compute_reference_lines(dates, high, low, latest_price=200.0, window=1)
+
+        assert result["resistance"] == []
+
+    def test_new_low_gives_no_support_candidates(self):
+        dates = pd.Series(pd.date_range("2026-01-01", periods=7, freq="D"))
+        high = pd.Series([10.0, 10.5, 11.0, 12.0, 11.0, 10.5, 10.0])
+        low = pd.Series([9.0, 8.0, 7.0, 1.0, 7.0, 8.0, 9.0])
+
+        result = compute_reference_lines(dates, high, low, latest_price=0.5, window=1)
+
+        assert result["support"] == []
+
+    def test_max_per_side_trims_to_the_closest_candidates(self):
+        dates = pd.Series(pd.date_range("2026-01-01", periods=15, freq="D"))
+        high = pd.Series([1.0, 100.0, 1.0, 1.0, 101.0, 1.0, 1.0, 99.0, 1.0, 1.0, 150.0, 1.0, 1.0, 151.0, 1.0])
+        low = pd.Series([float(i) for i in range(15)])
+
+        result = compute_reference_lines(dates, high, low, latest_price=95.0, window=1, max_per_side=1)
+
+        assert result["resistance"] == pytest.approx([99.0])  # closest of 99/100/101/150/151
+
+    def test_fewer_than_max_per_side_swings_returns_what_exists(self):
+        dates = pd.Series(pd.date_range("2026-01-01", periods=7, freq="D"))
+        high = pd.Series([1.0, 2.0, 3.0, 100.0, 3.0, 2.0, 1.0])
+        low = pd.Series([1.0, 0.5, 0.2, 0.1, 0.2, 0.5, 1.0])
+
+        result = compute_reference_lines(dates, high, low, latest_price=0.0, window=1, max_per_side=2)
+
+        assert result["resistance"] == pytest.approx([100.0])
+
+    def test_search_from_restricts_eligible_swings(self):
+        dates = pd.Series(pd.date_range("2026-01-01", periods=15, freq="D"))
+        high = pd.Series([1.0, 100.0, 1.0, 1.0, 101.0, 1.0, 1.0, 99.0, 1.0, 1.0, 150.0, 1.0, 1.0, 151.0, 1.0])
+        low = pd.Series([float(i) for i in range(15)])
+
+        # Restrict to Jan10 onward -- excludes the ~100 cluster (index1/4/7, all before
+        # Jan10), leaving only the 150/151 highs eligible.
+        result = compute_reference_lines(
+            dates, high, low, latest_price=95.0, window=1, search_from=dates.iloc[9],
+        )
+        assert result["resistance"] == pytest.approx([150.0, 151.0])
