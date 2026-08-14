@@ -1,6 +1,7 @@
 import pandas as pd
 import streamlit as st
 
+import cached_db
 from core import calculations, db, slip_parser
 
 
@@ -143,7 +144,7 @@ st.title("Record Trade")
 # form's context, and the Recent Trades list below -- always the full history
 # (seed + manual + slip), since a current position is a right-now snapshot,
 # not duration-scoped.
-db_trades = db.fetch_trades()
+db_trades = cached_db.cached_fetch_trades()
 
 # Shared across both tabs, and rendered outside any form so they rerun
 # immediately on each change -- a form only reruns on submit, which would make
@@ -255,8 +256,10 @@ with tab_upload:
         )
         if result:
             db.insert_trade(**result, source="slip")
+            cached_db.invalidate_trades()
             if is_new_symbol and allocation_type != "Others":
                 db.set_symbol_type(symbol, allocation_type)
+                cached_db.invalidate_symbol_types()
             del st.session_state["parsed_slip"]
             st.success(f"Saved: {result['side']} {result['quantity']:g} {result['symbol']} @ ${result['price']:,.4f}")
             st.rerun()
@@ -267,8 +270,10 @@ with tab_manual:
     result = render_trade_form(symbol, side, quantity, price, form_key="manual_trade", oversell_blocked=oversell_blocked)
     if result:
         db.insert_trade(**result, source="manual")
+        cached_db.invalidate_trades()
         if is_new_symbol and allocation_type != "Others":
             db.set_symbol_type(symbol, allocation_type)
+            cached_db.invalidate_symbol_types()
         st.success(f"Saved: {result['side']} {result['quantity']:g} {result['symbol']} @ ${result['price']:,.4f}")
         st.rerun()
 
@@ -312,6 +317,7 @@ else:
             )
             if st.button("Yes, delete", key=f"confirm_delete_{row['id']}"):
                 db.delete_trade(row["id"])
+                cached_db.invalidate_trades()
                 st.rerun()
 
 if not recent.empty and recent["Realized P/L"].notna().any():

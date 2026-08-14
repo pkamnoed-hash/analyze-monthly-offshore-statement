@@ -507,6 +507,72 @@ class TestMarkReferenceLinesPassed:
         assert conn.execute("SELECT passed_at FROM reference_lines WHERE symbol='OLD'").fetchone()[0] is not None
 
 
+class TestMarketProfileCache:
+    def _row(self, **overrides):
+        row = {
+            "Symbol": "AIQ", "Description": "AI Powered Equity ETF", "Sector": "Technology",
+            "Industry": "Software", "Quote Type": "ETF", "Beta": 1.2, "Latest Price": 70.0,
+            "High90D": 75.0, "Low90D": 60.0, "Dividend Per Year": 1.5, "Dividend Yield %": 2.1,
+            "Dividend Frequency": "Quarterly", "Ex-Date": pd.Timestamp("2026-06-01"),
+            "History90D": [68.0, 69.0, 70.0],
+        }
+        row.update(overrides)
+        return row
+
+    def test_save_and_fetch_round_trip(self, conn):
+        db.save_market_profile_cache([self._row()], conn=conn)
+        result = db.fetch_market_profile_cache(conn=conn)
+        assert len(result) == 1
+        row = result.iloc[0]
+        assert row["Symbol"] == "AIQ"
+        assert row["Description"] == "AI Powered Equity ETF"
+        assert row["Beta"] == 1.2
+        assert row["Latest Price"] == 70.0
+        assert row["Dividend Frequency"] == "Quarterly"
+        assert row["Ex-Date"] == pd.Timestamp("2026-06-01")
+        assert row["History90D"] == [68.0, 69.0, 70.0]
+        assert pd.notna(row["Fetched At"])
+
+    def test_upsert_replaces_rather_than_duplicates(self, conn):
+        db.save_market_profile_cache([self._row()], conn=conn)
+        db.save_market_profile_cache([self._row(**{"Latest Price": 80.0})], conn=conn)
+        result = db.fetch_market_profile_cache(conn=conn)
+        assert len(result) == 1
+        assert result.iloc[0]["Latest Price"] == 80.0
+
+    def test_nan_beta_stored_and_fetched_as_nan_not_a_crash(self, conn):
+        # A real, valid outcome of a successful fetch -- yfinance has neither `beta`
+        # nor `beta3Year` for some symbols, not a failure case.
+        db.save_market_profile_cache([self._row(Beta=float("nan"))], conn=conn)
+        result = db.fetch_market_profile_cache(conn=conn)
+        assert pd.isna(result.iloc[0]["Beta"])
+
+    def test_nat_ex_date_stored_and_fetched_as_nat(self, conn):
+        # A real non-dividend-paying symbol (e.g. ARM) -- compute_reference_lines-style
+        # "no data" case, not a fetch failure.
+        db.save_market_profile_cache([self._row(**{"Ex-Date": pd.NaT})], conn=conn)
+        result = db.fetch_market_profile_cache(conn=conn)
+        assert pd.isna(result.iloc[0]["Ex-Date"])
+
+    def test_multiple_symbols_in_one_call(self, conn):
+        db.save_market_profile_cache(
+            [self._row(Symbol="AIQ"), self._row(Symbol="BLK", **{"Latest Price": 1200.0})],
+            conn=conn,
+        )
+        result = db.fetch_market_profile_cache(conn=conn)
+        assert set(result["Symbol"]) == {"AIQ", "BLK"}
+
+    def test_empty_history_defaults_to_empty_list_not_none(self, conn):
+        db.save_market_profile_cache([self._row(History90D=None)], conn=conn)
+        result = db.fetch_market_profile_cache(conn=conn)
+        assert result.iloc[0]["History90D"] == []
+
+    def test_fetch_returns_empty_dataframe_when_nothing_cached_yet(self, conn):
+        result = db.fetch_market_profile_cache(conn=conn)
+        assert result.empty
+        assert "Symbol" in result.columns
+
+
 class TestRebalancePlan:
     def test_get_active_rebalance_plan_returns_none_when_none_exists(self, conn):
         assert db.get_active_rebalance_plan(conn=conn) is None

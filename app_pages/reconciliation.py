@@ -3,6 +3,7 @@ import os
 import pandas as pd
 import streamlit as st
 
+import cached_db
 from core import db, reconciliation
 
 DATA_FILE = os.path.join(
@@ -35,8 +36,16 @@ def _mark_reconciled(rows: pd.DataFrame):
     """Groups by (table, statement month) since mark_reconciled_bulk() takes
     one table and one month per call -- a "Mark all" spanning the ~900-row
     first-run backlog can cover dozens of distinct months at once."""
+    touched_tables = set()
     for (table, month), group in rows.groupby(["_table", "_month_str"]):
         db.mark_reconciled_bulk(table, group["id"].tolist(), month)
+        touched_tables.add(table)
+    # v4.5 -- mark_reconciled_bulk() updates trades/dividends rows directly, so the
+    # cached reads need invalidating same as any other write to those tables.
+    if "trades" in touched_tables:
+        cached_db.invalidate_trades()
+    if "dividends" in touched_tables:
+        cached_db.invalidate_dividends()
 
 
 st.header("Ready to confirm")
@@ -116,8 +125,8 @@ scan_full_history = st.checkbox("Scan full history (all months, not just the new
 # is correctly recognized as covered rather than looking like a fresh gap.
 since = None if scan_full_history else pd.Timestamp(cutoff.year, cutoff.month, 1)
 
-all_trades = db.fetch_trades()
-all_dividends = db.fetch_dividends()
+all_trades = cached_db.cached_fetch_trades()
+all_dividends = cached_db.cached_fetch_dividends()
 gap_trades = reconciliation.unmatched_xlsx_trades(all_trades, xlsx_transactions, since=since)
 gap_income = reconciliation.unmatched_xlsx_income(all_dividends, xlsx_income, since=since)
 

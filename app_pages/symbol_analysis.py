@@ -3,6 +3,7 @@ from datetime import datetime
 import pandas as pd
 import streamlit as st
 
+import cached_db
 from app_pages.components.trendline_chart_component import trendline_chart
 from core import calculations, db, market_data
 
@@ -34,11 +35,12 @@ with st.expander("What does this page do?"):
         "separately as plain, non-draggable facts, not reference lines."
     )
 
-# Avg Cost/Quantity come from live trade history (uncached, same convention every other
-# page's db.fetch_trades() call uses -- a trade just recorded should show up immediately),
-# not from the market-data fetch below.
-positions = calculations.compute_current_positions(db.fetch_trades())
-symbol_types = db.fetch_symbol_types()
+# Avg Cost/Quantity come from live trade history (cached + invalidated on write, see
+# cached_db.py -- a trade just recorded still shows up immediately, it just no longer
+# costs a real Turso round trip on every plain navigation), not from the market-data
+# fetch below.
+positions = calculations.compute_current_positions(cached_db.cached_fetch_trades())
+symbol_types = cached_db.cached_fetch_symbol_types()
 
 query_symbol = st.query_params.get("symbol")
 

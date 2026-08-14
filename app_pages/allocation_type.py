@@ -1,5 +1,6 @@
 import streamlit as st
 
+import cached_db
 from core import db
 
 st.title("Allocation Type")
@@ -10,7 +11,7 @@ st.caption(
     "here anytime."
 )
 
-symbol_types = db.fetch_symbol_types()
+symbol_types = cached_db.cached_fetch_symbol_types()
 unclassified = int((symbol_types["Allocation Type"] == "Others").sum())
 st.metric("Symbols still in Others", f"{unclassified} of {len(symbol_types)}")
 
@@ -53,6 +54,7 @@ def _bulk_apply(symbols, allocation_type):
             db.clear_symbol_type(symbol)
         else:
             db.set_symbol_type(symbol, allocation_type)
+    cached_db.invalidate_symbol_types()
     st.success(f"Set {len(symbols)} symbol(s) to {allocation_type}.")
     st.rerun()
 
@@ -84,6 +86,7 @@ if st.button("Save dropdown changes"):
             db.set_symbol_type(symbol, new_type)
 
     if changed:
+        cached_db.invalidate_symbol_types()
         st.success(f"Updated {changed} symbol(s).")
         st.rerun()
     else:

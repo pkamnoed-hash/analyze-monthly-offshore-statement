@@ -109,6 +109,25 @@ SCHEMA_STATEMENTS = [
         updated_at        TEXT NOT NULL DEFAULT (datetime('now'))
     )
     """,
+    """
+    CREATE TABLE IF NOT EXISTS market_profile_cache (
+        symbol              TEXT PRIMARY KEY,
+        description         TEXT,
+        sector              TEXT,
+        industry            TEXT,
+        quote_type          TEXT,
+        beta                REAL,
+        latest_price        REAL,
+        high_90d            REAL,
+        low_90d             REAL,
+        dividend_per_year   REAL,
+        dividend_yield_pct  REAL,
+        dividend_frequency  TEXT,
+        ex_date             TEXT,
+        history_90d         TEXT,
+        fetched_at          TEXT NOT NULL
+    )
+    """,
 ]
 
 # reference_lines shipped in v4.4 without captured_side/passed_at, added in v4.4.1 for
@@ -566,6 +585,96 @@ def mark_reference_lines_passed(latest_prices: dict, conn=None):
         if should_close:
             c.close()
     return newly_passed
+
+
+def save_market_profile_cache(rows: list[dict], conn=None):
+    """Upserts one row per symbol into market_profile_cache -- v4.5's durable fallback
+    for fetch_stock_profile(): when a live yfinance fetch fails (e.g. Yahoo
+    rate-limiting Streamlit Community Cloud's shared IP, the real incident that
+    prompted this), the caller falls back to whatever was last captured here instead
+    of showing a blank row. `rows` matches fetch_stock_profile()'s own successful-row
+    shape (Symbol/Description/Sector/Industry/Quote Type/Beta/History90D/Latest
+    Price/High90D/Low90D/Dividend Per Year/Dividend Yield %/Dividend Frequency/
+    Ex-Date) -- only ever called with rows that DID succeed live, never the
+    failure-shape (None/NaN) rows, so the cache only ever holds real data, never a
+    good row overwritten by a blank one.
+
+    INSERT OR REPLACE (not a separate UPDATE/INSERT branch) since `symbol` is the
+    table's PRIMARY KEY -- one row per symbol, always. Batched into a single
+    executescript() call, same reasoning as save_reference_lines -- one Turso round
+    trip instead of one per symbol. history_90d is JSON-encoded (no native SQLite
+    array type); Beta/Latest Price/etc. can be real NaN even on a successful fetch
+    (e.g. Beta when yfinance has neither `beta` nor `beta3Year`), handled explicitly
+    since a bare Python `nan` isn't valid inline SQL."""
+    import json
+
+    import pandas as pd
+
+    def _num(value):
+        return "NULL" if pd.isna(value) else repr(float(value))
+
+    c, should_close = _with_connection(conn)
+    statements = []
+    for row in rows:
+        ex_date = row.get("Ex-Date")
+        ex_date_str = ex_date.strftime("%Y-%m-%d") if pd.notna(ex_date) else None
+        statements.append(
+            "INSERT OR REPLACE INTO market_profile_cache "
+            "(symbol, description, sector, industry, quote_type, beta, latest_price, "
+            "high_90d, low_90d, dividend_per_year, dividend_yield_pct, dividend_frequency, "
+            "ex_date, history_90d, fetched_at) VALUES ("
+            f"{_sql_literal(row['Symbol'])}, {_sql_literal(row.get('Description'))}, "
+            f"{_sql_literal(row.get('Sector'))}, {_sql_literal(row.get('Industry'))}, "
+            f"{_sql_literal(row.get('Quote Type'))}, {_num(row.get('Beta'))}, "
+            f"{_num(row.get('Latest Price'))}, {_num(row.get('High90D'))}, {_num(row.get('Low90D'))}, "
+            f"{_num(row.get('Dividend Per Year'))}, {_num(row.get('Dividend Yield %'))}, "
+            f"{_sql_literal(row.get('Dividend Frequency'))}, {_sql_literal(ex_date_str)}, "
+            f"{_sql_literal(json.dumps(row.get('History90D') or []))}, datetime('now'));"
+        )
+    try:
+        c.executescript("\n".join(statements))
+        c.commit()
+    except Exception:
+        c.rollback()
+        raise
+    finally:
+        if should_close:
+            c.close()
+
+
+def fetch_market_profile_cache(conn=None):
+    """Returns a DataFrame (Symbol, Description, Sector, Industry, Quote Type, Beta,
+    Latest Price, High90D, Low90D, Dividend Per Year, Dividend Yield %, Dividend
+    Frequency, Ex-Date, History90D, Fetched At) -- v4.5's durable fallback source for
+    Monitor Stocks' _cached_fetch_stock_profile when a live yfinance fetch fails.
+    history_90d is JSON-decoded back into a plain list of floats; Ex-Date/Fetched At
+    are parsed back into real Timestamps. A symbol never successfully fetched at
+    least once just isn't present here -- same "absence means never captured"
+    convention fetch_reference_lines already uses."""
+    import json
+
+    import pandas as pd
+
+    c, should_close = _with_connection(conn)
+    df = _read_sql(
+        c, "SELECT symbol, description, sector, industry, quote_type, beta, latest_price, "
+        "high_90d, low_90d, dividend_per_year, dividend_yield_pct, dividend_frequency, "
+        "ex_date, history_90d, fetched_at FROM market_profile_cache",
+    )
+    if should_close:
+        c.close()
+    df = df.rename(columns={
+        "symbol": "Symbol", "description": "Description", "sector": "Sector",
+        "industry": "Industry", "quote_type": "Quote Type", "beta": "Beta",
+        "latest_price": "Latest Price", "high_90d": "High90D", "low_90d": "Low90D",
+        "dividend_per_year": "Dividend Per Year", "dividend_yield_pct": "Dividend Yield %",
+        "dividend_frequency": "Dividend Frequency", "ex_date": "Ex-Date",
+        "history_90d": "History90D", "fetched_at": "Fetched At",
+    })
+    df["Ex-Date"] = pd.to_datetime(df["Ex-Date"])
+    df["Fetched At"] = pd.to_datetime(df["Fetched At"])
+    df["History90D"] = df["History90D"].apply(lambda v: json.loads(v) if isinstance(v, str) else [])
+    return df
 
 
 def fetch_unreconciled_trades(cutoff, conn=None):

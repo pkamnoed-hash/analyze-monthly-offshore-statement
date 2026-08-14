@@ -2,6 +2,7 @@ import pandas as pd
 import pytest
 
 from core.calculations import (
+    apply_market_profile_fallback,
     blended_dividends,
     blended_realized_pl,
     cluster_price_levels,
@@ -1080,3 +1081,88 @@ class TestNearestReferenceCell:
         lines = [{"price": 105.0, "passed_at": float("nan")}]
         result = nearest_reference_cell(lines, "resistance", 100.0)
         assert result["passed"] is False
+
+
+def _live_row(symbol, **overrides):
+    row = {
+        "Symbol": symbol, "Description": f"{symbol} Inc.", "Sector": "Technology",
+        "Industry": "Software", "Quote Type": "EQUITY", "Beta": 1.1,
+        "History90D": [10.0, 11.0, 12.0], "Latest Price": 12.0, "High90D": 13.0, "Low90D": 9.0,
+        "Dividend Per Year": 0.5, "Dividend Yield %": 4.2, "Dividend Frequency": "Quarterly",
+        "Ex-Date": pd.Timestamp("2026-06-01"),
+    }
+    row.update(overrides)
+    return row
+
+
+def _failed_live_row(symbol):
+    # Exact shape fetch_stock_profile()'s own except branch produces.
+    return {
+        "Symbol": symbol, "Description": None, "Sector": None, "Industry": None,
+        "Quote Type": None, "Beta": float("nan"), "History90D": [], "Latest Price": float("nan"),
+        "High90D": float("nan"), "Low90D": float("nan"), "Dividend Per Year": float("nan"),
+        "Dividend Yield %": float("nan"), "Dividend Frequency": None, "Ex-Date": pd.NaT,
+    }
+
+
+def _cached_row(symbol, **overrides):
+    row = {
+        "Symbol": symbol, "Description": f"{symbol} Inc. (cached)", "Sector": "Technology",
+        "Industry": "Software", "Quote Type": "EQUITY", "Beta": 1.0,
+        "Latest Price": 11.0, "High90D": 12.0, "Low90D": 8.0, "Dividend Per Year": 0.4,
+        "Dividend Yield %": 3.6, "Dividend Frequency": "Quarterly", "Ex-Date": pd.Timestamp("2026-05-01"),
+        "History90D": [9.0, 10.0, 11.0], "Fetched At": pd.Timestamp("2026-08-14 12:00:00"),
+    }
+    row.update(overrides)
+    return row
+
+
+class TestApplyMarketProfileFallback:
+    def test_a_row_that_succeeded_live_is_returned_untouched_and_not_stale(self):
+        live = pd.DataFrame([_live_row("AAPL")])
+        cached = pd.DataFrame([_cached_row("AAPL")])
+        result = apply_market_profile_fallback(live, cached)
+        row = result.iloc[0]
+        assert bool(row["Stale"]) is False
+        assert row["Latest Price"] == 12.0  # the LIVE value, not the cached 11.0
+        assert pd.isna(row["Fetched At"])
+
+    def test_a_failed_row_with_a_cached_counterpart_falls_back_and_is_marked_stale(self):
+        live = pd.DataFrame([_failed_live_row("AAPL")])
+        cached = pd.DataFrame([_cached_row("AAPL")])
+        result = apply_market_profile_fallback(live, cached)
+        row = result.iloc[0]
+        assert bool(row["Stale"]) is True
+        assert row["Latest Price"] == 11.0
+        assert row["Description"] == "AAPL Inc. (cached)"
+        assert row["History90D"] == [9.0, 10.0, 11.0]
+        assert row["Fetched At"] == pd.Timestamp("2026-08-14 12:00:00")
+
+    def test_a_failed_row_with_nothing_ever_cached_stays_blank_not_a_regression(self):
+        live = pd.DataFrame([_failed_live_row("NEWSYM")])
+        cached = pd.DataFrame([_cached_row("AAPL")])  # cache has data, just not for this symbol
+        result = apply_market_profile_fallback(live, cached)
+        row = result.iloc[0]
+        assert bool(row["Stale"]) is False
+        assert pd.isna(row["Latest Price"])
+        assert row["Description"] is None
+
+    def test_empty_cache_never_crashes_and_never_falls_back(self):
+        live = pd.DataFrame([_failed_live_row("AAPL")])
+        cached = pd.DataFrame(columns=["Symbol", "Latest Price", "Fetched At"])
+        result = apply_market_profile_fallback(live, cached)
+        assert bool(result.iloc[0]["Stale"]) is False
+
+    def test_mixed_batch_each_row_resolved_independently(self):
+        live = pd.DataFrame([
+            _live_row("GOOD"),
+            _failed_live_row("HASFALLBACK"),
+            _failed_live_row("NOTHINGCACHED"),
+        ])
+        cached = pd.DataFrame([_cached_row("HASFALLBACK")])
+        result = apply_market_profile_fallback(live, cached).set_index("Symbol")
+        assert bool(result.loc["GOOD", "Stale"]) is False
+        assert bool(result.loc["HASFALLBACK", "Stale"]) is True
+        assert result.loc["HASFALLBACK", "Latest Price"] == 11.0
+        assert bool(result.loc["NOTHINGCACHED", "Stale"]) is False
+        assert pd.isna(result.loc["NOTHINGCACHED", "Latest Price"])

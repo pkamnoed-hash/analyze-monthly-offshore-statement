@@ -35,7 +35,16 @@ if st.sidebar.button("Log out"):
     st.session_state["authenticated"] = False
     st.rerun()
 
-init_db()
+# v4.5 -- init_db() only needs to run once per browser session, not on every single
+# rerun (every navigation/widget interaction re-executes this whole script). It was
+# unconditional before, meaning every rerun paid a real Turso round trip per
+# CREATE TABLE statement plus the reference_lines migration check -- one of three
+# real causes behind the app's "always reloads" feeling (see docs/ROADMAP.md V4.5).
+# A brand-new session still runs it exactly once, so a fresh deploy still initializes
+# its schema correctly.
+if "db_initialized" not in st.session_state:
+    init_db()
+    st.session_state["db_initialized"] = True
 
 pg = st.navigation({
     "Overview": [
