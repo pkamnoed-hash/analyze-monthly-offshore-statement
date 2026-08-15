@@ -26,7 +26,7 @@ not an aspirational process, a record of what's been done.
 | `v4.4-support-resistance-analysis` | V4.4 feature branch. Cut from `main` after v4.3.1 was applied. Adds Monitor Stocks' Trendline tab (Pivot Points S3-R3, all 52 holdings, anchored to Avg Cost) with an `Action` cell linking to a new per-symbol "Auto Trendline" page. That page's chart went through several overlay iterations (diagonal Trend Line, clustered S/R Zones, a Nearest R/S readout) before consolidating -- per direct user feedback after live-testing the readout ("too many competing line concepts") -- into a single **Reference Line** concept: swing highs/lows nearest to current price, captured at a deliberate moment (not recomputed on Timeline/Interval navigation) via a "Regenerate" button, with full drag/delete/create editing and DB persistence (`reference_lines` table). Fixed two real bugs found via live testing (a ~1.6s DB write on every drag, and a delete-button click silently swallowed by the chart's own drag-detection listener). 299/299 tests passing. Full design history in `docs/ROADMAP.md` (V4.4). Merged into `main` (`23cf008`, `--no-ff`), tagged `v4.4`. |
 | `v4.4.1-reference-line-summary` | V4.4.1 feature branch. Cut from `main` after v4.4 was merged in. Builds the portfolio-wide "nearest Reference Line" summary table across all held symbols -- explicitly requested as a follow-up once the per-symbol Reference Line feature (v4.4) was working, with the key requirement that it compute on first load rather than requiring each symbol's own Auto Trendline page be visited first. A read-only chat preview (real Turso + yfinance data, `compute_reference_lines()` run for all ~52 holdings) was shown and confirmed working before this branch was cut. Numbered `4.4.1` (not the originally-discussed `4.5`) since it's simply the next thing built after v4.4, in chronological order -- matches how every other `x.y.z` number in this project was assigned, and avoids reserving a number in advance for something (biometric login) that ended up being built later. Adds Monitor Stocks' Reference Lines + Highlight tabs, renames Overview to Overall, and (a live-testing tweak round) moves the "passed" highlight onto the Nearest Resistance/Support cells themselves, reorders Highlight to the leftmost tab, trims Overall's now-redundant Pivot Points columns, and adds a matching "Passed R/S" column to Auto Trendline's own Zone 5 table -- which also surfaced and fixed a real pre-existing bug (visiting a symbol's page in a fresh session silently wiped its `passed_at`). 317/317 tests passing. Full design history in `docs/ROADMAP.md` (V4.4.1). Merged into `main` (`f45e857`, `--no-ff`), tagged `v4.4.1`. |
 | `v4.5-yfinance-cache` | V4.5 feature branch. Cut from `main` after v4.4.1 was merged in (`c7e1f1a`). Originally cut as `v4.5-yfinance-cache-and-bio-login`, planning to bundle two improvements on one branch (user's explicit choice -- asked whether to split, given the table-improvements/bio-login precedent earlier, but chose to combine this time) -- but biometric login was deferred to its own future branch before any of it was built, so the branch was renamed to drop "and-bio-login" and match what actually shipped: reduces redundant reloads (`init_db()` guarded to run once per session instead of every rerun; `db.fetch_trades()`/`fetch_dividends()`/`fetch_symbol_types()` -- called uncached from 8 different pages -- now cached via new `cached_db.py` with explicit invalidate-on-write at every write call site) and adds a durable `market_profile_cache` DB table so a failed live yfinance fetch (the real Yahoo Finance rate-limit incident right after v4.4.1's first deploy, which left every yfinance-derived column blank app-wide) falls back to last-known-good data instead. 329/329 tests passing. Full design history in `docs/ROADMAP.md` (V4.5). Merged into `main` (`99b8db7`, `--no-ff`), tagged `v4.5`. |
-| `v4.5.1-fetch-data-improvements` | V4.5.1 feature branch ("fetch data & small improvement"). Cut from `main` after v4.5 was merged in. A natural continuation of v4.5's own theme, numbered `4.5.1` (not reserved in advance -- assigned now that it's actually being built, same rule as always). Still in the consultation phase (per explicit request, nothing implemented yet): inverts Monitor Stocks' profile-data fetch model from "live-first, DB-fallback-on-failure" (v4.5) to "DB-first always, live fetch only on explicit Refresh click." User's chosen scope covers both Monitor Stocks profile data and Auto Trendline's price-history/chart data; whether to build both together or sequence Auto Trendline (a bigger lift -- a real time-series table, incremental-fetch design, stock-split revision risk) as its own follow-up is still an open question, not yet decided. In progress. |
+| `v4.5.1-fetch-data-improvements` | V4.5.1 feature branch ("fetch data & small improvement"). Cut from `main` after v4.5 was merged in. A natural continuation of v4.5's own theme, numbered `4.5.1` (not reserved in advance -- assigned now that it's actually being built, same rule as always). Consulted first (design confirmed via chat mockups before any code), then built: inverts Monitor Stocks' profile-data fetch model from "live-first, DB-fallback-on-failure" (v4.5) to "DB-first always, live fetch only on explicit Refresh click" -- `_cached_fetch_stock_profile` split into `_cached_read_stock_profile_from_db` (normal path) and `_refresh_stock_profile_live` (Refresh button's handler, v4.5's own fallback logic exactly, now opt-in). New "Oldest + warning" caption (`calculations.describe_market_profile_freshness`), refined with a 5-minute tolerance after a real false-positive was caught testing against actual 52-symbol data (same-batch captures a few seconds apart were flagging as a false "outlier"). Also gives Dashboard's USD/THB rate the same visible Refresh-button + last-refreshed pattern, deliberately kept simple (no new DB table). Auto Trendline's price-history/chart caching was scoped OUT after discussion (a bigger lift -- real time-series table, incremental-fetch design, stock-split revision risk), sequenced as its own future branch instead. 338/338 tests passing. Full design history in `docs/ROADMAP.md` (V4.5.1). Merged into `main` (`b902572`, `--no-ff`), tagged `v4.5.1`. |
 
 Naming convention: `vN-short-description` (or `vN.M-short-description` for a
 smaller, additive feature that doesn't warrant a new whole version number),
@@ -53,7 +53,7 @@ Version planning
   ○ 4.4 (`v4.4-support-resistance-analysis`) Monitor Stocks Trendline tab (Pivot Points, all 52 holdings) + new "Auto Trendline" per-symbol page, consolidated down to a single "Reference Line" concept (swing-based, nearest-to-price, captured-at-a-moment, drag/delete/create, DB-persisted) after iterating through Trend Line/S-R Zones/Nearest-R-S overlays first. Merged into `main`, tagged `v4.4` -- see `docs/ROADMAP.md` for the full arc.
   ○ 4.4.1 (`v4.4.1-reference-line-summary`) portfolio-wide "nearest Reference Line" summary table across all held symbols, computed on first load rather than requiring each symbol's own page be visited first -- see ROADMAP.md's V4.4 "Considered and explicitly deferred" note; a live preview of this table (read-only, real data, not yet built into the app) was shown in chat and confirmed working. Branch cut from `main` after v4.4 merged in. Merged into `main`, tagged `v4.4.1` -- see `docs/ROADMAP.md` for the full arc. (Renumbered from the originally-discussed `4.5` -- see the Branches table entry above for why.)
   ○ 4.5 (`v4.5-yfinance-cache`) reduces redundant reloads (init_db() once per session, cached+invalidate-on-write trades/dividends/symbol_types reads) and adds a durable yfinance DB cache (market_profile_cache) so a failed live fetch falls back to last-known-good data -- prompted by a real production incident where Yahoo rate-limited Streamlit Community Cloud's shared IP right after v4.4.1 deployed, blanking every yfinance-derived column app-wide. Merged into `main`, tagged `v4.5` -- see `docs/ROADMAP.md` for the full arc. Biometric login (originally planned as this branch's second improvement, previously placeholder-numbered `4.4.2`) was deferred to its own future branch before any of it was built.
-  ○ 4.5.1 (`v4.5.1-fetch-data-improvements`) "fetch data & small improvement" -- inverts Monitor Stocks' profile-data fetch to DB-first (read the database on every normal load, only fetch live yfinance data on an explicit Refresh click), plus possibly the same for Auto Trendline's price-history/chart data. Branch cut from `main` after v4.5 merged in. Still in consultation -- design not finalized, nothing implemented yet.
+  ○ 4.5.1 (`v4.5.1-fetch-data-improvements`) "fetch data & small improvement" -- inverts Monitor Stocks' profile-data fetch to DB-first (read the database on every normal load, only fetch live yfinance data on an explicit Refresh click); "Oldest + warning" freshness caption; same Refresh pattern added to Dashboard's USD/THB rate. Auto Trendline's price-history/chart caching deferred to its own future branch. Merged into `main`, tagged `v4.5.1` -- see `docs/ROADMAP.md` for the full arc.
 - 5 - cosmetic
 - 6 - tax management
 
@@ -102,11 +102,11 @@ tip commit was already an ancestor of `main`). Feature branches that are
 still useful as a labeled reference point (`V1-record-trade-and-view`,
 `v2-Reconciliation`) are kept rather than deleted by default.
 
-## Current status (as of `v4.5.1-fetch-data-improvements`, in progress)
+## Current status (as of `v4.5.1`, merged)
 
 `main` has V1, V2, V2.1, V2.2, V2.3, V2.4, V3, V3.1, V4, V4.1.1, V4.1,
-V4.1.2, V4.2, V4.3, V4.3.1, V4.4, V4.4.1, and **V4.5** merged in
-(329/329 passing on `main`, tagged `v4.5`). V4.3 overhauls Rebalance &
+V4.1.2, V4.2, V4.3, V4.3.1, V4.4, V4.4.1, V4.5, and **V4.5.1** merged
+in (338/338 passing on `main`, tagged `v4.5.1`). V4.3 overhauls Rebalance &
 Reallocate (5-tab split, Analyze as the sole editable tab, Total P/L,
 Beta, THB calculator, Summary KPI redesign), adds a Monitor Stocks
 Monthly Dividend chart (validated against a real broker statement
@@ -148,27 +148,34 @@ uncached on 8 different pages. All three fixed together as one
 improvement, per explicit user request. See `docs/ROADMAP.md`'s V4.5
 section for the full build and verification history.
 
-**In progress**: `v4.5.1-fetch-data-improvements`, cut from `main`
-after v4.5 merged in -- still in consultation, nothing implemented
-yet. Inverts Monitor Stocks' profile-data fetch model from v4.5's
+V4.5.1 inverts Monitor Stocks' profile-data fetch model from v4.5's
 "live-first, DB-fallback-on-failure" to "DB-first always, live fetch
-only on an explicit Refresh click" -- normal navigation would read the
+only on an explicit Refresh click" -- normal navigation reads the
 database instantly instead of touching yfinance at all, with a symbol
 never captured before still auto-fetching live once on first sight.
-Scope also under discussion includes Auto Trendline's price-history/
-chart data, a meaningfully bigger lift (a real time-series table,
-incremental-fetch design, stock-split revision risk) that may end up
-sequenced as its own follow-up rather than built alongside Monitor
-Stocks. Open question not yet resolved: how the "Last refreshed" label
-should read once different symbols can have different fetch times.
+New "Oldest + warning" freshness caption, refined with a 5-minute
+tolerance after real 52-symbol data caught a false-positive "outlier"
+warning during verification. Dashboard's USD/THB rate got the same
+visible Refresh-button + last-refreshed pattern, deliberately kept
+simple (no new DB table -- a single non-critical calculator default).
+Auto Trendline's price-history/chart caching was scoped out after
+discussion (a bigger lift -- real time-series table, incremental-fetch
+design, stock-split revision risk), deferred to its own future branch.
+See `docs/ROADMAP.md`'s V4.5.1 section for the full build and
+verification history.
 
-Biometric login (originally planned as V4.5's second improvement) was
-deferred to its own future branch before any of it was built --
-number to be decided when actually built, not reserved in advance.
-Still open otherwise: whether to apply the "Total Return" concept
-(Total P/L/%) to the Dashboard page (raised during v4.1); a
-pre-existing staleness gap found but not fixed during V4.5
+**Nothing in progress.** Biometric login (originally planned as V4.5's
+second improvement) was deferred to its own future branch before any
+of it was built -- number to be decided when actually built, not
+reserved in advance. Still open otherwise: whether to apply the "Total
+Return" concept (Total P/L/%) to the Dashboard page (raised during
+v4.1); a pre-existing staleness gap found but not fixed during V4.5
 (`rebalance.py`/`monitor_stocks.py`'s own dividends-received helper
 functions each cache their result indefinitely and don't get
 invalidated by a new dividend save -- see `docs/ROADMAP.md`'s V4.5
-"Considered and explicitly deferred" note).
+"Considered and explicitly deferred" note); Rebalance & Reallocate's
+`get_dividend_holdings()` still fetches its own separate, uncached
+yfinance stock profile every ~5 minutes rather than reading
+Monitor Stocks' `market_profile_cache` -- found during a v4.5.1
+follow-up discussion, not fixed (real, overlapping redundant fetch,
+worth its own small step later).

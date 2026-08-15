@@ -1,5 +1,26 @@
 # Changelog
 
+## DB-First Monitor Stocks Fetch + Dashboard Rate Refresh (v4.5.1)
+
+Makes Monitor Stocks' profile data (Description/Sector/Beta/Dividends/
+90-day history) read from the database on every normal page load
+instead of fetching live from yfinance -- navigation is instant, and
+yfinance is only touched when you explicitly click "Refresh now".
+
+- **Monitor Stocks reads the database first, always.** A symbol
+  that's genuinely new (never captured before) still fetches live
+  automatically the first time, same as before.
+- **New "last refreshed" caption**: shows when your data was last
+  captured, with a warning line naming a specific symbol only when
+  one is genuinely out of date -- not for symbols captured moments
+  apart in the same batch (an early version got this wrong, caught
+  and fixed against real data before shipping).
+- **Dashboard's USD → THB rate** gets the same visible "Refresh now"
+  button and "last refreshed" label. Manually-typed rates are never
+  overwritten by a refresh.
+- No breaking changes.
+- Full test suite: 338/338 passing (9 new).
+
 ## Reduce Redundant Reloads + Durable yfinance DB Cache (v4.5)
 
 Traces and fixes three real causes of the app "always reloading" when

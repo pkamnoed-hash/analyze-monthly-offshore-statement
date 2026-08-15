@@ -2486,6 +2486,180 @@ throughout.
   age-based color warning) beyond the simple warning caption -- keep
   the first version simple, iterate if that's not enough in practice.
 
+## V4.5.1: DB-First Monitor Stocks Profile Fetch + Dashboard Rate Refresh
+
+Branch `v4.5.1-fetch-data-improvements`, cut from `main` after V4.5
+merged in. "Fetch data & small improvement" -- numbered `4.5.1` as a
+natural continuation of V4.5's own theme, assigned now that it was
+actually being built, not reserved in advance.
+
+### Context
+
+User asked to consult (explicitly, before any code) about reducing
+yfinance download time further: keep a "global setting" so data
+that's already been fetched doesn't need fetching again every load,
+with a "Refresh" button and a label showing when data was last
+fetched. Traced against what V4.5 already built: Monitor Stocks'
+profile-data fetch (`_cached_fetch_stock_profile`) still tried yfinance
+live on (roughly) every 5-minute window and only fell back to
+`market_profile_cache` if that attempt failed -- fixed the "everything
+goes blank" incident, but still meant a real network round trip on
+essentially every normal page load.
+
+Confirmed via discussion (AskUserQuestion, three separate times across
+this branch):
+1. **Behavior model**: DB-first always, live fetch only on explicit
+   Refresh (not a lengthened TTL, not a separate toggle).
+2. **Scope**: Monitor Stocks profile data now; Auto Trendline's
+   price-history/chart data -- a real time-series table, incremental-
+   fetch design, and stock-split revision risk, meaningfully bigger --
+   sequenced as its own future branch instead of built alongside.
+3. **"Last refreshed" label**: "Oldest + warning" style, confirmed with
+   concrete chat mockups (real timestamps, not abstract) before
+   building -- the main line always pairs the absolute timestamp with
+   relative time (covers both "just refreshed" and "uniformly stale,
+   no single outlier" -- a case the warning-line-only framing alone
+   would have missed), a second line names a genuine outlier symbol
+   only when one exists.
+
+Once built, the user separately asked for the same Refresh/label
+pattern on Dashboard's USD/THB rate, and asked a scoping question
+about Rebalance & Reallocate that surfaced a related, unfixed
+redundant-fetch gap (see Considered and deferred).
+
+### Design decisions
+
+**Monitor Stocks' normal read path never calls yfinance for an
+already-captured symbol.** `_cached_fetch_stock_profile` split into
+two functions:
+- `_cached_read_stock_profile_from_db(symbols)` -- `@st.cache_data`,
+  no ttl (matches `cached_db.py`'s own reasoning: a plain DB read is
+  already cheap, the point of caching it at all is to skip even that
+  on every rerun within a session). Reads `db.fetch_market_profile_cache()`
+  directly. A symbol never captured before still works out of the box
+  -- same precedent `_cached_reference_line_summary` already
+  established for Reference Lines: fetched live exactly once, right
+  there, and saved. Either that succeeds (and the row appears from
+  then on) or it doesn't and the symbol is simply absent from the
+  returned DataFrame -- the caller's left-merge already treats a
+  missing row the same as an all-blank one, same no-regression
+  behavior V4.5 already had for an unresolvable symbol.
+- `_refresh_stock_profile_live(symbols)` -- the "Refresh now" button's
+  handler, running V4.5's exact live-fetch-with-fallback logic
+  (`market_data.fetch_stock_profile` -> `calculations.apply_market_profile_fallback`
+  against the DB cache -> upsert whatever succeeded), now explicitly
+  opt-in instead of automatic. Busts the read function's cache so the
+  very next read reflects what was just fetched. The existing "N
+  symbols couldn't be fetched live just now" warning moved to fire
+  only right after a Refresh attempt -- there's no live attempt to
+  fail on a normal load anymore, so nothing to report there.
+
+**"Oldest + warning" label**, computed from `market_profile_cache`'s
+`Fetched At` column via new pure helper
+`calculations.describe_market_profile_freshness(fetched_at, symbols, tolerance=pd.Timedelta(minutes=5))`
+-- Streamlit/DB-free, unit-testable. Returns `{"newest", "oldest",
+"oldest_symbol", "has_variance"}`; the caption's main line always
+shows `newest` with relative time, a second "⚠ Oldest: {symbol}..."
+line appears only when `has_variance` is True.
+
+**Real bug caught via the real-data verification itself, not
+guessed**: an early version compared timestamps with strict `!=`,
+which meant a genuine batch capture (dozens of symbols saved moments
+apart from each other during the same Refresh or auto-capture run,
+truly a few seconds apart) still triggered a false "Oldest" warning
+naming one symbol as *the* outlier -- confirmed live against real
+52-symbol data (`"Data last refreshed: 14/08/2026 17:58 (13 hours
+ago)" / "⚠ Oldest: AIQ, captured 14/08/2026 17:58 (13 hours ago)"` --
+both lines showing the same minute, an obviously meaningless warning
+to a human reader). Fixed with a 5-minute tolerance
+(`newest - oldest > tolerance`), matching this app's existing
+"5-minute" cache convention elsewhere; re-verified clean against the
+same real data afterward.
+
+**Dashboard's USD/THB rate** gets the same visible "Refresh now" +
+"Rate last refreshed: ... (relative time)" pattern, but deliberately
+NOT the full DB-first treatment (confirmed via AskUserQuestion) -- no
+new database table. `_cached_usd_thb_rate()` now returns
+`(rate, fetched_at)` instead of just `rate`, still a plain 1-hour
+in-memory cache; the button just calls `.clear()`. This is a single
+non-critical convenience default for a calculator, not data that's
+ever gone blank in a real incident the way Monitor Stocks' profile
+data did, so the added weight of a new table wasn't justified.
+`_relative_time()` duplicated into `dashboard.py` rather than shared
+with `monitor_stocks.py`'s copy -- matches this page's own existing
+`DATA_FILE`/`DIVIDEND_ENTRY_TYPES`-style precedent for small,
+page-local pieces.
+
+Also verified directly (not assumed) that a value the user manually
+types into the rate field survives a Refresh click -- Streamlit's own
+widget-state model only applies `value=` as the initial default;
+once a widget has been interacted with, its own tracked value takes
+over on subsequent reruns regardless of what `value=` would compute
+to now.
+
+### Implementation
+
+- **`core/calculations.py`**: `describe_market_profile_freshness()`.
+- **`app_pages/monitor_stocks.py`**: `_cached_fetch_stock_profile`
+  replaced by `_cached_read_stock_profile_from_db()` +
+  `_refresh_stock_profile_live()`; `_relative_time()` helper; caption
+  block rewritten for "Oldest + warning".
+- **`app_pages/dashboard.py`**: `_cached_usd_thb_rate()` returns a
+  `(rate, fetched_at)` tuple; sidebar gets a "Refresh now" button +
+  caption; own `_relative_time()` copy.
+- **`core/db.py`**: no schema change -- `market_profile_cache`/
+  `save_market_profile_cache`/`fetch_market_profile_cache` already
+  existed from V4.5, reused as-is.
+
+### Testing and verification
+
+338 tests passing (9 new: `TestDescribeMarketProfileFreshness` in
+`tests/test_calculations.py`, including the same-batch-tolerance
+regression case above). `py_compile`, full `pytest -q` before/after.
+
+Real-data verification against dev Turso + yfinance, not just unit
+tests: confirmed a normal Monitor Stocks load does NOT change any
+row's `Fetched At` (proves it truly isn't calling yfinance for
+already-captured symbols); confirmed a symbol manually deleted from
+`market_profile_cache` gets auto-captured on the next fresh-session
+load (had to explicitly clear Streamlit's process-level cache to
+correctly simulate a fresh session in the test harness -- the no-ttl
+cache persisting across separate `AppTest()` instances in the same
+process is itself the correctly-proven behavior from the prior check,
+not a bug); confirmed clicking "Refresh now" updates every
+successfully-fetched symbol's `Fetched At` and the very next read
+reflects it. `AppTest` runs against real data throughout, zero
+exceptions. Dashboard's Refresh section separately verified the same
+way (initial load + simulated button click, zero exceptions, caption
+renders correctly) plus the manual-edit-survives-Refresh check above.
+
+### Considered and explicitly deferred
+
+- **Auto Trendline price-history/chart caching** -- its own future
+  branch, per explicit decision. Real time-series table, incremental
+  vs. full refetch, and stock-split revision risk all need their own
+  design pass.
+- **Rebalance & Reallocate's own redundant yfinance fetch** -- found
+  during a follow-up discussion, not fixed this round. `core/rebalance.py`'s
+  `get_dividend_holdings()` calls `market_data.fetch_stock_profile()`
+  directly, on its own separate 5-minute in-memory cache
+  (`_cached_dividend_holdings`), completely independent of Monitor
+  Stocks' `market_profile_cache`. Since Rebalance's dividend holdings
+  are a subset of what Monitor Stocks already tracks, this is a real,
+  overlapping redundant fetch -- worth its own small step later,
+  either giving Rebalance the same DB-first treatment or (better)
+  having it read Monitor Stocks' already-captured cache instead of
+  fetching its own copy. Not urgent -- the page works fine today, just
+  slightly slower and more rate-limit-exposed than it needs to be.
+- **Rebalance's/Monitor Stocks' own dividends-received staleness gap**
+  -- unchanged from V4.5's own deferred note, still not fixed.
+- **Per-symbol "Refresh just this one" action** -- "Refresh now" stays
+  all-or-nothing on Monitor Stocks, matching prior behavior. Not asked
+  for.
+- **A visible "Fetched At" column in the table** -- rejected in favor
+  of the "Oldest + warning" caption (shown as an alternative mockup,
+  not chosen).
+
 ## Deferred / future
 
 - **Restore from a backup** -- see V2.3's "Considered and explicitly
