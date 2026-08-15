@@ -1,5 +1,4 @@
 import os
-from datetime import datetime
 
 import pandas as pd
 import plotly.express as px
@@ -27,28 +26,61 @@ DATA_FILE = os.path.join(
 DIVIDEND_ENTRY_TYPES = ["Dividends", "Div. Adj(NRA Withheld)", "Dividend", "Capital Distribution"]
 
 
-@st.cache_data(ttl=300)
-def _cached_fetch_stock_profile(symbols: list[str]) -> tuple[pd.DataFrame, datetime]:
-    """Cached wrapper around market_data.fetch_stock_profile -- the only network call on
-    this page. core/market_data.py deliberately has no Streamlit import (see its own
-    docstring), so caching is applied here at the page boundary instead. 5-minute TTL:
-    prices go stale like a live read, but don't need Record-Trade-save-level immediacy.
-    "Refresh now" below calls .clear() on this same function to bypass the TTL on demand.
-    Returns the fetch timestamp alongside the data -- computed here, inside the cached
-    function, so it's captured once at cache-miss time and reused for every cache-hit
-    until the TTL expires or Refresh now clears it (not recomputed on every rerun).
+@st.cache_data
+def _cached_read_stock_profile_from_db(symbols: list[str]) -> pd.DataFrame:
+    """v4.5.1 -- Monitor Stocks' normal profile-data read path: DB-first, never calls
+    yfinance for a symbol that's already been captured before. Replaces v4.5's
+    _cached_fetch_stock_profile, which tried a live yfinance fetch for ALL symbols on
+    (roughly) every 5-minute window and only fell back to the database on failure --
+    that fixed the "everything goes blank" incident (see _refresh_stock_profile_live's
+    own docstring below), but still meant a real network round trip on essentially
+    every normal page load. Inverted per direct user request: a plain DB read is
+    already cheap and instant, so normal navigation reads market_profile_cache
+    directly and only touches yfinance when "Refresh now" is explicitly clicked.
 
-    v4.5 -- adds a durable DB-backed fallback on top of the in-memory 5-minute cache
-    above, prompted by a real production incident: right after v4.4.1's first deploy,
-    Yahoo Finance rate-limited/blocked Streamlit Community Cloud's shared IP, and
-    since this in-memory cache starts empty on every fresh process, every
-    yfinance-derived column went blank app-wide instead of just briefly stale.
-    calculations.apply_market_profile_fallback() replaces any row that failed live
-    with the last real values captured in market_profile_cache, if any, flagged
-    Stale=True so the UI can say so rather than presenting old data as current. Rows
-    that DID succeed live get upserted into market_profile_cache right after, keeping
-    the fallback reasonably fresh -- deliberately only the successful ones, so a
-    still-blocked symbol never overwrites a real captured value with another blank."""
+    No ttl (matches cached_db.py's own reasoning) -- the point of caching this at all
+    is to skip even a redundant DB read on every rerun within a session, not to expire
+    data on a timer; only .clear() (called by _refresh_stock_profile_live) or a
+    changed `symbols` list busts it.
+
+    A symbol never captured before still works out of the box, same precedent
+    _cached_reference_line_summary already established for Reference Lines: fetched
+    live exactly once, right here, and saved -- simpler than the full fallback-merge
+    logic below, since there's no "fall back to something" concept for a symbol with
+    nothing ever cached. Either that one-time attempt succeeds (and the row appears
+    here from then on) or it doesn't and the symbol is simply absent from the
+    returned DataFrame -- the caller's left-merge already handles a missing row the
+    same as an all-blank one, same no-regression behavior v4.5 already had."""
+    cached = db.fetch_market_profile_cache()
+    cached_symbols = set(cached["Symbol"]) if not cached.empty else set()
+    missing = [s for s in symbols if s not in cached_symbols]
+    if missing:
+        live_missing = market_data.fetch_stock_profile(missing)
+        successful = live_missing[live_missing["Latest Price"].notna()]
+        if not successful.empty:
+            db.save_market_profile_cache(successful.to_dict("records"))
+        cached = db.fetch_market_profile_cache()
+    return cached[cached["Symbol"].isin(symbols)]
+
+
+def _refresh_stock_profile_live(symbols: list[str]) -> int:
+    """v4.5.1 -- "Refresh now" button's handler: the exact live-fetch-with-fallback
+    logic v4.5's _cached_fetch_stock_profile used to run on every normal load
+    (prompted by a real production incident: right after v4.4.1's first deploy, Yahoo
+    Finance rate-limited/blocked Streamlit Community Cloud's shared IP, and every
+    yfinance-derived column went blank app-wide since there was nothing to fall back
+    to yet), now explicitly opt-in instead of automatic. calculations.
+    apply_market_profile_fallback() replaces any row that fails THIS live attempt with
+    the last real values captured in market_profile_cache, if any. Rows that DID
+    succeed live get upserted right after -- deliberately only the successful ones, so
+    a still-blocked symbol never overwrites a real captured value with another blank.
+    Busts _cached_read_stock_profile_from_db so the very next read reflects what was
+    just fetched.
+
+    Returns the count of symbols that failed THIS live attempt and fell back to their
+    existing cached value -- the caller shows this as a warning only right after an
+    actual Refresh click, not on every normal load, since a normal load never attempts
+    a live fetch at all anymore and so has nothing to report failing."""
     live = market_data.fetch_stock_profile(symbols)
     cached = db.fetch_market_profile_cache()
     merged = calculations.apply_market_profile_fallback(live, cached)
@@ -57,7 +89,26 @@ def _cached_fetch_stock_profile(symbols: list[str]) -> tuple[pd.DataFrame, datet
     if not fresh_rows.empty:
         db.save_market_profile_cache(fresh_rows.drop(columns=["Stale", "Fetched At"]).to_dict("records"))
 
-    return merged, datetime.now()
+    _cached_read_stock_profile_from_db.clear()
+    return int(merged["Stale"].sum())
+
+
+def _relative_time(ts: pd.Timestamp, now: pd.Timestamp) -> str:
+    """Small presentation-layer helper (not core/calculations.py -- pure string
+    formatting, no business logic worth unit-testing in isolation). Mirrors the
+    granularity a human actually cares about: seconds/minutes don't matter past
+    "just now", hours matter within a day, days matter after that."""
+    seconds = (now - ts).total_seconds()
+    if seconds < 60:
+        return "just now"
+    minutes = int(seconds // 60)
+    if minutes < 60:
+        return f"{minutes} minute{'s' if minutes != 1 else ''} ago"
+    hours = int(seconds // 3600)
+    if hours < 24:
+        return f"{hours} hour{'s' if hours != 1 else ''} ago"
+    days = int(seconds // 86400)
+    return f"{days} day{'s' if days != 1 else ''} ago"
 
 
 @st.cache_data(ttl=300)
@@ -69,15 +120,17 @@ def _cached_reference_line_summary(symbols: list[str], latest_prices: dict) -> p
     calculations.compute_reference_lines + db.save_reference_lines, same YTD/Daily basis
     the per-symbol page seeds a never-visited symbol with) -- the whole point of this tab.
 
-    Cached like _cached_fetch_stock_profile above (same 5-minute TTL, cleared by the same
-    "Refresh now" button) -- a cold run can mean dozens of real price-history fetches, but
-    once a symbol is captured this only costs a cheap DB read on every subsequent call
-    (auto-capture skips anything already present), so the TTL mainly governs how often the
-    "passed" check re-evaluates against a fresh price, not repeated capture work.
-    `latest_prices` is a plain {symbol: price} dict rather than the profile DataFrame --
-    st.cache_data hashes it directly, and since _cached_fetch_stock_profile is itself
-    cached with the same TTL, this dict is stable (and this function cache-hits) across
-    reruns within the same window, not just within one script pass.
+    Own 5-minute TTL, cleared by the same "Refresh now" button -- a cold run can mean
+    dozens of real price-history fetches, but once a symbol is captured this only costs
+    a cheap DB read on every subsequent call (auto-capture skips anything already
+    present), so the TTL mainly governs how often the "passed" check re-evaluates
+    against a fresh price, not repeated capture work. `latest_prices` is a plain
+    {symbol: price} dict rather than the profile DataFrame -- st.cache_data hashes it
+    directly. v4.5.1 -- since profile data (and so `Latest Price`) is now read
+    DB-first via _cached_read_stock_profile_from_db, this dict stays identical for the
+    whole session between Refresh clicks (not just within a 5-minute window like
+    before), so this function still cache-hits across reruns whenever its own 5-minute
+    TTL hasn't separately expired.
 
     db.mark_reference_lines_passed() runs every call (cheap -- reuses `latest_prices`
     already fetched for the page, no extra network cost) so a line crossed since the last
@@ -209,7 +262,9 @@ with st.expander("What do these numbers mean?"):
         "(matching Dashboard's own Dividends KPI convention) -- the actual cash expected from "
         "your position size, not a gross per-share rate; % Div per Year itself stays gross, "
         "computed from actual trailing-12-month payouts (not yfinance's often-blank-for-ETFs "
-        "dividendRate). Prices are cached for 5 minutes."
+        "dividendRate). v4.5.1 -- profile data (Description/Sector/Beta/Dividends/90D "
+        "history) is read straight from the database on every load, not fetched live -- "
+        "click \"Refresh now\" below to pull fresh values from yfinance."
     )
 
 db_trades = cached_db.cached_fetch_trades()
@@ -220,26 +275,47 @@ holdings = holdings.merge(symbol_types, on="Symbol", how="left")
 holdings["Allocation Type"] = holdings["Allocation Type"].fillna("Others")
 holdings = holdings.rename(columns={"Allocation Type": "Category"})
 
-if st.button("Refresh now", help="Bypass the 5-minute cache and re-fetch live prices."):
-    _cached_fetch_stock_profile.clear()
+just_refreshed_stale_count = None
+if st.button("Refresh now", help="Fetch the latest live data from yfinance now (normal page loads read from the database instead)."):
+    just_refreshed_stale_count = _refresh_stock_profile_live(holdings["Symbol"].tolist())
     _cached_reference_line_summary.clear()
 
-profile, last_refreshed = _cached_fetch_stock_profile(holdings["Symbol"].tolist())
-st.caption(f"Last refreshed: {last_refreshed.strftime('%d/%m/%Y %H:%M')}")
+profile = _cached_read_stock_profile_from_db(holdings["Symbol"].tolist())
 
-# v4.5 -- surfaces when apply_market_profile_fallback() actually fell back to
-# market_profile_cache for one or more symbols (a live yfinance fetch failed, e.g.
-# the real Yahoo Finance rate-limit incident right after v4.4.1 deployed), so stale
-# data reads as "we know, here's what we last captured" rather than silently
-# pretending to be current.
-stale_count = int(profile["Stale"].sum())
-if stale_count:
+# v4.5.1 -- "Oldest + warning" caption, confirmed with the user via concrete chat
+# mockups before building: the main line always pairs the absolute timestamp with
+# relative time, since a UNIFORMLY stale batch (nobody's clicked Refresh in days, but
+# every symbol shares the same old timestamp) has no single outlier to name yet still
+# needs to read as clearly old. A second line names the specific outlier symbol only
+# when one genuinely exists (a newly-added holding auto-captured separately from the
+# rest, or one symbol's last Refresh attempt specifically failed -- see
+# _refresh_stock_profile_live's Stale handling above).
+freshness = calculations.describe_market_profile_freshness(profile["Fetched At"], profile["Symbol"])
+if pd.isna(freshness["newest"]):
+    st.caption("No profile data captured yet for any symbol -- click \"Refresh now\" above.")
+else:
+    now = pd.Timestamp.now()
+    st.caption(
+        f"Data last refreshed: {freshness['newest'].strftime('%d/%m/%Y %H:%M')} "
+        f"({_relative_time(freshness['newest'], now)})"
+    )
+    if freshness["has_variance"]:
+        st.caption(
+            f"⚠ Oldest: {freshness['oldest_symbol']}, captured "
+            f"{freshness['oldest'].strftime('%d/%m/%Y %H:%M')} ({_relative_time(freshness['oldest'], now)})"
+        )
+
+# v4.5.1 -- shown only right after an actual "Refresh now" click (a normal DB-first
+# load never attempts a live fetch, so it has nothing to report failing). Mirrors
+# v4.5's own warning, prompted by the real Yahoo Finance rate-limit incident right
+# after v4.4.1 deployed, so a failed live attempt still reads as "we know, here's what
+# we last captured" rather than silently presenting old data as current.
+if just_refreshed_stale_count:
     st.warning(
-        f"{stale_count} symbol(s) couldn't be fetched live just now (likely a temporary "
-        "yfinance/Yahoo issue) -- showing the last successfully captured values for "
-        "those instead. Description/Sector/Beta/Dividend fields may be a bit older than "
-        "\"Last refreshed\" above for just those symbols; Symbol/Category/Quantity/Cost "
-        "columns are unaffected (they don't come from yfinance)."
+        f"{just_refreshed_stale_count} symbol(s) couldn't be fetched live just now "
+        "(likely a temporary yfinance/Yahoo issue) -- showing the last successfully "
+        "captured values for those instead. Symbol/Category/Quantity/Cost columns are "
+        "unaffected (they don't come from yfinance)."
     )
 
 holdings = holdings.merge(profile, on="Symbol", how="left")

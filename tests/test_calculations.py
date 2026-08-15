@@ -18,6 +18,7 @@ from core.calculations import (
     compute_stochastic_oscillator,
     compute_swing_trend_lines,
     count_touches,
+    describe_market_profile_freshness,
     estimate_sell_realized_pl,
     find_nearest_levels,
     find_swing_points,
@@ -1166,3 +1167,85 @@ class TestApplyMarketProfileFallback:
         assert result.loc["HASFALLBACK", "Latest Price"] == 11.0
         assert bool(result.loc["NOTHINGCACHED", "Stale"]) is False
         assert pd.isna(result.loc["NOTHINGCACHED", "Latest Price"])
+
+
+class TestDescribeMarketProfileFreshness:
+    def test_all_same_timestamp_has_no_variance(self):
+        same = pd.Timestamp("2026-08-15 09:15:00")
+        fetched_at = pd.Series([same, same, same])
+        symbols = pd.Series(["AAPL", "BLK", "RKLB"])
+        result = describe_market_profile_freshness(fetched_at, symbols)
+        assert result["newest"] == same
+        assert result["oldest"] == same
+        assert result["has_variance"] is False
+
+    def test_single_symbol_has_no_variance(self):
+        result = describe_market_profile_freshness(
+            pd.Series([pd.Timestamp("2026-08-15 09:15:00")]), pd.Series(["AAPL"]),
+        )
+        assert result["has_variance"] is False
+
+    def test_a_same_batch_capture_a_few_seconds_apart_is_not_a_false_outlier(self):
+        # Regression: caught live against a real 52-symbol batch -- a strict `!=`
+        # comparison flagged a symbol captured mere seconds before its neighbors as
+        # "the outlier", which reads as a meaningless warning to a human.
+        fetched_at = pd.Series([
+            pd.Timestamp("2026-08-15 09:15:47"),
+            pd.Timestamp("2026-08-15 09:15:03"),  # 44 seconds earlier -- same batch
+        ])
+        symbols = pd.Series(["AAPL", "AIQ"])
+        result = describe_market_profile_freshness(fetched_at, symbols)
+        assert result["has_variance"] is False
+
+    def test_a_gap_just_over_the_tolerance_does_count_as_variance(self):
+        fetched_at = pd.Series([
+            pd.Timestamp("2026-08-15 09:15:00"),
+            pd.Timestamp("2026-08-15 09:09:00"),  # 6 minutes earlier -- past the 5-minute default
+        ])
+        result = describe_market_profile_freshness(fetched_at, pd.Series(["AAPL", "AIQ"]))
+        assert result["has_variance"] is True
+
+    def test_one_outlier_is_identified_by_symbol_and_date(self):
+        fetched_at = pd.Series([
+            pd.Timestamp("2026-08-15 09:15:00"),
+            pd.Timestamp("2026-08-15 09:15:00"),
+            pd.Timestamp("2026-08-10 14:22:00"),  # RKLB, the real outlier
+        ])
+        symbols = pd.Series(["AAPL", "BLK", "RKLB"])
+        result = describe_market_profile_freshness(fetched_at, symbols)
+        assert result["newest"] == pd.Timestamp("2026-08-15 09:15:00")
+        assert result["oldest"] == pd.Timestamp("2026-08-10 14:22:00")
+        assert result["oldest_symbol"] == "RKLB"
+        assert result["has_variance"] is True
+
+    def test_uniformly_stale_batch_still_reports_newest_even_with_no_outlier(self):
+        # Nobody's clicked Refresh in days -- every symbol shares the same OLD
+        # timestamp. No single outlier to name, but the caption's main line still
+        # needs `newest` to read as clearly stale.
+        old = pd.Timestamp("2026-08-10 14:22:00")
+        result = describe_market_profile_freshness(
+            pd.Series([old, old]), pd.Series(["AAPL", "BLK"]),
+        )
+        assert result["newest"] == old
+        assert result["has_variance"] is False
+
+    def test_nat_rows_are_ignored(self):
+        fetched_at = pd.Series([
+            pd.Timestamp("2026-08-15 09:15:00"), pd.NaT, pd.Timestamp("2026-08-15 09:15:00"),
+        ])
+        symbols = pd.Series(["AAPL", "NEVERCAPTURED", "BLK"])
+        result = describe_market_profile_freshness(fetched_at, symbols)
+        assert result["has_variance"] is False
+        assert result["newest"] == pd.Timestamp("2026-08-15 09:15:00")
+
+    def test_empty_input_returns_nat_and_no_variance(self):
+        result = describe_market_profile_freshness(pd.Series([], dtype="datetime64[ns]"), pd.Series([], dtype=object))
+        assert pd.isna(result["newest"])
+        assert pd.isna(result["oldest"])
+        assert result["oldest_symbol"] is None
+        assert result["has_variance"] is False
+
+    def test_all_nat_returns_nat_and_no_variance(self):
+        result = describe_market_profile_freshness(pd.Series([pd.NaT, pd.NaT]), pd.Series(["AAPL", "BLK"]))
+        assert pd.isna(result["newest"])
+        assert result["has_variance"] is False

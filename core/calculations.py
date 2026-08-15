@@ -772,3 +772,46 @@ def apply_market_profile_fallback(live_rows: pd.DataFrame, cached_rows: pd.DataF
         row["Fetched At"] = fetched_at
         out_rows.append(row)
     return pd.DataFrame(out_rows)
+
+
+def describe_market_profile_freshness(
+    fetched_at: pd.Series, symbols: pd.Series, tolerance: pd.Timedelta = pd.Timedelta(minutes=5),
+) -> dict:
+    """v4.5.1 -- Monitor Stocks' "Data last refreshed" caption, once profile reads
+    became DB-first (each symbol can now have its own real capture time, instead of
+    one shared "last refreshed" moment for the whole batch). Pure and Streamlit/DB-free
+    so it's testable without a real fetch or database (see tests/test_calculations.py).
+
+    `fetched_at`/`symbols` are same-length, same-order Series (typically two columns
+    of the same DataFrame -- "Fetched At"/"Symbol" from
+    db.fetch_market_profile_cache()). Returns {"newest": Timestamp, "oldest": Timestamp,
+    "oldest_symbol": str, "has_variance": bool} -- `has_variance` is False whenever
+    every symbol's timestamp falls within `tolerance` of the newest one, telling the
+    caller not to bother naming an "oldest" outlier since there isn't a meaningful one.
+    `newest`/`oldest` are still always populated even when `has_variance` is False (the
+    caption's main line needs `newest` unconditionally -- e.g. "Data last refreshed:
+    10/08/2026 14:22 (5 days ago)" when nobody's clicked Refresh in days but every
+    symbol is uniformly stale, not just when there's a single outlier).
+
+    `tolerance` defaults to 5 minutes (matching this app's existing "5-minute" cache
+    convention elsewhere) so a real batch capture -- dozens of symbols saved moments
+    apart from each other during the same Refresh or auto-capture run, genuinely a few
+    seconds apart, not meaningfully stale -- doesn't read as a false "Oldest" warning.
+    Caught live: an early version used a strict `!=` comparison, and a real batch of 52
+    symbols (captured within the same few seconds of each other) still triggered a
+    warning naming one as "the outlier" even though its timestamp was, to a human,
+    indistinguishable from the rest.
+
+    Returns {"newest": pd.NaT, "oldest": pd.NaT, "oldest_symbol": None,
+    "has_variance": False} for empty input -- nothing captured yet at all (e.g. a
+    genuinely fresh database, before any symbol has ever been fetched)."""
+    valid = fetched_at.notna()
+    if not valid.any():
+        return {"newest": pd.NaT, "oldest": pd.NaT, "oldest_symbol": None, "has_variance": False}
+    newest = fetched_at[valid].max()
+    oldest = fetched_at[valid].min()
+    oldest_symbol = symbols[valid][fetched_at[valid] == oldest].iloc[0]
+    return {
+        "newest": newest, "oldest": oldest, "oldest_symbol": oldest_symbol,
+        "has_variance": (newest - oldest) > tolerance,
+    }
