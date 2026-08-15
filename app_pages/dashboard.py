@@ -46,9 +46,33 @@ def compute_realized_pl(transactions):
 # 1-hour TTL, longer than Monitor Stocks' 5-minute one -- this is just a rough reference
 # figure (see the number_input's own help text below), not something that needs
 # near-real-time freshness, and it avoids an extra network call on every Dashboard load.
+# v4.5.1 -- returns the fetch timestamp alongside the rate so the sidebar can show a
+# "Refresh now" button + "last refreshed" label, matching Monitor Stocks' own pattern.
+# Deliberately NOT given the full DB-first treatment Monitor Stocks' profile data got
+# (own database table, survives restarts) -- this is a single non-critical convenience
+# default for a calculator, not data that's ever gone blank in a real incident, so the
+# added weight of a new table wasn't worth it. Stays a simple in-memory cache; a
+# process restart just means the next load re-fetches once, like today.
 @st.cache_data(ttl=3600)
-def _cached_usd_thb_rate():
-    return fetch_usd_thb_rate()
+def _cached_usd_thb_rate() -> tuple[float | None, pd.Timestamp]:
+    return fetch_usd_thb_rate(), pd.Timestamp.now()
+
+
+def _relative_time(ts: pd.Timestamp, now: pd.Timestamp) -> str:
+    """Same shape as monitor_stocks.py's own copy -- duplicated rather than shared,
+    matching this page's existing DATA_FILE/DIVIDEND_ENTRY_TYPES-style per-page
+    duplication convention for small, page-local pieces."""
+    seconds = (now - ts).total_seconds()
+    if seconds < 60:
+        return "just now"
+    minutes = int(seconds // 60)
+    if minutes < 60:
+        return f"{minutes} minute{'s' if minutes != 1 else ''} ago"
+    hours = int(seconds // 3600)
+    if hours < 24:
+        return f"{hours} hour{'s' if hours != 1 else ''} ago"
+    days = int(seconds // 86400)
+    return f"{days} day{'s' if days != 1 else ''} ago"
 
 
 def for_display(df):
@@ -148,7 +172,13 @@ start = pd.Timestamp(start.year, start.month, 1)
 end = pd.Timestamp(end.year, end.month, 1)
 
 st.sidebar.header("Display")
-_live_thb_rate = _cached_usd_thb_rate()
+if st.sidebar.button("Refresh now", help="Fetch a fresh USD → THB quote now (normally cached for 1 hour)."):
+    _cached_usd_thb_rate.clear()
+_live_thb_rate, _thb_rate_fetched_at = _cached_usd_thb_rate()
+st.sidebar.caption(
+    f"Rate last refreshed: {_thb_rate_fetched_at.strftime('%d/%m/%Y %H:%M')} "
+    f"({_relative_time(_thb_rate_fetched_at, pd.Timestamp.now())})"
+)
 thb_rate = st.sidebar.number_input(
     "USD → THB rate", min_value=0.0, value=_live_thb_rate or DEFAULT_THB_RATE, step=0.1,
     help="Pre-filled from a live quote (yfinance); edit freely if you want a different rate. Used only "
