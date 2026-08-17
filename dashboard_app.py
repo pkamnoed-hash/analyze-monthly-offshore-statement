@@ -64,8 +64,9 @@ pg = st.navigation({
     "Analysis": [
         # Reachable both ways -- directly from the sidebar (shows its own symbol picker
         # when opened with no "symbol" query param, see app_pages/symbol_analysis.py) and
-        # via the "view" cell on Monitor Stocks' Trendline tab (st.switch_page(...,
-        # query_params={"symbol": ...}), which pre-selects a symbol and skips the picker).
+        # via the "view" cell on Monitor Stocks' Overall/Reference Lines/Highlight tabs
+        # (st.switch_page(..., query_params={"symbol": ...}), which pre-selects a symbol
+        # and skips the picker).
         st.Page("app_pages/symbol_analysis.py", title="Auto Trendline", url_path="symbol-analysis"),
     ],
 })

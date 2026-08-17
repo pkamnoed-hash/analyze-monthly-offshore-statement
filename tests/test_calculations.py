@@ -11,7 +11,6 @@ from core.calculations import (
     compute_holding_period_start,
     compute_horizontal_sr_zones,
     compute_moving_average,
-    compute_pivot_points,
     compute_realized_pl,
     compute_reference_lines,
     compute_roi,
@@ -514,117 +513,6 @@ class TestComputeRoi:
         roi_pct, annualized = compute_roi(investment_gain=-500, capital_base=10000, period_days=365)
         assert roi_pct == pytest.approx(-5.0)
         assert annualized == pytest.approx(-5.0, abs=0.1)
-
-
-class TestComputePivotPoints:
-    def test_matches_hand_computed_levels(self):
-        # High 110, Low 90, Pivot 100 -> Pivot passed straight through, clean round numbers.
-        result = compute_pivot_points(high=110.0, low=90.0, pivot=100.0)
-        assert result["Pivot"] == pytest.approx(100.0)
-        assert result["R1"] == pytest.approx(110.0)
-        assert result["S1"] == pytest.approx(90.0)
-        assert result["R2"] == pytest.approx(120.0)
-        assert result["S2"] == pytest.approx(80.0)
-        assert result["R3"] == pytest.approx(130.0)
-        assert result["S3"] == pytest.approx(70.0)
-
-    def test_wide_range_relative_to_price_gives_negative_s3(self):
-        # Real shape from a volatile small-cap (RKLB-like): 90-day High far
-        # above Low relative to Pivot -- S3 going negative is a genuine
-        # output of the formula, not a bug, so this locks that behavior in
-        # rather than treating it as a regression to "fix" later.
-        result = compute_pivot_points(high=151.0, low=58.2, pivot=81.75)
-        assert result["S3"] < 0
-        assert result["S3"] == pytest.approx(58.2 - 2 * (151.0 - 81.75))
-
-    def test_missing_high_low_leaves_pivot_valid_but_derived_levels_nan(self):
-        # Matches the real unresolved-symbol shape: market_data.fetch_stock_profile
-        # sets High90D/Low90D to NaN together on a fetch failure, but Avg Cost (the
-        # pivot basis passed in here) comes from trade history, not the market
-        # fetch -- unaffected. Pivot stays a real number (your own cost is still
-        # known even when the market data isn't); every level that needs High/Low
-        # goes NaN since there's no range to build from. A real improvement over
-        # the old (High+Low+Close)/3 average, which would have poisoned Pivot too.
-        result = compute_pivot_points(high=float("nan"), low=float("nan"), pivot=100.0)
-        assert result["Pivot"] == pytest.approx(100.0)
-        assert pd.isna(result["R1"])
-        assert pd.isna(result["S1"])
-        assert pd.isna(result["R2"])
-        assert pd.isna(result["S2"])
-        assert pd.isna(result["R3"])
-        assert pd.isna(result["S3"])
-
-    def test_nan_pivot_propagates_to_every_derived_level(self):
-        result = compute_pivot_points(high=110.0, low=90.0, pivot=float("nan"))
-        assert all(pd.isna(v) for v in result.values())
-
-    def test_cost_basis_below_entire_trading_range_gets_clamped_and_resorted(self):
-        # Real shape confirmed on RKLB: Pivot (Avg Cost) decoupled from High/Low means
-        # it can sit entirely below (or above) the 90-day range. Raw formula: R1 = 2*50
-        # - 100 = 0, which is BELOW Pivot (50) -- nonsensical as "resistance." Clamping
-        # floors it at Pivot, then resorting (R1<=R2<=R3, S1>=S2>=S3) fixes the internal
-        # ordering too, which clamping alone wouldn't -- the 3 raw R candidates here
-        # (0, 150, 100) are out of order even before considering the clamp.
-        result = compute_pivot_points(high=200.0, low=100.0, pivot=50.0)
-        assert result["Pivot"] == pytest.approx(50.0)
-        assert result["R1"] == pytest.approx(50.0)  # clamped to Pivot exactly
-        assert result["R2"] == pytest.approx(100.0)
-        assert result["R3"] == pytest.approx(150.0)
-        assert result["S1"] == pytest.approx(-50.0)
-        assert result["S2"] == pytest.approx(-100.0)
-        assert result["S3"] == pytest.approx(-200.0)
-
-    def test_ordering_invariant_always_holds(self):
-        # S3 <= S2 <= S1 <= Pivot <= R1 <= R2 <= R3, regardless of how Pivot relates to
-        # High/Low -- the guarantee this clamp+resort step exists to provide.
-        for high, low, pivot in [(110.0, 90.0, 100.0), (151.0, 58.2, 81.75), (200.0, 100.0, 50.0), (100.0, 90.0, 500.0)]:
-            result = compute_pivot_points(high=high, low=low, pivot=pivot)
-            ordered = [result["S3"], result["S2"], result["S1"], result["Pivot"], result["R1"], result["R2"], result["R3"]]
-            assert ordered == sorted(ordered)
-
-    def test_well_behaved_case_is_unaffected_by_clamping(self):
-        # Pivot already between Low and High -- clamping/resorting should be a no-op,
-        # producing the exact same values as the raw classic formula.
-        result = compute_pivot_points(high=110.0, low=90.0, pivot=100.0)
-        assert result["R1"] == pytest.approx(110.0)
-        assert result["R2"] == pytest.approx(120.0)
-        assert result["R3"] == pytest.approx(130.0)
-        assert result["S1"] == pytest.approx(90.0)
-        assert result["S2"] == pytest.approx(80.0)
-        assert result["S3"] == pytest.approx(70.0)
-
-    def test_pivot_is_passed_through_unchanged_not_averaged_with_high_low(self):
-        # Deliberately NOT the classic floor-trader (High+Low+Close)/3 average --
-        # Monitor Stocks relies on Pivot being exactly whatever basis it passed in
-        # (Avg Cost), not something recomputed from High/Low.
-        result = compute_pivot_points(high=200.0, low=50.0, pivot=90.0)
-        assert result["Pivot"] == pytest.approx(90.0)
-
-    def test_vectorizes_over_pandas_series(self):
-        high = pd.Series([110.0, 220.0])
-        low = pd.Series([90.0, 180.0])
-        pivot = pd.Series([100.0, 200.0])
-        result = compute_pivot_points(high, low, pivot)
-        assert isinstance(result["Pivot"], pd.Series)
-        assert result["Pivot"].tolist() == pytest.approx([100.0, 200.0])
-        assert result["R1"].tolist() == pytest.approx([110.0, 220.0])
-
-    def test_two_clamped_candidates_produce_an_exactly_identical_mid_not_a_1ulp_drift(self):
-        # Regression: real AIQ data (High/Low over a real 1M Timeline window, Avg Cost as
-        # Pivot) produced R1 == 47.43141522814266 (== Pivot, correctly clamped) and R2 (the
-        # "mid") == 47.43141522814265 -- one ULP below Pivot, breaking the S3<=...<=R3
-        # ordering invariant by a sub-cent amount. Root cause: the old sum(candidates) -
-        # min - max formula for "mid" doesn't reconstruct an exact float when two of the
-        # three raw candidates clamp to precisely the same `pivot` value. These are the
-        # exact real values that reproduced it -- caught by a real-data smoke test, not a
-        # synthetic case, since round test numbers don't expose this floating-point collision.
-        high, low, pivot = 64.16999816894531, 55.91999816894531, 47.43141522814266
-        result = compute_pivot_points(high=high, low=low, pivot=pivot)
-        ordered = [result["S3"], result["S2"], result["S1"], result["Pivot"], result["R1"], result["R2"], result["R3"]]
-        assert ordered == sorted(ordered)
-        # Both R1 and R2 clamp to Pivot here -- should be bit-exactly Pivot, not "close to" it.
-        assert result["R1"] == pivot
-        assert result["R2"] == pivot
 
 
 def make_ohlc(closes, *, start="2026-01-01"):

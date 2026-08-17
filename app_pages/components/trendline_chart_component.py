@@ -86,10 +86,13 @@ def trendline_chart(
     `cost_per_share` draws a plain, non-draggable, non-deletable reference
     line (your real Avg Cost) -- a fact, not an adjustable target, styled
     the same finer-dotted way as `latest_price`'s line. `visibility` is
-    {"pivot": bool, "latest": bool} -- Zone 3's "Show Cost/Sh"/"Show Latest
-    Price" checkboxes (Reference Lines have their own top-level
-    `show_reference_lines` toggle instead, since they're no longer part of
-    the same "levels" concept Cost/Sh used to ride along with).
+    {"pivot": bool, "latest": bool} -- `pivot` follows Zone 3's "Cost/Sh"
+    toggle; `latest` is always passed True by the caller (no separate
+    toggle for it -- the latest-price line is a fact the user always wants
+    visible, same as the "Latest Price" stat already shown above the
+    chart). Reference Lines have their own top-level `show_reference_lines`
+    toggle instead, since they're no longer part of the same "levels"
+    concept Cost/Sh used to ride along with.
 
     `stochastic` is {"k": [{time, value}, ...], "d": [...]} for the synced
     oscillator pane below the main chart, or None to leave it empty.
