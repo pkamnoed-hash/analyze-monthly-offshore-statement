@@ -66,7 +66,7 @@ if not query_symbol:
         st.stop()
     symbol = st.selectbox(
         "Symbol", sorted(symbol_options["Symbol"].tolist()),
-        help="Or click \"view\" on a row in Monitor Stocks' Trendline tab to jump straight here.",
+        help="Or click \"view\" on a row in Monitor Stocks' Reference Lines tab to jump straight here.",
     )
 else:
     symbol = query_symbol
@@ -109,7 +109,7 @@ st.caption(f"Price data last refreshed: {last_refreshed.strftime('%d/%m/%Y %H:%M
 
 # ---------------------------------------------------------------------------------
 # Zone 2 through 5 all live inside one @st.fragment. Chart type/Interval/Timeline sit
-# in the SAME toolbar row as the Levels/Lock/Indicators controls (one compact row,
+# in the SAME toolbar row as the Cost/Sh/Reference Lines/Lock/Indicators controls (one compact row,
 # TradingView-style, instead of stacked blocks) -- Streamlit only allows that if
 # everything sharing the row lives in a single fragment: fragments are explicitly
 # barred from rendering widgets into containers created outside themselves (confirmed
@@ -134,19 +134,22 @@ st.caption(f"Price data last refreshed: {last_refreshed.strftime('%d/%m/%Y %H:%M
 @st.fragment
 def _render_symbol_analysis_zones():
     # ---------------------------------------------------------------------------
-    # Zone 2 + Levels/Lock/Indicators -- one row. Chart type, Interval (what one bar
-    # represents), and Timeline (how much history is shown) match TradingView's own
-    # vocabulary. Levels/Indicators are popovers (a button that opens a small panel)
-    # rather than TradingView's full "Object Tree"/indicator search -- real added
-    # complexity this page's line groups + 3 MAs don't need. Reference Lines/Lock each
-    # sit on their own as a toggle, not nested inside a popover, since they're single
-    # on/off states the user wants to flip at a glance, not a group of display
-    # preferences. Chart type/Interval/Timeline keys are NOT per-symbol (unlike the
-    # rest of this page's state) -- these read as viewing preferences that should
-    # carry over when you switch symbols, matching their behavior before this row was
-    # reorganized. Note: none of these three controls the captured Reference Line set
-    # itself anymore (see the capture/regenerate model below) -- they only ever affect
-    # what the chart displays.
+    # Zone 2 + Cost/Sh/Reference Lines/Lock/Indicators -- one row. Chart type, Interval
+    # (what one bar represents), and Timeline (how much history is shown) match
+    # TradingView's own vocabulary. Indicators stays a popover (a button that opens a
+    # small panel) -- real added complexity its 3 MAs don't need spelled out inline.
+    # Cost/Sh, Reference Lines, and Lock are each their own toggle, not nested inside a
+    # popover, since they're single on/off states the user wants to flip at a glance,
+    # not a group of display preferences. (The old "Levels" popover that used to hold
+    # Cost/Sh alongside a separate "Show Latest Price" checkbox was removed -- the
+    # latest-price line is a fact the user always wants visible, same as the "Latest
+    # Price" stat already shown above the chart, so it's hardcoded on in the
+    # trendline_chart() call below instead of being a togglable option.) Chart type/
+    # Interval/Timeline keys are NOT per-symbol (unlike the rest of this page's state)
+    # -- these read as viewing preferences that should carry over when you switch
+    # symbols, matching their behavior before this row was reorganized. Note: none of
+    # these three controls the captured Reference Line set itself anymore (see the
+    # capture/regenerate model below) -- they only ever affect what the chart displays.
     # ---------------------------------------------------------------------------
     col1, col2, col3, col4, col5, col6, col7 = st.columns([1.1, 1, 1.8, 0.9, 1.1, 0.9, 1.0])
     with col1:
@@ -161,9 +164,7 @@ def _render_symbol_analysis_zones():
             key="symbol_analysis_timeline",
         )
     with col4:
-        with st.popover("Levels"):
-            show_latest = st.checkbox("Show Latest Price", value=True, key=f"show_latest_{symbol}")
-            show_pivot = st.checkbox("Show Cost/Sh", value=True, key=f"show_pivot_{symbol}")
+        show_pivot = st.toggle("Cost/Sh", value=True, key=f"show_pivot_{symbol}")
     with col5:
         show_reference_lines = st.toggle("Reference Lines", value=True, key=f"show_reference_lines_{symbol}")
     with col6:
@@ -365,7 +366,10 @@ def _render_symbol_analysis_zones():
         ma_series=ma_series_payload,
         ma_visible=ma_visible_payload,
         chart_type="candle",
-        visibility={"pivot": show_pivot, "latest": show_latest},
+        # "latest" hardcoded True -- the "Show Latest Price" checkbox was removed
+        # (redundant with the always-visible "Latest Price" stat above); "pivot" still
+        # follows the "Cost/Sh" toggle (col4 above).
+        visibility={"pivot": show_pivot, "latest": True},
         locked=lock_rs,
         stochastic=stochastic_payload,
         key=f"trendline_chart_{symbol}",
@@ -414,6 +418,13 @@ def _render_symbol_analysis_zones():
             captured_interval=basis.get("interval"),
         )
         st.session_state[save_snapshot_key] = snapshot
+        # Bust Monitor Stocks' own 5-minute-cached summary tab -- without this, a
+        # Regenerate/drag/delete/add here (which resets passed_at to NULL right above)
+        # stayed invisible on Monitor Stocks until that cache's TTL happened to expire on
+        # its own, showing a stale highlighted/"Passed R/S" cell for up to 5 minutes after
+        # a fresh capture that had already cleared the underlying DB row. Real bug, caught
+        # live: regenerating DVYE here still showed it passed on Monitor Stocks right after.
+        cached_db.invalidate_reference_line_summary()
 
     # v4.4.1 tweak -- same passed-detection Monitor Stocks' cached summary tab uses
     # (core.db.mark_reference_lines_passed), run here too so a symbol viewed directly

@@ -305,91 +305,6 @@ def compute_roi(investment_gain: float, capital_base: float, period_days: int):
     return roi_pct, annualized_roi_pct
 
 
-def compute_pivot_points(high, low, pivot):
-    """Pivot Points -- 6 support/resistance levels (R1-R3/S1-S3) built outward
-    from a caller-supplied `pivot` and a High/Low range. Works on plain
-    floats or same-shaped pandas Series alike (pure +/-/* arithmetic plus
-    np.minimum/np.maximum, vectorizes for free). Returns a dict keyed
-    "Pivot"/"R1"/"R2"/"R3"/"S1"/"S2"/"S3" -- values matching the input type
-    (float in, float out; Series in, Series out); "Pivot" is `pivot` passed
-    straight through, included so callers get a complete, self-consistent
-    set of 7 values back.
-
-    Deliberately does NOT derive `pivot` internally (e.g. the classic floor-
-    trader average of High/Low/Close) -- the caller decides what basis the
-    levels are built around. Monitor Stocks passes Avg Cost (Cost/Sh)
-    directly, anchoring every level to what was actually paid rather than
-    the current market price, so the R/S levels double as a buy/sell
-    reference against cost basis, not just "where price sits in its own
-    recent range."
-
-    Clamped and resorted so the ordering S3 <= S2 <= S1 <= Pivot <= R1 <=
-    R2 <= R3 always holds. With `pivot` decoupled from `high`/`low` (real
-    for a cost basis that sits entirely outside the 90-day trading range --
-    confirmed on RKLB, where a much-lower cost basis than the recent range
-    put the raw R1 formula result *below* Pivot), the raw classic formulas
-    can produce a "resistance" level below Pivot or a "support" level above
-    it, and the three same-side values can land out of order relative to
-    each other even when none of them cross Pivot. Clamping floors every
-    raw R candidate at `pivot` and ceils every raw S candidate at `pivot`
-    (a level can never end up on the wrong side); resorting then assigns
-    the smallest of the three clamped R candidates to R1 (closest to
-    Pivot) through the largest to R3, and the largest S candidate to S1
-    (closest to Pivot) through the smallest to S3. A well-behaved case
-    (Pivot already between Low and High) is unaffected -- the raw values
-    are already in this order, so clamping and resorting are no-ops. An
-    extreme-but-correctly-signed value (e.g. a very negative S3 for a
-    volatile symbol) is also unaffected -- still shown as-is, informational
-    rather than a realistic price target.
-
-    NaN propagates naturally through every level that actually depends on the
-    NaN input, no special-casing needed -- notably, `pivot` is independent of
-    `high`/`low`, so a symbol with a valid Avg Cost but missing market data
-    (an unresolved yfinance fetch, where High90D/Low90D come back NaN
-    together) still gets a real "Pivot" value back, just NaN for the 6
-    levels that need a High/Low range."""
-    r_candidates = [
-        np.maximum(2 * pivot - low, pivot),
-        np.maximum(pivot + (high - low), pivot),
-        np.maximum(high + 2 * (pivot - low), pivot),
-    ]
-    s_candidates = [
-        np.minimum(2 * pivot - high, pivot),
-        np.minimum(pivot - (high - low), pivot),
-        np.minimum(low - 2 * (high - pivot), pivot),
-    ]
-
-    # Median-of-three via min/max comparisons only (max(min(a,b), min(max(a,b),c))) --
-    # NOT sum(candidates) - min - max, which was the original approach here and is
-    # numerically fragile: when two of the three candidates clamp to the exact same
-    # `pivot` float (a real, common case -- e.g. AIQ's real 90-day data at a 1M Timeline
-    # window), that sum-then-subtract arithmetic can reconstruct a value off by 1 ULP
-    # from `pivot` instead of exactly `pivot`, which broke the S3<=...<=R3 ordering
-    # invariant by a sub-cent amount (confirmed against real holdings, not synthetic
-    # data -- see tests/test_calculations.py's regression test). The min/max formula
-    # never combines values arithmetically -- it always returns one of the three exact
-    # input floats, so two identical clamped candidates produce an exactly identical mid.
-    r_min = np.minimum(np.minimum(r_candidates[0], r_candidates[1]), r_candidates[2])
-    r_max = np.maximum(np.maximum(r_candidates[0], r_candidates[1]), r_candidates[2])
-    r_mid = np.maximum(
-        np.minimum(r_candidates[0], r_candidates[1]),
-        np.minimum(np.maximum(r_candidates[0], r_candidates[1]), r_candidates[2]),
-    )
-
-    s_min = np.minimum(np.minimum(s_candidates[0], s_candidates[1]), s_candidates[2])
-    s_max = np.maximum(np.maximum(s_candidates[0], s_candidates[1]), s_candidates[2])
-    s_mid = np.maximum(
-        np.minimum(s_candidates[0], s_candidates[1]),
-        np.minimum(np.maximum(s_candidates[0], s_candidates[1]), s_candidates[2]),
-    )
-
-    return {
-        "Pivot": pivot,
-        "R1": r_min, "R2": r_mid, "R3": r_max,
-        "S1": s_max, "S2": s_mid, "S3": s_min,
-    }
-
-
 def compute_stochastic_oscillator(high: pd.Series, low: pd.Series, close: pd.Series,
                                    k_period: int = 14, d_period: int = 3) -> dict:
     """Standard "Full Stochastic" (14, 3) oscillator: %K measures where Close sits within
@@ -401,7 +316,7 @@ def compute_stochastic_oscillator(high: pd.Series, low: pd.Series, close: pd.Ser
     A flat window (Highest High == Lowest Low -- e.g. a completely flat price run) would
     otherwise divide by zero; reads as 50 (the midpoint) instead, an arbitrary but sane
     stand-in for "no range to measure position within." Returns a dict with "%K"/"%D"
-    Series, aligned to the input index -- same dict-of-Series shape as compute_pivot_points."""
+    Series, aligned to the input index."""
     highest_high = high.rolling(k_period).max()
     lowest_low = low.rolling(k_period).min()
     span = highest_high - lowest_low
@@ -412,8 +327,8 @@ def compute_stochastic_oscillator(high: pd.Series, low: pd.Series, close: pd.Ser
 
 def count_touches(high: pd.Series, low: pd.Series, level_price: float, tolerance_pct: float = 0.012) -> int:
     """How many bars in the given window came within `tolerance_pct` of `level_price`, or
-    whose full High-Low range crossed through it -- a rough strength indicator for a Pivot
-    Points R/S level, distinct from the level itself (a level can be mathematically valid
+    whose full High-Low range crossed through it -- a rough strength indicator for a
+    Reference Line, distinct from the level itself (a level can be mathematically valid
     but never actually have been tested by real price action). Floored at 2 so a level
     never reads as completely untested. tolerance_pct=0.012 (1.2%) and the floor of 2 are
     first-pass values carried over from the design mockup, not independently tuned against

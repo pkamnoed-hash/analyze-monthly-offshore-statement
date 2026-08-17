@@ -125,8 +125,9 @@ def fetch_stock_profile(symbols: list[str], *, yf_module=None) -> pd.DataFrame:
 
     `High90D`/`Low90D` are the max High / min Low over that same 90-day
     history -- no separate fetch, just two more aggregates off the `history`
-    DataFrame already pulled for `History90D`/`Latest Price`. Feeds
-    calculations.compute_pivot_points() for Monitor Stocks' Trendline tab.
+    DataFrame already pulled for `History90D`/`Latest Price`. Persisted as
+    part of `market_profile_cache` (see core/db.py) alongside the rest of
+    this profile.
 
     Deliberately uses explicit `start`/`end` dates (calendar days), not
     yfinance's `period="90d"` shorthand -- confirmed by direct comparison
