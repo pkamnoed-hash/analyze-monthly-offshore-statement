@@ -1,5 +1,29 @@
 # Changelog
 
+## Monitor Stocks Cleanup: Toolbar Polish, Cache Fix, Remove Trendline Tab (v4.5.2)
+
+Three fixes from a live-testing round: a toolbar cleanup on Auto
+Trendline, a real cache-staleness bug fix, and removal of Monitor
+Stocks' old "Trendline" tab.
+
+- **Auto Trendline toolbar simplified**: removed the redundant "Show
+  Latest Price" checkbox (that line is now always shown, same as the
+  "Latest Price" stat already above the chart); "Show Cost/Sh" moved
+  out of the "Levels" popover into its own toggle next to Reference
+  Lines/Lock.
+- **Fixed a real bug**: Regenerate/drag/delete/add on Auto Trendline
+  reset a line's "passed" state correctly in the database, but Monitor
+  Stocks' Nearest Resistance/Support summary could keep showing the
+  old highlighted/passed state for up to 5 minutes afterward. Now
+  updates immediately.
+- **Removed Monitor Stocks' "Trendline" tab** (the Pivot Points
+  S1-3/Cost·Sh/R1-3 ladder), superseded by the swing-based Reference
+  Lines feature -- along with its now-unused database table. The
+  separate "Auto Trendline" page (Reference Lines/chart) is unaffected.
+- No breaking changes for anyone using Reference Lines, Highlight, or
+  any other Monitor Stocks tab.
+- Full test suite: 323/323 passing.
+
 ## DB-First Monitor Stocks Fetch + Dashboard Rate Refresh (v4.5.1)
 
 Makes Monitor Stocks' profile data (Description/Sector/Beta/Dividends/

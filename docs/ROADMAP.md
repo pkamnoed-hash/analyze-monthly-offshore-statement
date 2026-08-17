@@ -2660,6 +2660,138 @@ renders correctly) plus the manual-edit-survives-Refresh check above.
   of the "Oldest + warning" caption (shown as an alternative mockup,
   not chosen).
 
+## V4.5.2: Monitor Stocks Cleanup -- Toolbar Polish, Cache Fix, Remove Trendline Tab
+
+Branch `v4.5.2-monitor-stocks-cleanup`, cut from `main` after V4.5.1
+merged in. A live-testing tweak round, same shape as V4.4.1's own
+tweak-round commit -- three unrelated fixes found and requested while
+using the app, bundled into one version rather than each getting its
+own number.
+
+### Context
+
+Three separate observations during live use of Auto Trendline and
+Monitor Stocks:
+
+1. A solid teal "Latest Price" line was already visible on the Auto
+   Trendline chart; user asked whether "Show Latest Price" was the
+   same line, and once confirmed, asked to remove the now-redundant
+   checkbox and move "Show Cost/Sh" out to its own toggle.
+2. After clicking "Regenerate" on Auto Trendline for DVYE, Monitor
+   Stocks' Highlight tab still showed the symbol's old Nearest
+   Resistance/Support highlighted and "Passed R/S" still dated --
+   asked why, since Regenerate is supposed to reset that state.
+3. User decided to stop using Monitor Stocks' "Trendline" tab (Pivot
+   Points S1-3/Cost-Sh/R1-3) entirely and asked to clear any related
+   code, explicitly scoped away from the separate "Auto Trendline"
+   page (Reference Lines/chart), which stays in active use.
+
+### Design decisions
+
+**Toolbar**: `show_latest` checkbox removed -- `visibility={"pivot":
+show_pivot, "latest": True}` now hardcodes the latest-price line on,
+matching the JS component's own default (`{pivot: true, latest:
+true}`) when no `visibility` is passed at all, confirmed via a repo-
+wide grep that nothing else read `show_latest_{symbol}`'s session-state
+key. `show_pivot` ("Cost/Sh") promoted from a checkbox inside the
+"Levels" popover to its own `st.toggle`, in the same toolbar row as
+Reference Lines/Lock -- the "Levels" popover itself removed since
+those two checkboxes were the only things inside it.
+
+**Cache-staleness bug, root-caused against real DVYE data, not
+guessed**: confirmed directly against the dev DB that Regenerate
+*did* correctly reset `passed_at` to NULL immediately
+(`save_reference_lines()` already did this correctly). The actual gap
+was Monitor Stocks' own summary cache (`_cached_reference_line_summary`,
+a `@st.cache_data(ttl=300)` function living in `app_pages/monitor_stocks.py`)
+-- nothing on Auto Trendline's save path could reach it to invalidate it,
+since Streamlit page files run their own top-level UI code on import, so
+`symbol_analysis.py` couldn't just `import app_pages.monitor_stocks` to
+call `.clear()` on it. Fixed by moving the whole function into
+`cached_db.py` (this app's existing shared, page-agnostic cache module)
+as `reference_line_summary()` / `invalidate_reference_line_summary()`,
+matching the same "cache + invalidate on write" shape
+`cached_fetch_trades()`/`invalidate_trades()` already use there. Monitor
+Stocks now calls `cached_db.reference_line_summary(...)`; Auto
+Trendline's save-guard block (the same one that calls
+`db.save_reference_lines()` on every Regenerate/drag/delete/add) now
+also calls `cached_db.invalidate_reference_line_summary()` right after.
+
+**Trendline tab removal**: scoped precisely to what was asked --
+Monitor Stocks' "Trendline" tab and everything ONLY it used
+(`compute_pivot_points()`, the `_highlight_pivot_crosses` row
+highlighter, the S1-3/Pivot/R1-3 column configs), NOT the separate
+"Auto Trendline" *page*, which is a different feature (Reference
+Lines) sharing a similar name by coincidence. Also removed the
+already-dead `trendline_levels` DB table and
+`save_trendline_levels()`/`fetch_trendline_levels()` -- a repo-wide
+grep confirmed nothing in the live app called either function anymore
+(only their own tests did), a leftover from before Pivot Points became
+a live-recomputed column set. The dev DB's `trendline_levels` table
+held 17 real rows of old data; flagged to the user before dropping it,
+who confirmed full removal. `High90D`/`Low90D` (the columns
+`compute_pivot_points` consumed) were deliberately left alone --
+they're load-bearing for `market_profile_cache`/`apply_market_profile_fallback`,
+unrelated to the tab being removed.
+
+### Implementation
+
+- **`app_pages/symbol_analysis.py`**: `show_latest` checkbox removed;
+  `show_pivot` moved from the "Levels" popover to its own `st.toggle`;
+  `cached_db.invalidate_reference_line_summary()` added to the save-
+  guard block.
+- **`app_pages/components/trendline_chart_component.py`**: docstring
+  updated to match (no code change -- `visibility["latest"]` was
+  already just a plain bool).
+- **`cached_db.py`**: `reference_line_summary()` / `invalidate_reference_line_summary()`
+  added (moved from `monitor_stocks.py`).
+- **`app_pages/monitor_stocks.py`**: `_cached_reference_line_summary`
+  removed (now lives in `cached_db.py`); "Trendline" tab entry,
+  `compute_pivot_points()` call, `_highlight_pivot_crosses()`, and its
+  column configs all removed.
+- **`core/calculations.py`**: `compute_pivot_points()` removed;
+  `count_touches()`'s docstring updated (it now serves Reference
+  Lines' "touches" count, not Pivot Points).
+- **`core/db.py`**: `trendline_levels` table dropped from
+  `SCHEMA_STATEMENTS`; `save_trendline_levels()`/`fetch_trendline_levels()`
+  removed.
+- **`core/market_data.py`**: `High90D`/`Low90D` docstring updated to
+  point at `market_profile_cache` instead of the now-removed Pivot
+  Points feature.
+- **`dashboard_app.py`**: nav comment updated (pointed at "Monitor
+  Stocks' Trendline tab", now points at Overall/Reference
+  Lines/Highlight, which still route to this page).
+- Dropped `trendline_levels` from the dev Turso DB directly (17 rows),
+  after explicit confirmation.
+
+### Testing and verification
+
+323 tests passing (down from 338 -- 15 removed: 10 for
+`compute_pivot_points`, 5 for `trendline_levels`, none replaced since
+both were pure removals). `py_compile` clean on every touched file,
+full `pytest -q` before/after.
+
+Real-data verification against dev Turso, not just unit tests:
+reproduced the exact cache-staleness bug directly against DVYE's real
+DB row (forced a stale "passed" cache hit, confirmed it survived a DB
+reset with no invalidation, confirmed `invalidate_reference_line_summary()`
+cleared it) -- then cleaned up a leftover artifact from the first
+(mistargeted) attempt at that same reproduction script. Confirmed the
+actual save+invalidate code path runs with zero exceptions via a real
+`AppTest` first-capture flow (temporarily cleared DVYE's reference
+lines, reloaded, confirmed clean auto-recapture, restored the
+originals exactly). Full Monitor Stocks `AppTest` load across all 52
+real holdings confirmed the tab list is now exactly `["Highlight",
+"Overall", "Position", "Performance", "Dividends", "Classification",
+"Reference Lines"]` with zero exceptions; `db.init_db()` confirmed to
+run cleanly without recreating the dropped table.
+
+### Considered and explicitly deferred
+
+- **Leaving `trendline_levels` in place, code removed only** -- the
+  alternative offered and not chosen; user explicitly opted for full
+  removal including the table drop.
+
 ## Deferred / future
 
 - **Restore from a backup** -- see V2.3's "Considered and explicitly
