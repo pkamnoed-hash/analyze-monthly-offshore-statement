@@ -114,6 +114,16 @@ SCHEMA_STATEMENTS = [
         fetched_at          TEXT NOT NULL
     )
     """,
+    """
+    CREATE TABLE IF NOT EXISTS webauthn_credentials (
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        credential_id TEXT NOT NULL UNIQUE,
+        public_key    TEXT NOT NULL,
+        sign_count    INTEGER NOT NULL DEFAULT 0,
+        device_label  TEXT,
+        created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+    )
+    """,
 ]
 
 # reference_lines shipped in v4.4 without captured_side/passed_at, added in v4.4.1 for
@@ -618,6 +628,68 @@ def fetch_market_profile_cache(conn=None):
     df["Fetched At"] = pd.to_datetime(df["Fetched At"])
     df["History90D"] = df["History90D"].apply(lambda v: json.loads(v) if isinstance(v, str) else [])
     return df
+
+
+def save_webauthn_credential(credential_id: str, public_key: str, *, device_label: str | None = None, conn=None):
+    """v4.6 -- registers one device's WebAuthn credential (Face ID/Touch ID) for
+    biometric login. `credential_id`/`public_key` are base64url TEXT, not raw bytes --
+    they're already opaque, base64url-encoded strings by the time core/webauthn_auth.py
+    hands them here (matching how the `webauthn` library represents them for JSON
+    transport), so there's no reason to add a bytes<->text conversion layer on top.
+
+    Always a plain INSERT, never an upsert -- there's no per-user table this app (one
+    shared password, no accounts) could key a device against, so every registered
+    device just becomes another row that can unlock the same account. A genuine
+    re-registration of the same physical device produces a NEW credential_id from the
+    platform authenticator (generate_registration_options' exclude_credentials, built
+    from fetch_webauthn_credentials() below, steers the OS away from silently reusing
+    an old one), so duplicate rows for "the same" device don't happen in practice."""
+    c, should_close = _with_connection(conn)
+    c.execute(
+        "INSERT INTO webauthn_credentials (credential_id, public_key, device_label, created_at) "
+        "VALUES (?, ?, ?, datetime('now'))",
+        (credential_id, public_key, device_label),
+    )
+    c.commit()
+    if should_close:
+        c.close()
+
+
+def fetch_webauthn_credentials(conn=None):
+    """Returns a DataFrame (Id, Credential Id, Public Key, Sign Count, Device Label,
+    Created At) -- one row per registered device, empty if biometric login has never
+    been set up. dashboard_app.py uses emptiness to decide whether to show the
+    "Unlock with Face ID/Touch ID" button at all (no point offering it with nothing
+    registered), and uses every row's Credential Id to build
+    generate_authentication_options' allow_credentials list."""
+    c, should_close = _with_connection(conn)
+    df = _read_sql(
+        c, "SELECT id, credential_id, public_key, sign_count, device_label, created_at "
+        "FROM webauthn_credentials",
+    )
+    if should_close:
+        c.close()
+    return df.rename(columns={
+        "id": "Id", "credential_id": "Credential Id", "public_key": "Public Key",
+        "sign_count": "Sign Count", "device_label": "Device Label", "created_at": "Created At",
+    })
+
+
+def update_webauthn_sign_count(credential_id: str, new_sign_count: int, conn=None):
+    """Bumps a credential's stored sign_count after a successful authentication --
+    WebAuthn's own replay-attack defense: each authenticator maintains a counter that
+    must only ever increase, so an assertion reporting an old-or-equal count (a cloned
+    authenticator, or a replayed request) is something core/webauthn_auth.py's
+    verify_authentication() already rejects before this function is ever called; by the
+    time this runs, `new_sign_count` is already confirmed higher than what was stored."""
+    c, should_close = _with_connection(conn)
+    c.execute(
+        "UPDATE webauthn_credentials SET sign_count = ? WHERE credential_id = ?",
+        (new_sign_count, credential_id),
+    )
+    c.commit()
+    if should_close:
+        c.close()
 
 
 def fetch_unreconciled_trades(cutoff, conn=None):

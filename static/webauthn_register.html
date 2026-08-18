@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Registering device...</title>
+<style>
+  body {
+    margin: 0; padding: 2rem; font-family: -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+    background: #0e1117; color: #e6e6e6; text-align: center;
+  }
+  p { font-size: 0.95rem; }
+</style>
+</head>
+<body>
+<p id="msg">Waiting for Face ID / Touch ID...</p>
+
+<script>
+// Runs in a genuine top-level, same-origin browsing context (opened via window.open()
+// from app_pages/components/webauthn_register/index.html) -- NOT inside a Streamlit
+// component iframe, so none of that iframe's Permissions Policy restrictions apply
+// here. This is the whole reason this page exists as a separate, popped-out page
+// rather than living inside the component itself: see that file's own comment for why
+// navigator.credentials.create() can't run there.
+
+function base64urlToBuffer(base64url) {
+  const padding = "=".repeat((4 - (base64url.length % 4)) % 4);
+  const base64 = (base64url + padding).replace(/-/g, "+").replace(/_/g, "/");
+  const raw = atob(base64);
+  const bytes = new Uint8Array(raw.length);
+  for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
+  return bytes.buffer;
+}
+function bufferToBase64url(buffer) {
+  const bytes = new Uint8Array(buffer);
+  let str = "";
+  for (const b of bytes) str += String.fromCharCode(b);
+  return btoa(str).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+function registrationOptionsFromJson(optionsJson) {
+  const opts = JSON.parse(optionsJson);
+  opts.challenge = base64urlToBuffer(opts.challenge);
+  opts.user.id = base64urlToBuffer(opts.user.id);
+  if (opts.excludeCredentials) {
+    opts.excludeCredentials = opts.excludeCredentials.map((c) => ({ ...c, id: base64urlToBuffer(c.id) }));
+  }
+  return opts;
+}
+
+// Shape matches what webauthn.helpers.parse_registration_credential_json expects on
+// the Python side -- confirmed field-by-field against the installed `webauthn` package.
+function attestationToJson(credential) {
+  const response = credential.response;
+  return {
+    id: credential.id,
+    rawId: bufferToBase64url(credential.rawId),
+    type: credential.type,
+    clientExtensionResults: credential.getClientExtensionResults ? credential.getClientExtensionResults() : {},
+    response: {
+      clientDataJSON: bufferToBase64url(response.clientDataJSON),
+      attestationObject: bufferToBase64url(response.attestationObject),
+      transports: response.getTransports ? response.getTransports() : [],
+    },
+  };
+}
+
+async function run(optionsJson) {
+  const msg = document.getElementById("msg");
+  let result;
+  try {
+    if (!window.PublicKeyCredential) {
+      throw new Error("This browser doesn't support WebAuthn.");
+    }
+    const publicKey = registrationOptionsFromJson(optionsJson);
+    const credential = await navigator.credentials.create({ publicKey });
+    msg.textContent = "Registered -- you can close this window.";
+    result = { type: "webauthn-register-result", status: "success", credential_json: attestationToJson(credential) };
+  } catch (err) {
+    msg.textContent = "Registration failed -- you can close this window.";
+    result = { type: "webauthn-register-result", status: "error", message: String(err && err.message ? err.message : err) };
+  }
+  if (window.opener) {
+    window.opener.postMessage(result, window.location.origin);
+  }
+  setTimeout(() => window.close(), 1200);
+}
+
+// Options travel via the URL hash fragment (set by
+// app_pages/components/webauthn_register/index.html's window.open() call), not a
+// postMessage handshake -- confirmed via real iPad testing that waiting for a message
+// round trip after load lost Safari's user-activation state before
+// navigator.credentials.create() could run, causing a NotAllowedError even though this
+// popup was itself opened from a genuine click. Reading synchronously from the URL and
+// starting the ceremony immediately on load keeps it as close to that original gesture
+// as a separate popped-out page can.
+const hashParams = new URLSearchParams(window.location.hash.slice(1));
+const optionsJson = hashParams.get("options") ? decodeURIComponent(hashParams.get("options")) : null;
+
+if (!window.opener) {
+  document.getElementById("msg").textContent = "This page must be opened from the app.";
+} else if (!optionsJson) {
+  document.getElementById("msg").textContent = "Missing registration options.";
+} else {
+  run(optionsJson);
+}
+</script>
+</body>
+</html>
