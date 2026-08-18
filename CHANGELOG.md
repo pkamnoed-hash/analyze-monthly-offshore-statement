@@ -1,5 +1,25 @@
 # Changelog
 
+## Biometric Login: Face ID / Touch ID via Passkeys (v4.6)
+
+Log in with Face ID or Touch ID instead of typing your password every
+time -- additive only, your password still works exactly as before and
+is the only way to register a new device.
+
+- **Set up Face ID / Touch ID** from a new sidebar section once logged
+  in with your password. Registering one device (e.g. your iPad) also
+  unlocks Face ID/Touch ID login on any other device signed into the
+  same Apple ID (Face ID/Touch ID passkeys sync automatically via
+  iCloud Keychain) -- no need to register each device separately.
+- **Unlock with Face ID / Touch ID** now appears above the password
+  field on the login screen whenever a device is registered. Canceling
+  it, or using an unregistered device/browser, always falls back to
+  the password field -- never a dead end.
+- Verified end-to-end on real iPad and iPhone hardware, since this
+  can't be tested any other way.
+- No breaking changes -- password login is completely unaffected.
+- Full test suite: 343/343 passing.
+
 ## Monitor Stocks Cleanup: Toolbar Polish, Cache Fix, Remove Trendline Tab (v4.5.2)
 
 Three fixes from a live-testing round: a toolbar cleanup on Auto

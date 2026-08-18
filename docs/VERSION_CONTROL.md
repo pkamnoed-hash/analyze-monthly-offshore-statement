@@ -28,6 +28,7 @@ not an aspirational process, a record of what's been done.
 | `v4.5-yfinance-cache` | V4.5 feature branch. Cut from `main` after v4.4.1 was merged in (`c7e1f1a`). Originally cut as `v4.5-yfinance-cache-and-bio-login`, planning to bundle two improvements on one branch (user's explicit choice -- asked whether to split, given the table-improvements/bio-login precedent earlier, but chose to combine this time) -- but biometric login was deferred to its own future branch before any of it was built, so the branch was renamed to drop "and-bio-login" and match what actually shipped: reduces redundant reloads (`init_db()` guarded to run once per session instead of every rerun; `db.fetch_trades()`/`fetch_dividends()`/`fetch_symbol_types()` -- called uncached from 8 different pages -- now cached via new `cached_db.py` with explicit invalidate-on-write at every write call site) and adds a durable `market_profile_cache` DB table so a failed live yfinance fetch (the real Yahoo Finance rate-limit incident right after v4.4.1's first deploy, which left every yfinance-derived column blank app-wide) falls back to last-known-good data instead. 329/329 tests passing. Full design history in `docs/ROADMAP.md` (V4.5). Merged into `main` (`99b8db7`, `--no-ff`), tagged `v4.5`. |
 | `v4.5.1-fetch-data-improvements` | V4.5.1 feature branch ("fetch data & small improvement"). Cut from `main` after v4.5 was merged in. A natural continuation of v4.5's own theme, numbered `4.5.1` (not reserved in advance -- assigned now that it's actually being built, same rule as always). Consulted first (design confirmed via chat mockups before any code), then built: inverts Monitor Stocks' profile-data fetch model from "live-first, DB-fallback-on-failure" (v4.5) to "DB-first always, live fetch only on explicit Refresh click" -- `_cached_fetch_stock_profile` split into `_cached_read_stock_profile_from_db` (normal path) and `_refresh_stock_profile_live` (Refresh button's handler, v4.5's own fallback logic exactly, now opt-in). New "Oldest + warning" caption (`calculations.describe_market_profile_freshness`), refined with a 5-minute tolerance after a real false-positive was caught testing against actual 52-symbol data (same-batch captures a few seconds apart were flagging as a false "outlier"). Also gives Dashboard's USD/THB rate the same visible Refresh-button + last-refreshed pattern, deliberately kept simple (no new DB table). Auto Trendline's price-history/chart caching was scoped OUT after discussion (a bigger lift -- real time-series table, incremental-fetch design, stock-split revision risk), sequenced as its own future branch instead. 338/338 tests passing. Full design history in `docs/ROADMAP.md` (V4.5.1). Merged into `main` (`b902572`, `--no-ff`), tagged `v4.5.1`. |
 | `v4.5.2-monitor-stocks-cleanup` | V4.5.2 feature branch, a live-testing tweak round cut from `main` after v4.5.1 was merged in. Three fixes bundled together, same "tweak round" shape as v4.4.1's own follow-up commit: (1) Auto Trendline toolbar -- removed the redundant "Show Latest Price" checkbox (the line is now always drawn, matching the always-visible "Latest Price" stat above the chart) and moved "Show Cost/Sh" out of the now-empty "Levels" popover into its own toggle alongside Reference Lines/Lock. (2) Fixed a real staleness bug caught live: Regenerate/drag/delete/add on Auto Trendline correctly reset a line's `passed_at` in the DB immediately, but Monitor Stocks' Nearest Resistance/Support summary kept showing the stale highlighted/passed state until its own 5-minute cache TTL happened to expire, since nothing told that cache a change had just happened on a different page. Moved the summary cache from `app_pages/monitor_stocks.py` into `cached_db.py` (matching this app's existing cache + invalidate-on-write pattern) as `reference_line_summary()`/`invalidate_reference_line_summary()`, and wired the invalidate call into Auto Trendline's save path. (3) Removed Monitor Stocks' "Trendline" tab (the Pivot Points S1-3/Cost-Sh/R1-3 ladder) entirely, per explicit request -- superseded by the swing-based Reference Lines feature. Also removed `compute_pivot_points()` and the `trendline_levels` DB table/`save_trendline_levels()`/`fetch_trendline_levels()`, which had no other live caller (17 leftover rows dropped from the dev DB after explicit confirmation). The separate "Auto Trendline" page (Reference Lines/chart) is unrelated and untouched throughout. 323/323 tests passing. Merged into `main` (`ae0d32b`, `--no-ff`), tagged `v4.5.2`. |
+| `v4.6-biometric-login` | V4.6 feature branch. Cut from `main` after v4.5.2 was merged in -- biometric login had been deferred out of v4.5 (see that entry above) and given no number until actually built, per this project's standing "never reserve a number in advance" rule. Adds Face ID/Touch ID login via WebAuthn/passkeys, additive to the existing password gate (password stays the permanent fallback and the only way to register a new device -- never replaced). Since Streamlit has no native biometric API, this is a custom `declare_component` (same zero-build static-HTML pattern `trendline_chart` already established) wrapping the browser's `navigator.credentials` API, paired with a new Streamlit-free `core/webauthn_auth.py` wrapping the `webauthn` PyPI library (`duo-labs/py_webauthn`) for server-side option generation/response verification, and a new `webauthn_credentials` DB table. Login and registration turned out to need genuinely different mechanisms -- confirmed by reading the actual installed Streamlit frontend bundle, its component iframe's Permissions Policy allows `publickey-credentials-get` (login) but not `publickey-credentials-create` (registration), so registration runs in a same-origin popup (`static/webauthn_register.html`, requiring `.streamlit/config.toml`'s `enableStaticServing`) instead of directly in the component iframe. Built and verified stepwise (DB/core logic -> both components in isolation -> registration wired into the real login page's sidebar -> login wired into the real password gate -> second-device/edge-case checks), with real Face ID/Touch ID testing on the user's actual iPad and iPhone at every UI step via an ngrok tunnel, since AppTest cannot drive a real WebAuthn ceremony. Two real bugs found only by testing on actual hardware: the registration popup's `postMessage` handshake lost Safari's user-activation gesture (fixed by passing options via the popup's URL hash instead, so it starts the ceremony immediately on load); and Microsoft Authenticator (this device's configured platform credential provider) rejected registration until the algorithm list was restricted to ES256 and `resident_key` was explicitly requested. A real production-vs-dev mixup was also caught and corrected mid-build (a stray local secrets file had prod credentials active during part of testing; the one leftover test credential row was found and deleted from prod, no real trade/dividend data was ever touched). Discovered live that iCloud Keychain syncs a registered passkey across every device signed into the same Apple ID, so the iPhone worked automatically once the iPad was registered, with no separate registration needed. 343/343 tests passing. Full design history in `docs/ROADMAP.md` (V4.6). Merged into `main` (`7c31c56`, `--no-ff`), tagged `v4.6`. |
 
 Naming convention: `vN-short-description` (or `vN.M-short-description` for a
 smaller, additive feature that doesn't warrant a new whole version number),
@@ -56,6 +57,7 @@ Version planning
   ○ 4.5 (`v4.5-yfinance-cache`) reduces redundant reloads (init_db() once per session, cached+invalidate-on-write trades/dividends/symbol_types reads) and adds a durable yfinance DB cache (market_profile_cache) so a failed live fetch falls back to last-known-good data -- prompted by a real production incident where Yahoo rate-limited Streamlit Community Cloud's shared IP right after v4.4.1 deployed, blanking every yfinance-derived column app-wide. Merged into `main`, tagged `v4.5` -- see `docs/ROADMAP.md` for the full arc. Biometric login (originally planned as this branch's second improvement, previously placeholder-numbered `4.4.2`) was deferred to its own future branch before any of it was built.
   ○ 4.5.1 (`v4.5.1-fetch-data-improvements`) "fetch data & small improvement" -- inverts Monitor Stocks' profile-data fetch to DB-first (read the database on every normal load, only fetch live yfinance data on an explicit Refresh click); "Oldest + warning" freshness caption; same Refresh pattern added to Dashboard's USD/THB rate. Auto Trendline's price-history/chart caching deferred to its own future branch. Merged into `main`, tagged `v4.5.1` -- see `docs/ROADMAP.md` for the full arc.
   ○ 4.5.2 (`v4.5.2-monitor-stocks-cleanup`) live-testing tweak round -- Auto Trendline toolbar polish (removed redundant "Show Latest Price" checkbox, moved "Show Cost/Sh" to its own toggle), fixed a real cross-page cache-staleness bug (Regenerate on Auto Trendline didn't reflect on Monitor Stocks until a 5-minute TTL expired), and removed Monitor Stocks' "Trendline" tab (Pivot Points) plus its now-dead `compute_pivot_points()`/`trendline_levels` table entirely, per explicit request. Merged into `main`, tagged `v4.5.2` -- see `docs/ROADMAP.md` for the full arc.
+  ○ 4.6 (`v4.6-biometric-login`) Face ID/Touch ID login via WebAuthn/passkeys, additive to the password gate (password stays the permanent fallback and only registration path, never replaced). New custom component + `core/webauthn_auth.py` + `webauthn_credentials` table. Verified end-to-end on the user's real iPad and iPhone via an ngrok tunnel (AppTest can't drive a real biometric ceremony) -- two real bugs found only on real hardware (a popup user-activation-gesture loss, and a Microsoft Authenticator algorithm/resident-key incompatibility), both fixed with regression tests. Merged into `main`, tagged `v4.6` -- see `docs/ROADMAP.md` for the full arc.
 - 5 - cosmetic
 - 6 - tax management
 
@@ -104,11 +106,11 @@ tip commit was already an ancestor of `main`). Feature branches that are
 still useful as a labeled reference point (`V1-record-trade-and-view`,
 `v2-Reconciliation`) are kept rather than deleted by default.
 
-## Current status (as of `v4.5.2`, merged)
+## Current status (as of `v4.6`, merged)
 
 `main` has V1, V2, V2.1, V2.2, V2.3, V2.4, V3, V3.1, V4, V4.1.1, V4.1,
-V4.1.2, V4.2, V4.3, V4.3.1, V4.4, V4.4.1, V4.5, V4.5.1, and **V4.5.2**
-merged in (323/323 passing on `main`, tagged `v4.5.2`). V4.3 overhauls Rebalance &
+V4.1.2, V4.2, V4.3, V4.3.1, V4.4, V4.4.1, V4.5, V4.5.1, V4.5.2, and
+**V4.6** merged in (343/343 passing on `main`, tagged `v4.6`). V4.3 overhauls Rebalance &
 Reallocate (5-tab split, Analyze as the sole editable tab, Total P/L,
 Beta, THB calculator, Summary KPI redesign), adds a Monitor Stocks
 Monthly Dividend chart (validated against a real broker statement
@@ -183,10 +185,31 @@ now-dead `compute_pivot_points()` and `trendline_levels` DB
 table/functions. See `docs/ROADMAP.md`'s V4.5.2 section for the full
 build and verification history.
 
-**Nothing in progress.** Biometric login (originally planned as V4.5's
-second improvement) was deferred to its own future branch before any
-of it was built -- number to be decided when actually built, not
-reserved in advance. Still open otherwise: whether to apply the "Total
+V4.6 adds Face ID/Touch ID login (WebAuthn/passkeys), additive to the
+password gate -- password stays the permanent fallback and the only
+way to register a new device, never replaced. Streamlit has no native
+biometric API, so this needed a new custom `declare_component` calling
+the browser's `navigator.credentials` API (same zero-build static-HTML
+pattern `trendline_chart` established), a new Streamlit-free
+`core/webauthn_auth.py` wrapping the `webauthn` PyPI library, and a
+new `webauthn_credentials` DB table. Login and registration turned out
+to need different mechanisms: reading the actual installed Streamlit
+frontend bundle showed its component iframe permits
+`publickey-credentials-get` (login) but not
+`publickey-credentials-create` (registration), so registration runs in
+a same-origin popup instead. Built and verified stepwise with real
+Face ID/Touch ID testing on the user's actual iPad and iPhone at every
+UI step (via an ngrok tunnel, since `AppTest` can't drive a real
+WebAuthn ceremony) -- two real bugs were caught only by testing on
+actual hardware (a popup user-activation-gesture loss, and a Microsoft
+Authenticator algorithm/resident-key incompatibility), both fixed with
+regression tests. Discovered live that iCloud Keychain syncs a
+registered passkey across every device on the same Apple ID, so the
+iPhone worked automatically once the iPad was registered. See
+`docs/ROADMAP.md`'s V4.6 section for the full build and verification
+history.
+
+**Nothing in progress.** Still open: whether to apply the "Total
 Return" concept (Total P/L/%) to the Dashboard page (raised during
 v4.1); a pre-existing staleness gap found but not fixed during V4.5
 (`rebalance.py`/`monitor_stocks.py`'s own dividends-received helper
@@ -197,4 +220,7 @@ invalidated by a new dividend save -- see `docs/ROADMAP.md`'s V4.5
 yfinance stock profile every ~5 minutes rather than reading
 Monitor Stocks' `market_profile_cache` -- found during a v4.5.1
 follow-up discussion, not fixed (real, overlapping redundant fetch,
-worth its own small step later).
+worth its own small step later); V4.6 has no "forget this device" UI
+for a registered WebAuthn credential -- would need a small settings
+addition later if a device is lost/replaced, not built (explicitly
+deferred).

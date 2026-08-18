@@ -2792,6 +2792,212 @@ run cleanly without recreating the dropped table.
   alternative offered and not chosen; user explicitly opted for full
   removal including the table drop.
 
+## V4.6: Biometric Login (WebAuthn/Passkeys), Additive to Password
+
+Branch `v4.6-biometric-login`, cut from `main` after v4.5.2 merged in.
+
+### Context
+
+Password login (`dashboard_app.py`, one shared password, salted-hash
+check via `core/auth.py::verify_password`) works but requires typing a
+password every session. User's two real devices are an iPad (primary)
+and iPhone (secondary), both iOS/Safari. Confirmed via discussion
+(AskUserQuestion, twice) before any code:
+1. **Additive, not a replacement.** Password stays the permanent
+   fallback and the *only* way to register a new device.
+2. **Platform scope**: iPadOS/iOS Safari (Face ID or Touch ID
+   depending on device) -- the user's only real devices.
+
+Streamlit has no native biometric API -- the real mechanism is
+**WebAuthn**: the browser's platform authenticator holds a private key
+that never leaves the device; the server verifies a signed challenge
+against a stored public key. Confirmed via web search that no
+maintained Streamlit WebAuthn component exists, so this needed a
+custom component plus a Python-side verifier, built from scratch.
+
+### Design decisions
+
+**Library**: `webauthn` (PyPI; GitHub `duo-labs/py_webauthn`), pure
+Python, no native extension. Its exact API (not guessed from memory)
+was confirmed by installing it and inspecting real signatures via
+`inspect.signature()` before writing any wrapper code.
+
+**New DB table** `webauthn_credentials` (`core/db.py`'s
+`SCHEMA_STATEMENTS`): `id INTEGER PRIMARY KEY AUTOINCREMENT,
+credential_id TEXT NOT NULL UNIQUE, public_key TEXT NOT NULL,
+sign_count INTEGER NOT NULL DEFAULT 0, device_label TEXT, created_at`.
+`credential_id`/`public_key` stored as base64url text, not raw bytes
+-- they're already opaque strings by the time `core/webauthn_auth.py`
+hands them over, matching how the library represents them for JSON
+transport. Three matching functions (`save_webauthn_credential`,
+`fetch_webauthn_credentials`, `update_webauthn_sign_count`), same
+`conn=None`-injectable convention every other `core/db.py` function
+uses.
+
+**New `core/webauthn_auth.py`** (Streamlit-free, matching
+`core/auth.py`'s convention): four functions --
+`build_registration_options`/`verify_registration`/
+`build_authentication_options`/`verify_authentication` -- narrowing
+the library's general-purpose API to this app's specific case: one
+shared account (no per-user table, matching the existing
+single-password model -- a fixed constant stands in for "the app's one
+account"), platform authenticators only (`AuthenticatorAttachment.PLATFORM`,
+not external USB security keys), user verification always required
+(`UserVerificationRequirement.REQUIRED` -- an actual biometric/PIN
+check, not just "device present"). Challenge storage is plain
+`st.session_state`, safe here since each browser session already owns
+its own state and there's no concurrent-session sharing concern.
+
+**The one real architectural surprise, confirmed from source, not
+assumed**: registration and login turned out to need different
+mechanisms. A background research pass extracted Streamlit's actual
+installed frontend bundle (`IFrameUtil.*.js`) and found its
+`declare_component` iframe's Permissions Policy `allow` attribute
+lists `publickey-credentials-get` but not
+`publickey-credentials-create` -- independently re-verified by
+grepping the real installed file directly rather than trusting the
+research agent's claim. Consequence:
+- **Login** (`navigator.credentials.get()`) works fine directly inside
+  a normal component iframe -- `webauthn_login_component.py` +
+  `webauthn_login/index.html`, same zero-build static-HTML shape
+  `trendline_chart` already established, extended with an `async`
+  click handler since the WebAuthn call is Promise-based (the existing
+  component's bridge never needed that).
+- **Registration** (`navigator.credentials.create()`) needed a
+  same-origin **popup relay** instead: `webauthn_register_component.py`
+  + `webauthn_register/index.html` opens `static/webauthn_register.html`
+  (a genuine top-level, non-iframe page, unaffected by the iframe's
+  Permissions Policy) via `window.open()`, which runs the actual
+  ceremony and `postMessage`s the result back. Requires
+  `.streamlit/config.toml`'s `enableStaticServing = true` -- confirmed
+  against the installed Streamlit package's own route table
+  (`starlette_routes.py`'s `_ROUTE_APP_STATIC`, `file_util.py`'s
+  `get_app_static_dir`) that this serves a project-root `static/`
+  folder at `/app/static/<filename>`. `.gitignore`'s blanket
+  `.streamlit/` exclusion (there for `secrets.toml`) needed a
+  `!.streamlit/config.toml` exception so this one non-secret file
+  actually deploys.
+
+**`dashboard_app.py` wiring**: `init_db()` moved to run *before* the
+login gate entirely (it used to run only after authenticating) --
+the login page itself now needs `fetch_webauthn_credentials()` to
+decide whether to offer a biometric button, which requires the table
+to exist even for a not-yet-authenticated session. Registration is a
+sidebar expander, authenticated-only, two-step (a plain button
+generates options only on click, avoiding a wasted crypto/challenge
+call on every page render across the whole app; the component's own
+button then starts the ceremony). Login shows the biometric button
+above the password form only when at least one credential is
+registered, generated once per unauthenticated session (not
+regenerated on every rerun, but with no extra click needed first,
+since the login page itself is only shown a handful of times per
+session, unlike the registration expander). On any cancel/error/
+unrecognized-credential outcome, falls through to the always-rendered
+password form -- never a dead end.
+
+### Implementation
+
+- **`core/db.py`**: `webauthn_credentials` schema entry;
+  `save_webauthn_credential`/`fetch_webauthn_credentials`/
+  `update_webauthn_sign_count`.
+- **`core/webauthn_auth.py`** (new): the four wrapper functions above.
+- **`app_pages/components/webauthn_login_component.py`** +
+  `webauthn_login/index.html` (new): direct in-iframe `.get()`.
+- **`app_pages/components/webauthn_register_component.py`** +
+  `webauthn_register/index.html` + `static/webauthn_register.html`
+  (new): popup-relay `.create()`.
+- **`.streamlit/config.toml`** (new): `enableStaticServing = true`.
+- **`.gitignore`**: `!.streamlit/config.toml` exception.
+- **`dashboard_app.py`**: `init_db()` reordering; registration
+  expander; login biometric button; `WEBAUTHN_RP_ID`/
+  `WEBAUTHN_RP_NAME`/`WEBAUTHN_ORIGIN` secrets (default to the real
+  prod origin so a `secrets.toml` without them still behaves correctly
+  there).
+- **`requirements.txt`**: `webauthn==3.0.0`.
+
+### Testing and verification
+
+`AppTest` (this app's usual headless harness) **cannot** exercise a
+real WebAuthn ceremony -- no browser, no platform authenticator -- so
+this feature's acceptance test is fundamentally different from every
+prior feature in this app. What `AppTest` + unit tests confirmed: 18
+new tests including real cryptographic round-trips against genuine
+WebAuthn response fixtures pulled from the `webauthn` library's own
+test suite (not synthetic data) -- both a full success path and
+specific rejection paths (missing user verification, stale sign
+count); the login/registration pages render with zero exceptions both
+with and without a registered credential present. 343/343 tests
+passing throughout.
+
+Everything else needed **real hardware**, tested stepwise at every UI
+milestone via an ngrok tunnel to a local dev server (WebAuthn requires
+HTTPS or literally `localhost`, and the iPad/iPhone can't reach this
+machine's `localhost` directly):
+
+1. Both components tested in isolation via a throwaway debug page
+   before any surrounding UI was built -- this is what caught the
+   registration popup's `NotAllowedError` (Safari's user-activation
+   gesture was lost across the popup's `postMessage` "ready"/"start"
+   handshake) before investing further. Fixed by passing options via
+   the popup's URL hash fragment instead, so it starts the ceremony
+   immediately on load with no intervening message round trip.
+2. The debug page was then extended to call the real
+   `verify_registration()`/`verify_authentication()` and save/update
+   real DB rows, not just display whatever the browser returned --
+   this caught a second real bug the browser ceremony itself didn't
+   surface: Microsoft Authenticator (this device's configured platform
+   credential provider, independent of iCloud Keychain) rejected
+   registration with "Microsoft Authenticator doesn't support this
+   passkey," twice, for two separate reasons -- offering the library's
+   default algorithm list (EdDSA/ES256/RS256; fixed by restricting to
+   ES256, the WebAuthn spec's own universal baseline) and leaving
+   `resident_key` unset (fixed by explicitly requesting
+   `ResidentKeyRequirement.PREFERRED` -- a passkey is a discoverable
+   credential by definition, and some providers only implement that
+   mode). Both fixes locked in with regression tests using real
+   fixture data.
+3. Real registration wired into the actual sidebar (not the debug
+   page) confirmed on the iPad: real Face ID prompt, real credential
+   saved to the database through the real UI.
+4. Real login wired into the actual password gate confirmed on the
+   iPad: Face ID unlock with no password typed, `sign_count`/DB state
+   checked directly afterward.
+5. Second-device and edge-case checks on the iPhone: discovered live
+   that iOS's iCloud Keychain syncs a registered passkey across every
+   device signed into the same Apple ID, so the iPhone worked for
+   login automatically once the iPad was registered -- attempting to
+   register the iPhone separately correctly failed with
+   `InvalidStateError` (the standard WebAuthn "this authenticator
+   already has a matching credential" response), not a bug. Canceling
+   the Face ID/Touch ID prompt mid-ceremony confirmed to fall back to a
+   fully usable password login, never stuck or broken.
+
+**A real production/dev mixup was caught and corrected mid-build**:
+partway through Step 1/2 testing, `.streamlit/secrets.toml` was found
+to be holding production Turso credentials rather than dev (traced by
+comparing `TURSO_DATABASE_URL` against the `secrets.dev.toml.bak`/
+`secrets.prod.toml.bak` reference files) -- meaning the new
+`webauthn_credentials` table and one test credential row had been
+created against the real production database, not a sandbox. No real
+trade/dividend/etc. data was ever touched (this is a brand-new,
+self-contained table). Switched `secrets.toml` back to dev credentials
+immediately, then found and deleted the one leftover test row directly
+from production (leaving the table itself, since it needs to exist
+there eventually anyway once this feature is live).
+
+### Considered and explicitly deferred
+
+- **Desktop/other-browser support** -- not actively broken, but not
+  tested; the user's only real devices are iPad/iPhone.
+- **Removing a registered device** -- no "forget this device" UI;
+  would need a small settings-page addition later if a device is
+  lost/replaced.
+- **Passwordless (biometric-only) mode** -- explicitly rejected;
+  password remains the permanent fallback and registration gate.
+- **Per-device explicit registration on iCloud-synced devices** -- not
+  applicable in practice, discovered live: Apple's own passkey sync
+  already covers every device on the same Apple ID.
+
 ## Deferred / future
 
 - **Restore from a backup** -- see V2.3's "Considered and explicitly
