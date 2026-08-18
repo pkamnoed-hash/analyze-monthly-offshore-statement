@@ -16,16 +16,26 @@ describes what actually exists, not an aspirational setup.
 - Dependencies from `requirements.txt` (`pip install -r requirements.txt`
   inside that venv) -- includes `libsql`, the Turso client.
 - `.streamlit/secrets.toml` (gitignored, must be created manually on any
-  new machine) with five keys:
+  new machine) with these keys:
   ```toml
   APP_PASSWORD_SALT = "..."
   APP_PASSWORD_HASH = "..."      # see core/auth.py -- sha256(salt + password)
   ANTHROPIC_API_KEY = "..."      # for slip parsing (core/slip_parser.py)
   TURSO_DATABASE_URL = "libsql://..."
   TURSO_AUTH_TOKEN = "..."
+  WEBAUTHN_RP_ID = "..."         # v4.6 biometric login -- see core/webauthn_auth.py
+  WEBAUTHN_RP_NAME = "..."       # display name shown in the native Face ID/Touch ID prompt
+  WEBAUTHN_ORIGIN = "..."        # must exactly match the deployed origin or every ceremony fails
   ```
-  The last two come from the Turso dashboard (turso.tech) -- see "Cloud
-  deployment" below for where they're generated.
+  The two Turso keys come from the Turso dashboard (turso.tech) -- see
+  "Cloud deployment" below for where they're generated. The three
+  `WEBAUTHN_*` keys default sensibly (to the real prod origin) in code
+  if omitted, so they're only required to differ for local dev/testing
+  -- WebAuthn binds a credential to the exact RP ID/origin it was
+  created against, so these must match whatever's actually in the
+  browser's address bar (`WEBAUTHN_RP_ID = "localhost"` for local dev,
+  since `localhost` is WebAuthn's one explicit exception to the
+  HTTPS-required rule).
 - `data/portfolio.db` and `data/Offshore_Statements_*.xlsx` present
   locally, but `portfolio.db` is now a **frozen pre-migration snapshot**,
   not what the app actually reads -- `core/db.py`'s `get_connection()`
@@ -105,8 +115,10 @@ section for the comparison and rationale. Both pieces are free.
    deployed, and `dashboard_app.py` as the main file.
 4. Advanced settings -> Python version **3.12** (matches the local venv).
 5. Advanced settings -> Secrets -> paste the entire local
-   `.streamlit/secrets.toml` file's contents in as-is (all five keys,
-   same TOML format).
+   `.streamlit/secrets.toml` file's contents in as-is (all keys, same
+   TOML format) -- using the real prod values for the three
+   `WEBAUTHN_*` keys (or omitting them, since they default to prod
+   correctly), not whatever's set locally for dev/testing.
 6. Deploy. First build installs `libsql` from source-adjacent wheels and
    can take longer than a typical redeploy.
 
