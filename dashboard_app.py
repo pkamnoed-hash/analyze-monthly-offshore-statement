@@ -2,12 +2,18 @@ import os
 
 import streamlit as st
 
+from app_pages.components.webauthn_login_component import webauthn_authenticate
 from app_pages.components.webauthn_register_component import webauthn_register
 from core import db
 from core.auth import verify_password
 from core.db import init_db
 from core.version import current_app_version
-from core.webauthn_auth import build_registration_options, verify_registration
+from core.webauthn_auth import (
+    build_authentication_options,
+    build_registration_options,
+    verify_authentication,
+    verify_registration,
+)
 
 st.set_page_config(page_title="Financial Summary Dashboard", layout="wide")
 
@@ -25,8 +31,67 @@ WEBAUTHN_RP_ID = st.secrets.get("WEBAUTHN_RP_ID", "myinvestment27.streamlit.app"
 WEBAUTHN_RP_NAME = st.secrets.get("WEBAUTHN_RP_NAME", "Portfolio Tracker")
 WEBAUTHN_ORIGIN = st.secrets.get("WEBAUTHN_ORIGIN", "https://myinvestment27.streamlit.app")
 
+# v4.5 -- init_db() only needs to run once per browser session, not on every single
+# rerun (every navigation/widget interaction re-executes this whole script). It was
+# unconditional before, meaning every rerun paid a real Turso round trip per
+# CREATE TABLE statement plus the reference_lines migration check -- one of three
+# real causes behind the app's "always reloads" feeling (see docs/ROADMAP.md V4.5).
+# A brand-new session still runs it exactly once, so a fresh deploy still initializes
+# its schema correctly.
+#
+# v4.6 moved this above the login gate (it used to run only after authenticating) --
+# the login page itself now needs to read webauthn_credentials (to decide whether to
+# offer a biometric unlock button at all), which won't exist yet on a genuinely fresh
+# database without this having run first, even for a not-yet-authenticated session.
+if "db_initialized" not in st.session_state:
+    init_db()
+    st.session_state["db_initialized"] = True
+
 if not st.session_state.get("authenticated"):
     st.title("Financial Summary Dashboard")
+
+    # v4.6 -- offered above the password form when at least one device is registered;
+    # falls through to the password form below on any cancel/failure/error, which is
+    # always rendered regardless -- never a dead end. Options are generated once per
+    # unauthenticated session (not regenerated on every rerun of this block, e.g. a
+    # failed password attempt), same reasoning as the registration expander, just
+    # without needing an extra "start" click first -- unlike that sidebar expander,
+    # this login page is only ever shown a handful of times per real session (once
+    # per not-yet-authenticated visit), not on every navigation across the whole app,
+    # so showing the button immediately is better UX with no real cost.
+    registered = db.fetch_webauthn_credentials()
+    if not registered.empty:
+        if "webauthn_login_options" not in st.session_state:
+            options_json, challenge = build_authentication_options(
+                WEBAUTHN_RP_ID, registered["Credential Id"].tolist(),
+            )
+            st.session_state["webauthn_login_options"] = options_json
+            st.session_state["webauthn_login_challenge"] = challenge
+
+        result = webauthn_authenticate(st.session_state["webauthn_login_options"], key="webauthn_login_component")
+        if result and result.get("status") == "success":
+            cred_id = result["credential_json"]["id"]
+            matching = registered[registered["Credential Id"] == cred_id]
+            if matching.empty:
+                st.warning("Unrecognized device -- use your password below.")
+            else:
+                row = matching.iloc[0]
+                try:
+                    new_sign_count = verify_authentication(
+                        result["credential_json"], st.session_state["webauthn_login_challenge"],
+                        WEBAUTHN_ORIGIN, WEBAUTHN_RP_ID, row["Public Key"], int(row["Sign Count"]),
+                    )
+                    db.update_webauthn_sign_count(cred_id, new_sign_count)
+                    st.session_state["authenticated"] = True
+                    st.session_state.pop("webauthn_login_options", None)
+                    st.session_state.pop("webauthn_login_challenge", None)
+                    st.rerun()
+                except Exception:
+                    st.warning("Biometric login failed to verify -- use your password below.")
+        elif result and result.get("status") == "error":
+            st.caption("Biometric login unavailable or cancelled -- use your password below.")
+        st.divider()
+
     # st.form so pressing Enter in the password field submits -- a bare st.text_input +
     # st.button pair doesn't do this in Streamlit; Enter only commits the text_input's
     # own value, it doesn't trigger a separate button below it. Enter inside a form
@@ -45,18 +110,6 @@ if not st.session_state.get("authenticated"):
 if st.sidebar.button("Log out"):
     st.session_state["authenticated"] = False
     st.rerun()
-
-# v4.5 -- init_db() only needs to run once per browser session, not on every single
-# rerun (every navigation/widget interaction re-executes this whole script). It was
-# unconditional before, meaning every rerun paid a real Turso round trip per
-# CREATE TABLE statement plus the reference_lines migration check -- one of three
-# real causes behind the app's "always reloads" feeling (see docs/ROADMAP.md V4.5).
-# A brand-new session still runs it exactly once, so a fresh deploy still initializes
-# its schema correctly. Must run before the Face ID/Touch ID expander below -- that
-# reads webauthn_credentials, which won't exist yet on a genuinely fresh database.
-if "db_initialized" not in st.session_state:
-    init_db()
-    st.session_state["db_initialized"] = True
 
 # v4.6 -- additive to the password gate above, never a replacement: registering a
 # device requires already being logged in via password (there's no way to reach this
