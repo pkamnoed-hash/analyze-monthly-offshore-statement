@@ -539,6 +539,47 @@ class TestMarketProfileCache:
         assert "Symbol" in result.columns
 
 
+class TestWebauthnCredentials:
+    def test_save_and_fetch_round_trip(self, conn):
+        db.save_webauthn_credential("cred-abc", "pubkey-xyz", device_label="iPad", conn=conn)
+        result = db.fetch_webauthn_credentials(conn=conn)
+        assert len(result) == 1
+        row = result.iloc[0]
+        assert row["Credential Id"] == "cred-abc"
+        assert row["Public Key"] == "pubkey-xyz"
+        assert row["Sign Count"] == 0
+        assert row["Device Label"] == "iPad"
+        assert pd.notna(row["Created At"])
+
+    def test_device_label_is_optional(self, conn):
+        db.save_webauthn_credential("cred-abc", "pubkey-xyz", conn=conn)
+        result = db.fetch_webauthn_credentials(conn=conn)
+        assert pd.isna(result.iloc[0]["Device Label"])
+
+    def test_multiple_devices_produce_multiple_rows(self, conn):
+        db.save_webauthn_credential("cred-ipad", "pubkey-ipad", device_label="iPad", conn=conn)
+        db.save_webauthn_credential("cred-iphone", "pubkey-iphone", device_label="iPhone", conn=conn)
+        result = db.fetch_webauthn_credentials(conn=conn)
+        assert set(result["Credential Id"]) == {"cred-ipad", "cred-iphone"}
+
+    def test_update_sign_count_only_touches_the_matching_row(self, conn):
+        db.save_webauthn_credential("cred-ipad", "pubkey-ipad", conn=conn)
+        db.save_webauthn_credential("cred-iphone", "pubkey-iphone", conn=conn)
+        db.update_webauthn_sign_count("cred-ipad", 5, conn=conn)
+        result = db.fetch_webauthn_credentials(conn=conn).set_index("Credential Id")
+        assert result.loc["cred-ipad", "Sign Count"] == 5
+        assert result.loc["cred-iphone", "Sign Count"] == 0
+
+    def test_fetch_returns_empty_dataframe_when_nothing_registered_yet(self, conn):
+        # This emptiness is what dashboard_app.py's login gate checks to decide whether
+        # to show the "Unlock with Face ID/Touch ID" button at all -- a fresh install or
+        # a device that's never registered biometric login must fall through to
+        # password-only, not error.
+        result = db.fetch_webauthn_credentials(conn=conn)
+        assert result.empty
+        assert "Credential Id" in result.columns
+
+
 class TestRebalancePlan:
     def test_get_active_rebalance_plan_returns_none_when_none_exists(self, conn):
         assert db.get_active_rebalance_plan(conn=conn) is None

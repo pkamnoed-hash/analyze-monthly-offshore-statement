@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; background: transparent; font-family: -apple-system, Segoe UI, Roboto, Arial, sans-serif; }
+  button {
+    width: 100%; padding: 0.5rem 1rem; font-size: 0.95rem; font-weight: 500;
+    border-radius: 6px; border: 1px solid #444b5c; background: #262730; color: #e6e6e6;
+    cursor: pointer;
+  }
+  button:hover { background: #31333f; }
+  button:disabled { opacity: 0.6; cursor: default; }
+  #status { font-size: 0.78rem; color: #9aa0a6; margin-top: 4px; min-height: 1em; }
+</style>
+</head>
+<body>
+<button id="registerBtn">Register this device</button>
+<div id="status"></div>
+
+<script>
+// --- Minimal Streamlit component bridge -----------------------------------
+// Same shape as app_pages/components/webauthn_login/index.html's own bridge
+// (itself matching trendline_chart/index.html's, verified against this app's
+// actual installed Streamlit frontend bundle).
+const Streamlit = {
+  RENDER_EVENT: "streamlit:render",
+  events: new EventTarget(),
+  setComponentReady() {
+    window.parent.postMessage({ isStreamlitMessage: true, type: "streamlit:componentReady", apiVersion: 1 }, "*");
+  },
+  setFrameHeight(height) {
+    window.parent.postMessage({ isStreamlitMessage: true, type: "streamlit:setFrameHeight", height }, "*");
+  },
+  setComponentValue(value) {
+    window.parent.postMessage({ isStreamlitMessage: true, type: "streamlit:setComponentValue", value, dataType: "json" }, "*");
+  },
+};
+window.addEventListener("message", (event) => {
+  if (!event.data || event.data.type !== "streamlit:render") return;
+  Streamlit.events.dispatchEvent(new CustomEvent(Streamlit.RENDER_EVENT, { detail: event.data }));
+});
+
+// --- Popup relay ------------------------------------------------------------------
+// navigator.credentials.create() can't run in THIS iframe (Streamlit's component
+// iframe permits the publickey-credentials-get Permissions Policy feature but not
+// publickey-credentials-create -- confirmed by grepping the installed Streamlit
+// frontend bundle's IFrameUtil.*.js `allow` attribute), so registration happens in a
+// real popup window instead, served same-origin via Streamlit's own static-file
+// serving (.streamlit/config.toml's enableStaticServing) at
+// /app/static/webauthn_register.html (confirmed against the installed Streamlit
+// package's own route table -- streamlit/web/server/starlette/starlette_routes.py's
+// _ROUTE_APP_STATIC and file_util.py's get_app_static_dir/APP_STATIC_FOLDER_NAME both
+// resolve to the project root's static/ folder). postMessage below targets this exact
+// origin, never "*" -- both this iframe and the popup are served from Streamlit's own
+// host, so window.location.origin is the same value in both places.
+const REGISTER_POPUP_URL = window.location.origin + "/app/static/webauthn_register.html";
+
+let currentOptionsJson = null;
+let popup = null;
+const button = document.getElementById("registerBtn");
+const status = document.getElementById("status");
+
+function handlePopupMessage(event) {
+  if (event.origin !== window.location.origin || event.source !== popup) return;
+  const data = event.data || {};
+  if (data.type === "webauthn-register-ready") {
+    popup.postMessage({ type: "webauthn-register-start", optionsJson: currentOptionsJson }, window.location.origin);
+    return;
+  }
+  if (data.type === "webauthn-register-result") {
+    window.removeEventListener("message", handlePopupMessage);
+    button.disabled = false;
+    if (data.status === "success") {
+      Streamlit.setComponentValue({ status: "success", credential_json: data.credential_json });
+      status.textContent = "Registered.";
+    } else {
+      Streamlit.setComponentValue({ status: "error", message: data.message || "Registration failed." });
+      status.textContent = data.message || "Registration failed -- try again.";
+    }
+  }
+}
+
+button.addEventListener("click", () => {
+  if (!currentOptionsJson) return;
+  button.disabled = true;
+  status.textContent = "Complete Face ID / Touch ID in the popup window...";
+  popup = window.open(REGISTER_POPUP_URL, "webauthn_register", "width=420,height=520");
+  if (!popup) {
+    button.disabled = false;
+    status.textContent = "Popup blocked -- allow popups for this site and try again.";
+    Streamlit.setComponentValue({ status: "error", message: "popup_blocked" });
+    return;
+  }
+  window.addEventListener("message", handlePopupMessage);
+});
+
+Streamlit.events.addEventListener(Streamlit.RENDER_EVENT, (event) => {
+  const args = event.detail.args;
+  currentOptionsJson = args.options_json;
+});
+
+Streamlit.setComponentReady();
+Streamlit.setFrameHeight(66);
+</script>
+</body>
+</html>

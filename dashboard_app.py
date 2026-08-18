@@ -69,6 +69,14 @@ pg = st.navigation({
         # and skips the picker).
         st.Page("app_pages/symbol_analysis.py", title="Auto Trendline", url_path="symbol-analysis"),
     ],
+    # TEMPORARY -- v4.6 Step 2 real-device verification only. Wired into nav (rather
+    # than requiring a separate "main file path" change on Streamlit Community Cloud)
+    # so switching that deployment's branch to v4.6-biometric-login is the only Cloud
+    # settings change needed to reach this on a real iPad/iPhone. Remove this whole
+    # "Debug" section once the two WebAuthn components are confirmed working for real.
+    "Debug": [
+        st.Page("_webauthn_debug.py", title="WebAuthn Debug (temp)"),
+    ],
 })
 pg.run()
 

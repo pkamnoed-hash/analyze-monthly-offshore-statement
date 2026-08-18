@@ -1,7 +1,12 @@
 .venv_dashboard/
 __pycache__/
 *.pyc
-.streamlit/
+.streamlit/*
+# config.toml holds no secrets (just server settings, e.g. enableStaticServing for the
+# v4.6 WebAuthn registration popup relay) and needs to actually deploy with the app --
+# everything else in .streamlit/ (secrets.toml, the secrets.*.toml.bak backups) stays
+# ignored.
+!.streamlit/config.toml
 *.log
 * - bk.xlsx
 labs/

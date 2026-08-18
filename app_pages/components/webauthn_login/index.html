@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; background: transparent; font-family: -apple-system, Segoe UI, Roboto, Arial, sans-serif; }
+  button {
+    width: 100%; padding: 0.5rem 1rem; font-size: 0.95rem; font-weight: 500;
+    border-radius: 6px; border: 1px solid #444b5c; background: #262730; color: #e6e6e6;
+    cursor: pointer;
+  }
+  button:hover { background: #31333f; }
+  button:disabled { opacity: 0.6; cursor: default; }
+  #status { font-size: 0.78rem; color: #9aa0a6; margin-top: 4px; min-height: 1em; }
+</style>
+</head>
+<body>
+<button id="authBtn">Unlock with Face ID / Touch ID</button>
+<div id="status"></div>
+
+<script>
+// --- Minimal Streamlit component bridge -----------------------------------
+// Hand-written, same shape as app_pages/components/trendline_chart/index.html's own
+// bridge (verified there against this app's actual installed Streamlit frontend
+// bundle) -- only the 4 calls this component needs.
+const Streamlit = {
+  RENDER_EVENT: "streamlit:render",
+  events: new EventTarget(),
+  setComponentReady() {
+    window.parent.postMessage({ isStreamlitMessage: true, type: "streamlit:componentReady", apiVersion: 1 }, "*");
+  },
+  setFrameHeight(height) {
+    window.parent.postMessage({ isStreamlitMessage: true, type: "streamlit:setFrameHeight", height }, "*");
+  },
+  setComponentValue(value) {
+    window.parent.postMessage({ isStreamlitMessage: true, type: "streamlit:setComponentValue", value, dataType: "json" }, "*");
+  },
+};
+window.addEventListener("message", (event) => {
+  if (!event.data || event.data.type !== "streamlit:render") return;
+  Streamlit.events.dispatchEvent(new CustomEvent(Streamlit.RENDER_EVENT, { detail: event.data }));
+});
+
+// --- base64url <-> ArrayBuffer helpers -------------------------------------------
+// WebAuthn transports challenge/credential-id/response fields as ArrayBuffer;
+// core.webauthn_auth talks base64url TEXT with the `webauthn` Python library. These
+// convert between the two at this component's boundary -- hand-written, no library,
+// same convention as every other custom component in this app.
+function base64urlToBuffer(base64url) {
+  const padding = "=".repeat((4 - (base64url.length % 4)) % 4);
+  const base64 = (base64url + padding).replace(/-/g, "+").replace(/_/g, "/");
+  const raw = atob(base64);
+  const bytes = new Uint8Array(raw.length);
+  for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
+  return bytes.buffer;
+}
+function bufferToBase64url(buffer) {
+  const bytes = new Uint8Array(buffer);
+  let str = "";
+  for (const b of bytes) str += String.fromCharCode(b);
+  return btoa(str).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+function authenticationOptionsFromJson(optionsJson) {
+  const opts = JSON.parse(optionsJson);
+  opts.challenge = base64urlToBuffer(opts.challenge);
+  if (opts.allowCredentials) {
+    opts.allowCredentials = opts.allowCredentials.map((c) => ({ ...c, id: base64urlToBuffer(c.id) }));
+  }
+  return opts;
+}
+
+// Shape matches what webauthn.helpers.parse_authentication_credential_json expects on
+// the Python side -- confirmed field-by-field against the installed `webauthn` package.
+function assertionToJson(credential) {
+  const response = credential.response;
+  return {
+    id: credential.id,
+    rawId: bufferToBase64url(credential.rawId),
+    type: credential.type,
+    clientExtensionResults: credential.getClientExtensionResults ? credential.getClientExtensionResults() : {},
+    response: {
+      clientDataJSON: bufferToBase64url(response.clientDataJSON),
+      authenticatorData: bufferToBase64url(response.authenticatorData),
+      signature: bufferToBase64url(response.signature),
+      userHandle: response.userHandle ? bufferToBase64url(response.userHandle) : null,
+    },
+  };
+}
+
+// --- Ceremony ---------------------------------------------------------------------
+let currentOptionsJson = null;
+const button = document.getElementById("authBtn");
+const status = document.getElementById("status");
+
+button.addEventListener("click", async () => {
+  if (!currentOptionsJson) return;
+  button.disabled = true;
+  status.textContent = "Waiting for Face ID / Touch ID...";
+  try {
+    if (!window.PublicKeyCredential) {
+      throw new Error("This browser doesn't support WebAuthn.");
+    }
+    const publicKey = authenticationOptionsFromJson(currentOptionsJson);
+    const credential = await navigator.credentials.get({ publicKey });
+    Streamlit.setComponentValue({ status: "success", credential_json: assertionToJson(credential) });
+    status.textContent = "";
+  } catch (err) {
+    Streamlit.setComponentValue({ status: "error", message: String(err && err.message ? err.message : err) });
+    status.textContent = "Biometric login unavailable -- use your password below.";
+  } finally {
+    button.disabled = false;
+  }
+});
+
+Streamlit.events.addEventListener(Streamlit.RENDER_EVENT, (event) => {
+  const args = event.detail.args;
+  currentOptionsJson = args.options_json;
+});
+
+Streamlit.setComponentReady();
+Streamlit.setFrameHeight(66);
+</script>
+</body>
+</html>
