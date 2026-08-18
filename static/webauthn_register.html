@@ -85,17 +85,23 @@ async function run(optionsJson) {
   setTimeout(() => window.close(), 1200);
 }
 
-window.addEventListener("message", (event) => {
-  if (event.origin !== window.location.origin) return;
-  if (event.data && event.data.type === "webauthn-register-start") {
-    run(event.data.optionsJson);
-  }
-});
+// Options travel via the URL hash fragment (set by
+// app_pages/components/webauthn_register/index.html's window.open() call), not a
+// postMessage handshake -- confirmed via real iPad testing that waiting for a message
+// round trip after load lost Safari's user-activation state before
+// navigator.credentials.create() could run, causing a NotAllowedError even though this
+// popup was itself opened from a genuine click. Reading synchronously from the URL and
+// starting the ceremony immediately on load keeps it as close to that original gesture
+// as a separate popped-out page can.
+const hashParams = new URLSearchParams(window.location.hash.slice(1));
+const optionsJson = hashParams.get("options") ? decodeURIComponent(hashParams.get("options")) : null;
 
-if (window.opener) {
-  window.opener.postMessage({ type: "webauthn-register-ready" }, window.location.origin);
-} else {
+if (!window.opener) {
   document.getElementById("msg").textContent = "This page must be opened from the app.";
+} else if (!optionsJson) {
+  document.getElementById("msg").textContent = "Missing registration options.";
+} else {
+  run(optionsJson);
 }
 </script>
 </body>

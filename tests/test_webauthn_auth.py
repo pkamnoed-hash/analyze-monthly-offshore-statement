@@ -110,6 +110,26 @@ class TestBuildRegistrationOptions:
         options_json, _ = build_registration_options("localhost", "Portfolio Tracker", [])
         assert json.loads(options_json)["excludeCredentials"] == []
 
+    def test_only_offers_es256_not_eddsa_or_rsa(self):
+        # Regression: caught live on a real iPad -- offering the library's own default
+        # algorithm list (EdDSA/ES256/RS256) made Microsoft Authenticator (this app's
+        # actual platform credential provider on that device, per iOS's own Passwords
+        # settings) reject registration outright with "Microsoft Authenticator doesn't
+        # support this passkey." ES256 is the WebAuthn spec's own baseline-required
+        # algorithm -- virtually universal support, not a narrower/weaker choice.
+        options_json, _ = build_registration_options("localhost", "Portfolio Tracker", [])
+        algs = {p["alg"] for p in json.loads(options_json)["pubKeyCredParams"]}
+        assert algs == {-7}
+
+    def test_requests_a_resident_discoverable_credential(self):
+        # Regression: caught live on the same real iPad, same "Microsoft Authenticator
+        # doesn't support this passkey" error -- persisted even after the ES256 fix
+        # above. A "passkey" is a resident/discoverable credential by definition; some
+        # providers only implement that mode and reject a request that never explicitly
+        # asks for one (this wrapper previously left resident_key unset).
+        options_json, _ = build_registration_options("localhost", "Portfolio Tracker", [])
+        assert json.loads(options_json)["authenticatorSelection"]["residentKey"] == "preferred"
+
     def test_challenge_is_real_random_bytes(self):
         _, challenge_1 = build_registration_options("localhost", "Portfolio Tracker", [])
         _, challenge_2 = build_registration_options("localhost", "Portfolio Tracker", [])

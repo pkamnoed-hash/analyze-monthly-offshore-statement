@@ -52,9 +52,18 @@ window.addEventListener("message", (event) => {
 // /app/static/webauthn_register.html (confirmed against the installed Streamlit
 // package's own route table -- streamlit/web/server/starlette/starlette_routes.py's
 // _ROUTE_APP_STATIC and file_util.py's get_app_static_dir/APP_STATIC_FOLDER_NAME both
-// resolve to the project root's static/ folder). postMessage below targets this exact
-// origin, never "*" -- both this iframe and the popup are served from Streamlit's own
-// host, so window.location.origin is the same value in both places.
+// resolve to the project root's static/ folder).
+//
+// The options are passed via the popup's own URL hash fragment (never sent to any
+// server -- hash fragments never leave the browser on a normal navigation), NOT via a
+// postMessage "ready"/"start" handshake after the popup loads. Confirmed via real iPad
+// testing: that extra async round trip lost Safari's user-activation ("this click is
+// still live") state, so by the time the popup finally called
+// navigator.credentials.create(), Safari no longer considered it user-initiated and
+// rejected it with NotAllowedError even though the popup itself was opened from a
+// genuine click. Putting the options directly in the URL lets the popup's own
+// top-level script call create() immediately on load -- no intervening message hop --
+// which keeps it close enough to the original gesture to succeed.
 const REGISTER_POPUP_URL = window.location.origin + "/app/static/webauthn_register.html";
 
 let currentOptionsJson = null;
@@ -65,10 +74,6 @@ const status = document.getElementById("status");
 function handlePopupMessage(event) {
   if (event.origin !== window.location.origin || event.source !== popup) return;
   const data = event.data || {};
-  if (data.type === "webauthn-register-ready") {
-    popup.postMessage({ type: "webauthn-register-start", optionsJson: currentOptionsJson }, window.location.origin);
-    return;
-  }
   if (data.type === "webauthn-register-result") {
     window.removeEventListener("message", handlePopupMessage);
     button.disabled = false;
@@ -86,14 +91,16 @@ button.addEventListener("click", () => {
   if (!currentOptionsJson) return;
   button.disabled = true;
   status.textContent = "Complete Face ID / Touch ID in the popup window...";
-  popup = window.open(REGISTER_POPUP_URL, "webauthn_register", "width=420,height=520");
+  window.addEventListener("message", handlePopupMessage);
+  const url = REGISTER_POPUP_URL + "#options=" + encodeURIComponent(currentOptionsJson);
+  popup = window.open(url, "webauthn_register", "width=420,height=520");
   if (!popup) {
+    window.removeEventListener("message", handlePopupMessage);
     button.disabled = false;
     status.textContent = "Popup blocked -- allow popups for this site and try again.";
     Streamlit.setComponentValue({ status: "error", message: "popup_blocked" });
     return;
   }
-  window.addEventListener("message", handlePopupMessage);
 });
 
 Streamlit.events.addEventListener(Streamlit.RENDER_EVENT, (event) => {

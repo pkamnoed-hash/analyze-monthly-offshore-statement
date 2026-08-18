@@ -16,12 +16,23 @@ renames/reshapes those objects only has to be absorbed here.
 
 import webauthn
 from webauthn.helpers import bytes_to_base64url
+from webauthn.helpers.cose import COSEAlgorithmIdentifier
 from webauthn.helpers.structs import (
     AuthenticatorAttachment,
     AuthenticatorSelectionCriteria,
     PublicKeyCredentialDescriptor,
+    ResidentKeyRequirement,
     UserVerificationRequirement,
 )
+
+# ES256 only, not the library's own default (EdDSA/ES256/RS256) -- confirmed via real
+# iPad registration that Microsoft Authenticator (this app's actual platform credential
+# provider on that device, per iOS's own "Passwords" settings, not iCloud Keychain)
+# rejects a request offering EdDSA with "Microsoft Authenticator doesn't support this
+# passkey." ES256 is the one algorithm virtually every WebAuthn authenticator supports
+# (Apple, Google, Microsoft, hardware keys alike), so this is the safe universal choice,
+# not a security downgrade -- ES256 is the WebAuthn spec's own baseline-required algorithm.
+_SUPPORTED_ALGS = [COSEAlgorithmIdentifier.ECDSA_SHA_256]
 
 # Single-account app -- WebAuthn still requires a stable "user id" bytes value to
 # bind every registered device's credential to the same account. Not secret, just
@@ -51,8 +62,19 @@ def build_registration_options(rp_id: str, rp_name: str, existing_credential_ids
         authenticator_selection=AuthenticatorSelectionCriteria(
             authenticator_attachment=AuthenticatorAttachment.PLATFORM,
             user_verification=UserVerificationRequirement.REQUIRED,
+            # Explicit, not left at the library's default of unset -- caught live on a
+            # real iPad that Microsoft Authenticator refused the request entirely
+            # ("doesn't support this passkey") when this was omitted. A "passkey" is a
+            # resident/discoverable credential by definition; some providers (apparently
+            # including Microsoft Authenticator) only implement that mode and reject a
+            # request that doesn't explicitly ask for it. Doesn't conflict with this
+            # app's own always-explicit allow_credentials/exclude_credentials use --
+            # discoverability is just an authenticator-side storage detail here, never
+            # relied on for a usernameless/discoverable-only login flow.
+            resident_key=ResidentKeyRequirement.PREFERRED,
         ),
         exclude_credentials=exclude or None,
+        supported_pub_key_algs=_SUPPORTED_ALGS,
     )
     return webauthn.options_to_json(options), options.challenge
 
