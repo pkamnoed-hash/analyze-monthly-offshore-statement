@@ -2998,6 +2998,131 @@ there eventually anyway once this feature is live).
   applicable in practice, discovered live: Apple's own passkey sync
   already covers every device on the same Apple ID.
 
+## V4.6.1: Fix Registration Popup on Streamlit Community Cloud
+
+Branch `v4.6.1-fix-registration-popup`, cut directly from `main` after
+v4.6 was already merged/tagged -- a hotfix, same shape as
+`v4.1.1`/`v4.1.2` (unrelated to whatever feature branch is next in
+line, numbered `x.y.1` off `main` itself).
+
+### Context
+
+Real production failure, found immediately after v4.6 shipped:
+registering a device on the actual deployed app
+(`myinvestment27.streamlit.app`) got stuck on a blank/loading screen
+that never resolved, and biometric login still didn't work afterward
+even after killing and reopening the app. This had passed every check
+in v4.6's own verification, including real iPad/iPhone testing --
+because all of that testing happened against a local dev server via an
+ngrok tunnel, never against the actual deployed Streamlit Community
+Cloud app itself. A Reboot from the Streamlit Cloud dashboard (the
+project's usual fix for stale-`__pycache__`-style deploy issues, per
+the V4.3 precedent in this same doc) did **not** fix it, ruling that
+theory out and pointing at something specific to the production
+environment itself.
+
+### Root cause
+
+Confirmed directly via `curl -sI` against the real production URLs,
+not guessed: both the root app URL and
+`/app/static/webauthn_register.html` returned `303 See Other`,
+redirecting to `https://share.streamlit.io/-/auth/app?redirect_uri=...`.
+This app is private on Streamlit Community Cloud, which gates *every*
+unauthenticated request -- including static files -- behind its own
+viewer-authentication layer, separate from and in front of this app's
+own password gate. v4.6's registration flow opened
+`static/webauthn_register.html` in a same-origin popup via
+`window.open()`; that popup's session cookie didn't reliably carry
+over on iOS Safari, so the popup landed in Streamlit's own login
+redirect instead of the registration page and hung there forever.
+
+Given a choice between making the app public (removes the gate
+entirely, simpler) or reworking registration to avoid the popup
+(keeps the app private), the user chose to rework registration.
+
+### Two more real bugs found while fixing the first
+
+Getting to a working fix took three attempts, each verified live on
+the user's real iPad over the same ngrok-tunnel setup v4.6 used:
+
+1. **Popup relay (v4.6's original design)** -- broken as described
+   above; abandoned rather than patched, since the underlying
+   popup+cross-context-cookie problem is inherent to how Streamlit
+   Community Cloud gates private apps, not fixable from this app's own
+   code.
+2. **`st.markdown(unsafe_allow_html=True)` + inline `onclick`** -- the
+   fallback already written into v4.6's own plan for exactly this
+   popup-relay-fails scenario. Rendered correctly but did *nothing* at
+   all when tapped, with no visible error. Root-caused by grepping the
+   installed Streamlit frontend bundle (`Html.*.js`): `st.markdown`'s
+   sanitizer config has no `ADD_ATTR` override, so DOMPurify's default
+   behavior -- stripping every `on*` event-handler attribute, including
+   `onclick` -- silently applies. The "inline handlers survive
+   `innerHTML`" assumption behind this fallback was never actually
+   checked against Streamlit's own sanitization layer before v4.6's
+   plan was written; a real gap in that research, only surfaced by
+   testing on real hardware.
+3. **`st.html(..., unsafe_allow_javascript=True)` + a real `<script>`
+   block (the fix that shipped)** -- found by reading
+   `streamlit/elements/html.py`'s own source directly: its docstring
+   confirms the content it renders is not iframed, and setting
+   `unsafe_allow_javascript=True` switches to a *different* DOMPurify
+   config that explicitly re-allows `<script>` tags, which the
+   frontend then extracts and recreates as genuine, executing
+   `document.createElement('script')` nodes (the standard workaround
+   for the fact that scripts inserted via plain `innerHTML` never
+   execute). Rewrote the registration handler from an inline `onclick`
+   IIFE to a proper `<script>` block using `addEventListener`.
+   Confirmed working on the real iPad: the native "Save a passkey?"
+   Touch ID prompt appeared, registration completed, and a follow-up
+   log-out/log-back-in with Face ID/Touch ID succeeded with no
+   password typed.
+
+### Implementation
+
+- **`dashboard_app.py`**: registration script rewritten as
+  `_WEBAUTHN_REG_SCRIPT`, a `<script>` block rendered via
+  `st.html(..., unsafe_allow_javascript=True)` instead of a
+  `webauthn_register` component + popup. The completed ceremony's
+  result now travels back to Python via `st.query_params`
+  (`webauthn_reg_result`, base64-encoded JSON set through a real page
+  navigation, cleared immediately after being read) instead of the
+  component protocol -- deliberately self-contained, carrying the
+  challenge and device label inside the payload itself rather than
+  relying on `st.session_state` surviving the navigation.
+- **`core/webauthn_auth.py`**: added `decode_challenge()`, a thin
+  wrapper so `dashboard_app.py` never needs `import webauthn` directly
+  just to decode the challenge back out of the query-param payload.
+- **Removed entirely**: `app_pages/components/webauthn_register_component.py`,
+  `app_pages/components/webauthn_register/index.html`,
+  `static/webauthn_register.html`, `.streamlit/config.toml` (its only
+  purpose, `enableStaticServing`, is no longer needed). `.gitignore`
+  reverted from the temporary `.streamlit/*` + `!.streamlit/config.toml`
+  exception back to a plain `.streamlit/` blanket ignore.
+- Login (`webauthn_login_component.py`, direct in-iframe `.get()`) is
+  untouched -- it was never affected by this bug.
+
+### Testing and verification
+
+Same real-hardware discipline as v4.6 itself, since this class of bug
+is specifically invisible to `AppTest`/unit tests: `py_compile` +
+Node syntax-check on the extracted `<script>` content + full
+`pytest -q` (343/343) + an `AppTest` re-run of the query-param success
+pipeline against real `py_webauthn` fixture data confirmed the code
+was structurally sound after each attempt, but only real-device
+testing over the ngrok tunnel actually caught attempt 2's silent
+failure and confirmed attempt 3's fix. All testing done against the
+**dev** Turso database throughout, per explicit instruction -- a
+leftover test credential row from earlier dev testing was cleared
+before the final clean registration run, and both registration and
+Face ID/Touch ID login were reconfirmed end-to-end afterward.
+
+### Considered and explicitly deferred
+
+- **Making the app public** -- would have sidestepped this bug
+  entirely (no Streamlit Cloud auth gate to fight), but the user chose
+  to keep the app private and rework registration instead.
+
 ## Deferred / future
 
 - **Restore from a backup** -- see V2.3's "Considered and explicitly

@@ -1,5 +1,22 @@
 # Changelog
 
+## Hotfix: Face ID / Touch ID Registration on the Deployed App (v4.6.1)
+
+Fixes registration getting stuck on a blank/loading screen on the real
+deployed app (it worked locally in v4.6, but not on
+`myinvestment27.streamlit.app` itself). Login was never affected.
+
+- **Root cause**: registration opened a popup window to complete the Face
+  ID/Touch ID ceremony, but Streamlit Community Cloud's own private-app
+  sign-in didn't reliably carry over into that popup on iOS Safari,
+  leaving it stuck forever instead of reaching the registration page.
+- **Fix**: registration no longer uses a popup at all -- it now runs
+  directly on the same page you're already on.
+- No breaking changes -- everyone who already registered a device is
+  unaffected; only the registration flow itself changed.
+- Verified end-to-end (register + Face ID/Touch ID login) on real iPad
+  hardware. Full test suite: 343/343 passing.
+
 ## Biometric Login: Face ID / Touch ID via Passkeys (v4.6)
 
 Log in with Face ID or Touch ID instead of typing your password every
