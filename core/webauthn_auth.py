@@ -42,6 +42,17 @@ _USER_ID = b"portfolio-tracker-app-user"
 _USER_NAME = "Portfolio Tracker"
 
 
+def decode_challenge(challenge_b64: str) -> bytes:
+    """Converts a base64url challenge string back to the bytes verify_registration()/
+    verify_authentication() expect. Exists so callers never need `import webauthn`
+    directly just to decode a challenge that round-tripped through, e.g., a URL
+    query param (see dashboard_app.py's registration flow, where the challenge
+    travels inside the result payload itself rather than st.session_state -- keeps
+    that flow working correctly regardless of whether a page reload preserves
+    session state)."""
+    return webauthn.base64url_to_bytes(challenge_b64)
+
+
 def build_registration_options(rp_id: str, rp_name: str, existing_credential_ids: list[str]) -> tuple[str, bytes]:
     """Returns (options_json, challenge) for a new device registration ceremony.
     `options_json` goes straight to the browser (navigator.credentials.create());

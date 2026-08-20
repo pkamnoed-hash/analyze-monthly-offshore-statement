@@ -1,9 +1,10 @@
+import base64
+import json
 import os
 
 import streamlit as st
 
 from app_pages.components.webauthn_login_component import webauthn_authenticate
-from app_pages.components.webauthn_register_component import webauthn_register
 from core import db
 from core.auth import verify_password
 from core.db import init_db
@@ -11,9 +12,108 @@ from core.version import current_app_version
 from core.webauthn_auth import (
     build_authentication_options,
     build_registration_options,
+    decode_challenge,
     verify_authentication,
     verify_registration,
 )
+
+# v4.6.1 -- runs navigator.credentials.create() directly in this page's own top-level
+# document via st.html(unsafe_allow_javascript=True), NOT a Streamlit custom component
+# (unlike login's webauthn_authenticate above). Three real, hard-won reasons, confirmed
+# on real hardware and by reading the installed Streamlit source, not assumed:
+# 1. A component's own iframe blocks navigator.credentials.create() outright --
+#    Streamlit's component iframe Permissions Policy allows publickey-credentials-get
+#    (why login can stay a component) but not publickey-credentials-create (confirmed
+#    by grepping the installed Streamlit frontend bundle's IFrameUtil.*.js).
+# 2. A same-origin popup opened via window.open() (this branch's first fix attempt for
+#    #1) broke in actual production use: Streamlit Community Cloud's own private-app
+#    viewer authentication (separate from and in front of this app's own password
+#    gate) doesn't reliably carry its session into a popup on iOS Safari, leaving the
+#    popup stuck in Streamlit's own login redirect forever instead of ever reaching
+#    the registration page.
+# 3. st.markdown(unsafe_allow_html=True) (this branch's second fix attempt) silently
+#    strips inline event handler attributes like onclick -- confirmed from source
+#    (Html.*.js's DOMPurify config for st.markdown has no ADD_ATTR override, so
+#    DOMPurify's default forbid-all-on*-attributes behavior applies). st.html's own
+#    unsafe_allow_javascript=True path uses a DIFFERENT config that specifically
+#    re-allows <script> tags (extracting and recreating them as real, executing
+#    script elements -- the standard "innerHTML scripts don't run, but
+#    dynamically-created ones do" workaround) and, per its own docstring, is never
+#    iframed either -- solving both #1 and #3 at once, and #2 doesn't apply since
+#    there's no popup/separate browsing context involved here at all.
+#
+# Result gets back to Python via st.query_params, set through a real page navigation
+# (not Streamlit's component protocol, which doesn't exist for raw injected HTML).
+# Deliberately self-contained: the challenge and device label round-trip inside the
+# result payload itself (challenge_b64/device_label below) rather than st.session_state,
+# so this works correctly regardless of whether a page navigation preserves session
+# state -- one less thing to depend on. Only navigates on genuine success; a
+# cancel/error just updates the on-page status text in place, no reload needed since
+# nothing has to reach Python for those.
+_WEBAUTHN_REG_SCRIPT = """<script>
+(function () {
+  function b64uToBuf(s) {
+    const p = '='.repeat((4 - (s.length % 4)) % 4);
+    const b64 = (s + p).replace(/-/g, '+').replace(/_/g, '/');
+    const raw = atob(b64);
+    const bytes = new Uint8Array(raw.length);
+    for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
+    return bytes.buffer;
+  }
+  function bufToB64u(buf) {
+    const bytes = new Uint8Array(buf);
+    let str = '';
+    for (const b of bytes) str += String.fromCharCode(b);
+    return btoa(str).replace(/\\+/g, '-').replace(/\\//g, '_').replace(/=+$/, '');
+  }
+  const btn = document.getElementById('webauthn_reg_btn');
+  const status = document.getElementById('webauthn_reg_status');
+  if (!btn || btn.dataset.bound === '1') return;
+  btn.dataset.bound = '1';
+  btn.addEventListener('click', async () => {
+    btn.disabled = true;
+    status.textContent = 'Waiting for Face ID / Touch ID...';
+    try {
+      if (!window.PublicKeyCredential) { throw new Error('This browser does not support WebAuthn.'); }
+      const optionsJson = atob(btn.dataset.optionsB64);
+      const opts = JSON.parse(optionsJson);
+      const challengeB64 = opts.challenge;
+      opts.challenge = b64uToBuf(opts.challenge);
+      opts.user.id = b64uToBuf(opts.user.id);
+      if (opts.excludeCredentials) {
+        opts.excludeCredentials = opts.excludeCredentials.map((c) => Object.assign({}, c, { id: b64uToBuf(c.id) }));
+      }
+      const credential = await navigator.credentials.create({ publicKey: opts });
+      const response = credential.response;
+      const credentialJson = {
+        id: credential.id,
+        rawId: bufToB64u(credential.rawId),
+        type: credential.type,
+        clientExtensionResults: credential.getClientExtensionResults ? credential.getClientExtensionResults() : {},
+        response: {
+          clientDataJSON: bufToB64u(response.clientDataJSON),
+          attestationObject: bufToB64u(response.attestationObject),
+          transports: response.getTransports ? response.getTransports() : [],
+        },
+      };
+      const resultObj = {
+        status: 'success',
+        credential_json: credentialJson,
+        challenge_b64: challengeB64,
+        device_label: atob(btn.dataset.labelB64),
+      };
+      const resultB64 = btoa(JSON.stringify(resultObj));
+      const url = new URL(window.location.href);
+      url.searchParams.set('webauthn_reg_result', resultB64);
+      status.textContent = 'Verifying...';
+      window.location.href = url.toString();
+    } catch (err) {
+      status.textContent = err instanceof Error ? err.message : String(err);
+      btn.disabled = false;
+    }
+  });
+})();
+</script>"""
 
 st.set_page_config(page_title="Financial Summary Dashboard", layout="wide")
 
@@ -114,14 +214,32 @@ if st.sidebar.button("Log out"):
 # v4.6 -- additive to the password gate above, never a replacement: registering a
 # device requires already being logged in via password (there's no way to reach this
 # without one), and password login itself is completely unaffected whether or not
-# anyone ever opens this expander. See
-# app_pages/components/webauthn_register_component.py's own docstring for why
-# registration needs this two-step (plain button generates options, THEN the
-# component's own internal button actually starts the ceremony) rather than a single
-# click -- generating options on every single page render (even collapsed/unopened)
-# would mean a wasted crypto/random-challenge operation on every navigation across the
-# whole app, not just when someone actually opens this expander.
+# anyone ever opens this expander.
 with st.sidebar.expander("Set up Face ID / Touch ID"):
+    # A completed ceremony's result arrives via a real page navigation (see
+    # _WEBAUTHN_REG_SCRIPT above) -- handle it before anything else in this block,
+    # then clear it immediately so refreshing the page never reprocesses it.
+    if "webauthn_reg_result" in st.query_params:
+        try:
+            result = json.loads(base64.b64decode(st.query_params["webauthn_reg_result"]))
+        except Exception:
+            result = None
+        del st.query_params["webauthn_reg_result"]
+        if result and result.get("status") == "success":
+            try:
+                credential_id, public_key = verify_registration(
+                    result["credential_json"], decode_challenge(result["challenge_b64"]),
+                    WEBAUTHN_ORIGIN, WEBAUTHN_RP_ID,
+                )
+                db.save_webauthn_credential(
+                    credential_id, public_key, device_label=result.get("device_label") or None,
+                )
+                st.success("Device registered for Face ID / Touch ID.")
+            except Exception:
+                st.error("Registration couldn't be verified -- please try again.")
+        elif result and result.get("status") == "error":
+            st.warning(f"Registration didn't complete: {result.get('message', 'unknown error')} -- please try again.")
+
     registered = db.fetch_webauthn_credentials()
     if not registered.empty:
         st.caption("Registered devices:")
@@ -130,30 +248,30 @@ with st.sidebar.expander("Set up Face ID / Touch ID"):
 
     device_label = st.text_input("Device label", placeholder="e.g. iPad", key="webauthn_device_label")
 
+    # Two-step, same reasoning as before: a plain button generates fresh options only
+    # on click, so a wasted crypto/random-challenge call doesn't run on every render of
+    # this expander across every navigation in the app -- only when someone actually
+    # clicks to start.
     if st.button("Start registration", key="webauthn_start_reg"):
         existing_ids = registered["Credential Id"].tolist() if not registered.empty else []
-        options_json, challenge = build_registration_options(WEBAUTHN_RP_ID, WEBAUTHN_RP_NAME, existing_ids)
-        st.session_state["webauthn_reg_options"] = options_json
-        st.session_state["webauthn_reg_challenge"] = challenge
-        st.session_state.pop("webauthn_reg_handled", None)
+        options_json, _ = build_registration_options(WEBAUTHN_RP_ID, WEBAUTHN_RP_NAME, existing_ids)
+        st.session_state["webauthn_reg_options_b64"] = base64.b64encode(options_json.encode()).decode()
 
-    if "webauthn_reg_options" in st.session_state:
-        result = webauthn_register(st.session_state["webauthn_reg_options"], key="webauthn_register_component")
-        if result and result.get("status") == "success" and not st.session_state.get("webauthn_reg_handled"):
-            try:
-                credential_id, public_key = verify_registration(
-                    result["credential_json"], st.session_state["webauthn_reg_challenge"],
-                    WEBAUTHN_ORIGIN, WEBAUTHN_RP_ID,
-                )
-                db.save_webauthn_credential(credential_id, public_key, device_label=device_label or None)
-                st.session_state["webauthn_reg_handled"] = True
-                del st.session_state["webauthn_reg_options"]
-                st.success("Device registered for Face ID / Touch ID.")
-                st.rerun()
-            except Exception:
-                st.error("Registration couldn't be verified -- please try again.")
-        elif result and result.get("status") == "error":
-            st.warning("Registration didn't complete -- please try again.")
+    if "webauthn_reg_options_b64" in st.session_state:
+        options_b64 = st.session_state["webauthn_reg_options_b64"]
+        label_b64 = base64.b64encode((device_label or "").encode()).decode()
+        st.html(
+            f"""
+<button id="webauthn_reg_btn" data-options-b64="{options_b64}" data-label-b64="{label_b64}"
+        style="width:100%;padding:0.5rem 1rem;font-size:0.95rem;font-weight:500;border-radius:6px;
+               border:1px solid rgba(250,250,250,0.2);background:transparent;color:inherit;cursor:pointer;">
+  Register this device
+</button>
+<div id="webauthn_reg_status" style="font-size:0.78rem;color:#9aa0a6;margin-top:4px;min-height:1em;"></div>
+{_WEBAUTHN_REG_SCRIPT}
+""",
+            unsafe_allow_javascript=True,
+        )
 
 pg = st.navigation({
     "Overview": [

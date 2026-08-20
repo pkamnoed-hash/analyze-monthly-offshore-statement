@@ -1,7 +1,0 @@
-[server]
-# Required for the WebAuthn registration popup relay -- serves files under a top-level
-# static/ folder (sibling to dashboard_app.py) at app/static/<filename>. Only currently
-# used by static/webauthn_register.html (see app_pages/components/webauthn_register_component.py's
-# docstring for why registration needs a same-origin popup rather than running directly
-# inside a component iframe, unlike login).
-enableStaticServing = true
