@@ -580,6 +580,23 @@ class TestWebauthnCredentials:
         assert "Credential Id" in result.columns
 
 
+class TestAppPassword:
+    def test_fetch_returns_none_when_no_row_exists(self, conn):
+        # A fresh deploy has never had its password changed from the app -- the caller
+        # (dashboard_app.py) falls back to st.secrets in this case.
+        assert db.fetch_app_password(conn=conn) is None
+
+    def test_save_then_fetch_round_trips(self, conn):
+        db.save_app_password("somesalt", "somehash", conn=conn)
+        assert db.fetch_app_password(conn=conn) == ("somesalt", "somehash")
+
+    def test_save_upserts_in_place_not_a_second_row(self, conn):
+        db.save_app_password("salt-1", "hash-1", conn=conn)
+        db.save_app_password("salt-2", "hash-2", conn=conn)
+        assert conn.execute("SELECT COUNT(*) FROM app_password").fetchone()[0] == 1
+        assert db.fetch_app_password(conn=conn) == ("salt-2", "hash-2")
+
+
 class TestRebalancePlan:
     def test_get_active_rebalance_plan_returns_none_when_none_exists(self, conn):
         assert db.get_active_rebalance_plan(conn=conn) is None
