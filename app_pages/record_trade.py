@@ -5,25 +5,27 @@ import cached_db
 from core import calculations, db, slip_parser
 
 
-def render_trade_form(symbol, side, quantity, price, prefill=None, form_key="manual_trade", oversell_blocked=False):
-    """Renders the remaining trade entry fields (Trade Date, fees, order
-    info). Symbol/Side/Quantity/Price are captured outside this function
-    (before it's called) so the live position lookup and sell-P/L preview
-    can react to them -- st.form only reruns on submit, which would make
-    that impossible if they were inside. Pre-filled if `prefill` is given
-    (used by the Upload Slip confirm step; the caller is responsible for
-    prefilling the outer Symbol/Side/Quantity/Price widgets too, since this
-    function no longer renders them). `oversell_blocked` is computed by the
-    caller from the shared position lookup -- True when this is a sell
-    exceeding current holdings and the user hasn't ticked the confirmation
-    checkbox shown above the tabs; blocks the save the same way for both
-    Upload Slip and Manual Entry, since both call this function. Returns the
-    collected field dict on a valid submit, else None."""
+def render_trade_form(symbol, side, quantity, price, trade_date, prefill=None, form_key="manual_trade", oversell_blocked=False):
+    """Renders the remaining trade entry fields (fees, order info).
+    Trade Date/Symbol/Side/Quantity/Price are all captured outside this
+    function (before it's called) so the live position lookup and
+    sell-P/L preview can react to them -- st.form only reruns on submit,
+    which would make that impossible if they were inside, and it also
+    lets Trade Date sit in the same shared top row as Symbol rather than
+    inside either tab's own form. Pre-filled if `prefill` is given (used
+    by the Upload Slip confirm step; the caller is responsible for
+    prefilling the outer Trade Date/Symbol/Side/Quantity/Price widgets
+    too, since this function no longer renders them). `oversell_blocked`
+    is computed by the caller from the shared position lookup -- True
+    when this is a sell exceeding current holdings and the user hasn't
+    ticked the confirmation checkbox shown above the tabs; blocks the
+    save the same way for both Upload Slip and Manual Entry, since both
+    call this function. Returns the collected field dict on a valid
+    submit, else None."""
     prefill = prefill or {}
     with st.form(form_key, clear_on_submit=True):
         col1, col2 = st.columns(2)
         with col1:
-            trade_date = st.date_input("Trade Date", value=prefill.get("trade_date", pd.Timestamp.today().date()))
             order_type = st.text_input("Order Type (optional)", value=prefill.get("order_type", "") or "")
             order_id = st.text_input("Order ID (optional)", value=prefill.get("order_id", "") or "")
         with col2:
@@ -82,15 +84,11 @@ def render_trade_form(symbol, side, quantity, price, prefill=None, form_key="man
 
 def slip_to_prefill(parsed: slip_parser.ParsedSlip) -> dict:
     """Maps a ParsedSlip's fee/order fields onto render_trade_form's prefill
-    keys. Symbol/Side/Quantity/Price are handled separately by the caller --
-    they're set into the shared outer widgets' session_state, not passed
-    through this dict, since render_trade_form no longer renders them.
-
-    Some slip screenshots don't show a date (e.g. cropped before the
-    Completion date section) -- trade_date is left out of the dict in that
-    case so render_trade_form's own default (today, editable) applies instead
-    of crashing on an empty string."""
-    prefill = {
+    keys. Trade Date/Symbol/Side/Quantity/Price are handled separately by
+    the caller -- they're set into the shared outer widgets' session_state
+    (see _handle_parse_slip), not passed through this dict, since
+    render_trade_form no longer renders any of them."""
+    return {
         "commission_fee": parsed.commission_fee,
         "vat": parsed.vat,
         "reserved_fee": parsed.reserved_fee,
@@ -98,20 +96,14 @@ def slip_to_prefill(parsed: slip_parser.ParsedSlip) -> dict:
         "order_type": parsed.order_type,
         "order_id": parsed.order_id,
     }
-    if parsed.trade_date:
-        try:
-            prefill["trade_date"] = pd.to_datetime(parsed.trade_date).date()
-        except (ValueError, TypeError):
-            pass
-    return prefill
 
 
 def _handle_parse_slip():
     """on_click callback for the Parse Slip button -- runs *before* the script
     reruns top-to-bottom, so it's safe to write into the shared
-    Symbol/Side/Quantity/Price widgets' session_state here. Doing this same
-    assignment inline in the tab body (after those widgets have already been
-    instantiated earlier in the same run) raises
+    Trade Date/Symbol/Side/Quantity/Price widgets' session_state here. Doing
+    this same assignment inline in the tab body (after those widgets have
+    already been instantiated earlier in the same run) raises
     StreamlitAPIException("cannot be modified after the widget ... is
     instantiated") -- confirmed by hitting it during Step 5's real browser
     test. Errors/spinners can't reliably render from inside a callback, so
@@ -135,7 +127,28 @@ def _handle_parse_slip():
     st.session_state["record_trade_side"] = "Buy" if parsed.side == "buy" else "Sell"
     st.session_state["record_trade_quantity"] = float(parsed.quantity)
     st.session_state["record_trade_price"] = float(parsed.price)
+    # Some slip screenshots don't show a date (e.g. cropped before the Completion date
+    # section) -- left untouched in that case so Trade Date's own default (today,
+    # editable) applies instead of crashing on an empty string.
+    if parsed.trade_date:
+        try:
+            st.session_state["record_trade_date"] = pd.to_datetime(parsed.trade_date).date()
+        except (ValueError, TypeError):
+            pass
     st.session_state["parsed_slip"] = parsed
+
+
+def _clear_outer_trade_widgets():
+    """Resets the shared Trade Date/Symbol/Side/Quantity/Executed Price widgets after a
+    successful save, so the form is ready for a fresh entry immediately. These live
+    outside st.form (for live position-lookup/sell-preview reactivity -- see
+    render_trade_form's docstring), so clear_on_submit=True, which only covers the
+    form's own Order Type/Order ID/fee fields, never reaches them on its own."""
+    for key in (
+        "record_trade_date", "record_trade_symbol", "record_trade_side",
+        "record_trade_quantity", "record_trade_price",
+    ):
+        st.session_state.pop(key, None)
 
 
 st.title("Record Trade")
@@ -151,12 +164,18 @@ db_trades = cached_db.cached_fetch_trades()
 # a live position lookup / sell preview impossible. Manual Entry types into
 # these directly; Upload Slip pre-fills them (via session_state) once a slip
 # is parsed, so the same position lookup / sell preview applies to both paths.
+# Trade Date lives here too (not inside either tab's own form) so it renders
+# in this same top row, ahead of Symbol.
 # Sourced from trade history so re-trading something you've held before is a pick, not
 # a retype -- accept_new_options=True still lets a genuinely new symbol be typed in,
 # unlike the Record Dividend grid's SelectboxColumn, which has no such escape hatch.
 known_symbols = sorted(db_trades["Symbol"].dropna().unique().tolist())
 
-oc1, oc2, oc3, oc4 = st.columns(4)
+oc0, oc1, oc2, oc3, oc4 = st.columns(5)
+with oc0:
+    trade_date = st.date_input(
+        "Trade Date", value=pd.Timestamp.today().date(), key="record_trade_date",
+    )
 with oc1:
     symbol = st.selectbox(
         "Symbol", options=known_symbols, index=None, accept_new_options=True,
@@ -234,7 +253,21 @@ if symbol:
 # render_trade_form, so gating the save here covers both the same way.
 oversell_blocked = is_oversell and not confirm_oversell
 
-tab_upload, tab_manual = st.tabs(["Upload Slip", "Manual Entry"])
+tab_manual, tab_upload = st.tabs(["Manual Entry", "Upload Slip"])
+
+with tab_manual:
+    result = render_trade_form(
+        symbol, side, quantity, price, trade_date, form_key="manual_trade", oversell_blocked=oversell_blocked,
+    )
+    if result:
+        db.insert_trade(**result, source="manual")
+        cached_db.invalidate_trades()
+        if is_new_symbol and allocation_type != "Others":
+            db.set_symbol_type(symbol, allocation_type)
+            cached_db.invalidate_symbol_types()
+        st.success(f"Saved: {result['side']} {result['quantity']:g} {result['symbol']} @ ${result['price']:,.4f}")
+        _clear_outer_trade_widgets()
+        st.rerun()
 
 with tab_upload:
     uploaded = st.file_uploader("Slip screenshot", type=["png", "jpg", "jpeg"], key="slip_uploader")
@@ -247,11 +280,11 @@ with tab_upload:
 
     parsed_slip = st.session_state.get("parsed_slip")
     if parsed_slip:
-        st.success("Slip parsed -- review the fields below (including Symbol/Side/Quantity/Price above), then confirm.")
+        st.success("Slip parsed -- review the fields above (Trade Date/Symbol/Side/Quantity/Price), then confirm.")
         if not parsed_slip.trade_date:
-            st.warning("Trade date wasn't visible on this slip -- defaulted to today. Please set it manually below.")
+            st.warning("Trade date wasn't visible on this slip -- defaulted to today. Please set it manually above.")
         result = render_trade_form(
-            symbol, side, quantity, price, prefill=slip_to_prefill(parsed_slip),
+            symbol, side, quantity, price, trade_date, prefill=slip_to_prefill(parsed_slip),
             form_key="slip_trade", oversell_blocked=oversell_blocked,
         )
         if result:
@@ -262,20 +295,10 @@ with tab_upload:
                 cached_db.invalidate_symbol_types()
             del st.session_state["parsed_slip"]
             st.success(f"Saved: {result['side']} {result['quantity']:g} {result['symbol']} @ ${result['price']:,.4f}")
+            _clear_outer_trade_widgets()
             st.rerun()
     else:
         st.caption("Upload a slip image and click Parse Slip to get started.")
-
-with tab_manual:
-    result = render_trade_form(symbol, side, quantity, price, form_key="manual_trade", oversell_blocked=oversell_blocked)
-    if result:
-        db.insert_trade(**result, source="manual")
-        cached_db.invalidate_trades()
-        if is_new_symbol and allocation_type != "Others":
-            db.set_symbol_type(symbol, allocation_type)
-            cached_db.invalidate_symbol_types()
-        st.success(f"Saved: {result['side']} {result['quantity']:g} {result['symbol']} @ ${result['price']:,.4f}")
-        st.rerun()
 
 st.divider()
 st.subheader("Recent Trades")
