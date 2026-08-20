@@ -1,5 +1,21 @@
 # Changelog
 
+## Change Password (v4.7)
+
+Change your password right from the app -- no more hand-editing
+deployment config.
+
+- New **"Change Password"** section in the sidebar (next to "Set up
+  Face ID / Touch ID"): enter your current password plus a new one
+  twice, and it's updated instantly.
+- Your current password is always checked first, so a wrong entry
+  never gets close to changing anything.
+- Face ID / Touch ID login is completely unaffected by a password
+  change -- no need to re-register any device.
+- No breaking changes -- existing deployments keep working with their
+  original password until the first time it's changed.
+- Full test suite: 349/349 passing.
+
 ## Hotfix: Face ID / Touch ID Registration on the Deployed App (v4.6.1)
 
 Fixes registration getting stuck on a blank/loading screen on the real

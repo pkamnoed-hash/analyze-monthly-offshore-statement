@@ -2917,10 +2917,14 @@ password form -- never a dead end.
 
 ### Testing and verification
 
-`AppTest` (this app's usual headless harness) **cannot** exercise a
-real WebAuthn ceremony -- no browser, no platform authenticator -- so
-this feature's acceptance test is fundamentally different from every
-prior feature in this app. What `AppTest` + unit tests confirmed: 18
+`AppTest` (Streamlit's headless page harness -- used here ad hoc during
+development, not as a committed test file; no persisted `AppTest` file
+exists anywhere in this project's `tests/` directory, corrected here
+after v4.7's plan surfaced this section's own inaccurate "this app's
+usual headless harness" phrasing) **cannot** exercise a real WebAuthn
+ceremony -- no browser, no platform authenticator -- so this feature's
+acceptance test is fundamentally different from every prior feature in
+this app. What `AppTest` + unit tests confirmed: 18
 new tests including real cryptographic round-trips against genuine
 WebAuthn response fixtures pulled from the `webauthn` library's own
 test suite (not synthetic data) -- both a full success path and
@@ -3122,6 +3126,131 @@ Face ID/Touch ID login were reconfirmed end-to-end afterward.
 - **Making the app public** -- would have sidestepped this bug
   entirely (no Streamlit Cloud auth gate to fight), but the user chose
   to keep the app private and rework registration instead.
+
+## V4.7: Change Password
+
+Branch `v4.7-change-password`, cut from `main` after v4.6.1 merged in.
+
+### Context
+
+The app's password (`core/auth.py`, one shared salted-SHA-256 hash)
+lived only in `.streamlit/secrets.toml`
+(`APP_PASSWORD_SALT`/`APP_PASSWORD_HASH`) -- deploy-time config the
+running app can't write to, especially on Streamlit Community Cloud.
+There was no way to change it without hand-computing a new hash and
+pasting it into Streamlit Cloud's Secrets editor. Requested as "a
+simple feature change password."
+
+Two designs were possible: keep `secrets.toml` as the source of truth
+and have the app just compute a value to paste in manually, or move
+the credential into the database so the change is instant and
+self-service -- the same shift `webauthn_credentials` (v4.6) already
+made for biometric registration. User chose the DB-backed option
+(AskUserQuestion).
+
+Version number: initially discussed as `v4.6.2` before shipping, but
+checking this project's own established `x.y.z` convention (every
+past instance -- v4.1.1/v4.1.2, v4.3.1, v4.4.1, v4.5.1/v4.5.2, v4.6.1
+-- is either a hotfix for that exact `x.y` feature or a direct
+continuation of its theme) showed Change Password is neither related
+to v4.6's biometric-login theme nor a hotfix for v4.6.1, so it took
+the next whole minor number instead, matching how v4.1.2's hotfix was
+followed by v4.2 (a new feature), not v4.1.3. Confirmed with the user
+before cutting the branch.
+
+### Design decisions
+
+**New DB table** `app_password` -- a literal singleton row, fixed
+`id=1`, enforced by `CHECK (id = 1)` (a first use in this schema file;
+every other table can hold many rows, but this one gates login itself,
+so a stray second row fails loudly at the DB level rather than leaving
+it ambiguous which row is current):
+```sql
+CREATE TABLE IF NOT EXISTS app_password (
+    id            INTEGER PRIMARY KEY CHECK (id = 1),
+    salt          TEXT NOT NULL,
+    password_hash TEXT NOT NULL,
+    updated_at    TEXT NOT NULL DEFAULT (datetime('now'))
+)
+```
+`fetch_app_password()` returns `(salt, password_hash)` or `None` --
+deliberately a plain tuple, not a DataFrame, unlike every other
+`fetch_*` in `core/db.py`: this is one scalar fact with no table to
+show, and there was no existing single-row precedent in that file to
+copy. `save_app_password()` upserts the singleton row, reusing
+`set_symbol_type`'s existing `INSERT ... ON CONFLICT DO UPDATE` shape
+verbatim, just keyed on the fixed `id=1` instead of a natural key.
+
+**`core/auth.py`**: added `generate_salt()` (`secrets.token_hex(16)`,
+32 hex chars matching the original hand-generated salt's format) --
+this app had no prior salt-generation code at all; the original salt
+was created by hand and pasted into `secrets.toml`.
+
+**`dashboard_app.py`**: a small `_effective_credential()` helper
+(DB row if the password's ever been changed from the app, else the
+original `st.secrets` values) used by both the login form and the new
+"Change Password" sidebar expander, so every existing deployment keeps
+working unchanged until the first password change. The new expander
+sits *before* "Set up Face ID / Touch ID" -- the more fundamental
+credential control (it's what biometric login falls back to, and the
+only way to register a new device) reads naturally ahead of the
+additive convenience layered on top of it. Current password is
+verified before either the empty-new-password or mismatch checks, so
+a wrong/blank current password never gets to see whether new/confirm
+even matched; an empty new password is explicitly blocked (it would
+otherwise hash and save cleanly, silently making the account
+log-in-with-blank-password possible).
+
+**No interaction with WebAuthn, confirmed** -- biometric login
+verifies a signed challenge against a stored public key in
+`webauthn_credentials`, never reads `app_password`/`st.secrets` at
+all; changing the password doesn't touch or require re-registering any
+biometric credential. **No forced re-login** -- the person submitting
+the form already proved they know the password twice in immediate
+succession (original login, then this form's own check); this app has
+no server-side session tracking to invalidate other open tabs/devices
+even if desired.
+
+### Implementation
+
+- **`core/db.py`**: `app_password` schema entry;
+  `fetch_app_password()`/`save_app_password()`.
+- **`core/auth.py`**: `generate_salt()`.
+- **`dashboard_app.py`**: `_effective_credential()` helper; login
+  form's `verify_password` call site switched to use it; new "Change
+  Password" sidebar expander.
+- **`tests/test_auth.py`**: `TestGenerateSalt`.
+- **`tests/test_db.py`**: `TestAppPassword`.
+
+### Testing and verification
+
+New unit tests (`TestAppPassword` in `tests/test_db.py`,
+`TestGenerateSalt` in `tests/test_auth.py`) using this project's usual
+in-memory-sqlite/`conn=`-injection and pure-function conventions.
+349/349 tests passing. `dashboard_app.py`'s wiring itself is a thin,
+mechanical `if/elif` chain calling already-tested functions -- no new
+`AppTest` file was introduced for it (see the correction in V4.6's own
+"Testing and verification" section above: this project has never
+actually had a persisted `AppTest` file, and `dashboard_app.py` calls
+`db.get_connection()` -- real Turso -- at script level with no
+injection seam, so standing one up here would be a disproportionate
+lift for logic already fully covered by unit tests). Verified manually
+against the **dev** Turso database (per `CLAUDE.md`'s data-safety note
+and v4.6's own prod/dev mixup precedent): wrong current password
+blocked with no row created; empty new password blocked; mismatched
+confirmation blocked; a valid change succeeded and persisted; logging
+out and back in with the new password succeeded; the old password no
+longer worked; a second change confirmed the row upserts in place
+rather than accumulating.
+
+### Considered and explicitly deferred
+
+- **Invalidating other active sessions on password change** -- not
+  applicable; this app has no server-side session tracking to
+  invalidate other open tabs/devices with.
+- **Password strength/complexity rules** -- not added; matches this
+  app's existing minimal, single-user-trust model (no such rules
+  existed for the original password either).
 
 ## Deferred / future
 
