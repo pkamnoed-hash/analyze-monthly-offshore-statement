@@ -440,9 +440,13 @@ def _render_symbol_analysis_zones():
     # -------------------------------------------------------------------------------
 
     # -------------------------------------------------------------------------------
-    # Zone 5: Level/Price/Total P/L/% table, live watch-highlight, and the "% to
-    # sell" simulator. Total P/L is "if price reached this line and I sold sell_pct%
-    # of my shares there" -- scales with the simulator; % is per-share and doesn't.
+    # Zone 5: Level/Price/Total P/L/Total P/L % table, live watch-highlight, and the
+    # "% to sell" simulator. Total P/L is "if price reached this line and I sold
+    # sell_pct% of my shares there" -- scales with the simulator; Total P/L % is
+    # per-share return vs. avg cost and doesn't (named to match this app's other
+    # dollar/percent column pairs, e.g. Monitor Stocks' Total P/L/Total P/L %, even
+    # though unlike those pairs the two columns here aren't the same figure in two
+    # units -- Total P/L % stays fixed regardless of the "% to sell" slider).
     # Resistance/support is derived live from price vs. latest_price (same rule the
     # chart itself uses), so the row nearest on each side is highlighted -- the one
     # you'd actually watch next -- rather than trying to detect a line "being
@@ -501,7 +505,7 @@ def _render_symbol_analysis_zones():
         pct_pl = (price - avg_cost) / avg_cost * 100 if avg_cost else float("nan")
         passed_at = passed_at_by_price.get(round(price, 6))
         levels_rows.append({
-            "Level": label, "Price": price, "Total P/L": total_pl, "%": pct_pl,
+            "Level": label, "Price": price, "Total P/L": total_pl, "Total P/L %": pct_pl,
             "Passed R/S": pd.Timestamp(passed_at) if passed_at and pd.notna(passed_at) else pd.NaT,
         })
         is_resistance_ordered.append(is_resistance)
@@ -528,7 +532,7 @@ def _render_symbol_analysis_zones():
     else:
         styler = levels_table.style.apply(_highlight_nearest, axis=1).format(
             {
-                "Price": "${:,.2f}", "Total P/L": "${:+,.2f}", "%": "{:+.2f}%",
+                "Price": "${:,.2f}", "Total P/L": "${:+,.2f}", "Total P/L %": "{:+.2f}%",
                 "Passed R/S": lambda v: v.strftime("%d/%m/%Y") if pd.notna(v) else "—",
             },
         )
