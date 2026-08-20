@@ -108,9 +108,29 @@ if st.button("Save all rows"):
 
 st.divider()
 
-view = st.radio("View", ["Recent list", "Matrix"], horizontal=True, label_visibility="collapsed")
+filter_col, view_col = st.columns([2, 1])
+with filter_col:
+    # Symbol-level Allocation Type (Dividend/Growth/Others), NOT the per-row Entry Type
+    # above -- a different classification entirely (see docs/ROADMAP.md V4.7's sibling
+    # discussion). Joined here rather than stored on the dividends table itself, so a
+    # symbol's category can be corrected later (Tools -> Allocation Type) without having
+    # to touch any already-recorded dividend rows. Same "unclassified -> Others" fallback
+    # Monitor Stocks' own Category filter uses, so a symbol never traded through Record
+    # Trade's "first trade" prompt (or an Interest row, which has no symbol at all)
+    # still falls into a real, filterable bucket instead of vanishing from every option
+    # except "All".
+    category_filter = st.radio(
+        "Filter by category", ["All", "Others", "Dividend", "Growth"], horizontal=True,
+    )
+with view_col:
+    view = st.radio("View", ["Recent list", "Matrix"], horizontal=True)
 
 db_dividends = cached_db.cached_fetch_dividends()
+symbol_types = cached_db.cached_fetch_symbol_types()
+db_dividends = db_dividends.merge(symbol_types, on="Symbol", how="left")
+db_dividends["Allocation Type"] = db_dividends["Allocation Type"].fillna("Others")
+if category_filter != "All":
+    db_dividends = db_dividends[db_dividends["Allocation Type"] == category_filter]
 
 if view == "Recent list":
     # Seed rows (imported xlsx history) are deliberately excluded here, same convention
@@ -119,7 +139,10 @@ if view == "Recent list":
     recent = db_dividends[db_dividends["source"] == "manual"].sort_values("Trade Date", ascending=False).head(20)
     st.caption("Dividends logged through this page. To fix a mistake, delete the row and re-enter it.")
     if recent.empty:
-        st.caption("No manually-logged dividends yet.")
+        if category_filter == "All":
+            st.caption("No manually-logged dividends yet.")
+        else:
+            st.caption(f"No manually-logged dividends in the \"{category_filter}\" category yet.")
     else:
         header_cols = st.columns([1.2, 0.9, 1.3, 1, 0.8])
         for col, label in zip(header_cols, ["Date", "Symbol", "Entry Type", "Net Amount", ""]):
@@ -139,7 +162,10 @@ if view == "Recent list":
                     st.rerun()
 else:
     if db_dividends.empty:
-        st.caption("No dividends logged yet.")
+        if category_filter == "All":
+            st.caption("No dividends logged yet.")
+        else:
+            st.caption(f"No dividends in the \"{category_filter}\" category yet.")
     else:
         matrix_source = db_dividends.copy()
         # Interest rows carry no symbol (matches the xlsx seed convention) -- give them a
