@@ -1,4 +1,4 @@
-from core.auth import hash_password, verify_password
+from core.auth import generate_salt, hash_password, verify_password
 
 
 class TestVerifyPassword:
@@ -32,3 +32,16 @@ class TestVerifyPassword:
         monkeypatch.setattr(auth.hmac, "compare_digest", lambda a, b: (calls.append((a, b)), original(a, b))[1])
         verify_password("admin", "somesalt", hash_password("admin", "somesalt"))
         assert len(calls) == 1
+
+
+class TestGenerateSalt:
+    def test_returns_a_string(self):
+        assert isinstance(generate_salt(), str)
+
+    def test_is_32_hex_characters(self):
+        salt = generate_salt()
+        assert len(salt) == 32
+        int(salt, 16)  # raises ValueError if not valid hex
+
+    def test_two_calls_are_different(self):
+        assert generate_salt() != generate_salt()

@@ -6,7 +6,7 @@ import streamlit as st
 
 from app_pages.components.webauthn_login_component import webauthn_authenticate
 from core import db
-from core.auth import verify_password
+from core.auth import generate_salt, hash_password, verify_password
 from core.db import init_db
 from core.version import current_app_version
 from core.webauthn_auth import (
@@ -131,6 +131,20 @@ WEBAUTHN_RP_ID = st.secrets.get("WEBAUTHN_RP_ID", "myinvestment27.streamlit.app"
 WEBAUTHN_RP_NAME = st.secrets.get("WEBAUTHN_RP_NAME", "Portfolio Tracker")
 WEBAUTHN_ORIGIN = st.secrets.get("WEBAUTHN_ORIGIN", "https://myinvestment27.streamlit.app")
 
+
+def _effective_credential() -> tuple[str, str]:
+    """v4.7 -- (salt, password_hash) to check a login/change-password attempt against:
+    the app_password DB row if the password's ever been changed from the app, else the
+    original st.secrets values every deploy starts with. Deliberately uncached -- called
+    at most once per page load (the login form or the change-password form, never both
+    in the same run), so a password changed in one tab is picked up immediately
+    everywhere else rather than waiting out a stale cache."""
+    row = db.fetch_app_password()
+    if row is not None:
+        return row
+    return st.secrets["APP_PASSWORD_SALT"], st.secrets["APP_PASSWORD_HASH"]
+
+
 # v4.5 -- init_db() only needs to run once per browser session, not on every single
 # rerun (every navigation/widget interaction re-executes this whole script). It was
 # unconditional before, meaning every rerun paid a real Turso round trip per
@@ -200,7 +214,7 @@ if not st.session_state.get("authenticated"):
         pw = st.text_input("Password", type="password")
         submitted = st.form_submit_button("Log in")
     if submitted:
-        if verify_password(pw, st.secrets["APP_PASSWORD_SALT"], st.secrets["APP_PASSWORD_HASH"]):
+        if verify_password(pw, *_effective_credential()):
             st.session_state["authenticated"] = True
             st.rerun()
         else:
@@ -210,6 +224,28 @@ if not st.session_state.get("authenticated"):
 if st.sidebar.button("Log out"):
     st.session_state["authenticated"] = False
     st.rerun()
+
+# v4.7 -- placed before "Set up Face ID / Touch ID" below: this is the more
+# fundamental credential control (it's what biometric login falls back to, and the
+# only way to register a new device in the first place), so it reads naturally ahead
+# of the additive convenience layered on top of it.
+with st.sidebar.expander("Change Password"):
+    with st.form("change_password_form", clear_on_submit=True):
+        current_pw = st.text_input("Current password", type="password")
+        new_pw = st.text_input("New password", type="password")
+        confirm_pw = st.text_input("Confirm new password", type="password")
+        change_submitted = st.form_submit_button("Change password")
+    if change_submitted:
+        if not verify_password(current_pw, *_effective_credential()):
+            st.error("Current password is incorrect.")
+        elif not new_pw:
+            st.error("New password can't be empty.")
+        elif new_pw != confirm_pw:
+            st.error("New password and confirmation don't match.")
+        else:
+            new_salt = generate_salt()
+            db.save_app_password(new_salt, hash_password(new_pw, new_salt))
+            st.success("Password changed.")
 
 # v4.6 -- additive to the password gate above, never a replacement: registering a
 # device requires already being logged in via password (there's no way to reach this

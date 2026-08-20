@@ -124,6 +124,19 @@ SCHEMA_STATEMENTS = [
         created_at    TEXT NOT NULL DEFAULT (datetime('now'))
     )
     """,
+    # v4.7 -- CHECK (id = 1) is a first use in this file: every other table can hold
+    # many rows, but this one gates login itself, so a stray second row must fail
+    # loudly at the DB level rather than leave it ambiguous which row is "current."
+    # Absence of a row (a fresh deploy that's never had its password changed) is
+    # handled by callers falling back to st.secrets, not by seeding a default row here.
+    """
+    CREATE TABLE IF NOT EXISTS app_password (
+        id            INTEGER PRIMARY KEY CHECK (id = 1),
+        salt          TEXT NOT NULL,
+        password_hash TEXT NOT NULL,
+        updated_at    TEXT NOT NULL DEFAULT (datetime('now'))
+    )
+    """,
 ]
 
 # reference_lines shipped in v4.4 without captured_side/passed_at, added in v4.4.1 for
@@ -686,6 +699,36 @@ def update_webauthn_sign_count(credential_id: str, new_sign_count: int, conn=Non
     c.execute(
         "UPDATE webauthn_credentials SET sign_count = ? WHERE credential_id = ?",
         (new_sign_count, credential_id),
+    )
+    c.commit()
+    if should_close:
+        c.close()
+
+
+def fetch_app_password(conn=None) -> tuple[str, str] | None:
+    """v4.7 -- returns (salt, password_hash) from the app_password singleton row, or
+    None if the password has never been changed from the app (every deployment starts
+    this way). Unlike every other fetch_* here, this returns a plain tuple instead of a
+    DataFrame -- it's one scalar fact with no table to show, not UI-facing rows."""
+    c, should_close = _with_connection(conn)
+    cur = c.execute("SELECT salt, password_hash FROM app_password WHERE id = 1")
+    row = cur.fetchone()
+    if should_close:
+        c.close()
+    return (row[0], row[1]) if row else None
+
+
+def save_app_password(salt: str, password_hash: str, conn=None):
+    """v4.7 -- upserts the app_password singleton row (id=1), same INSERT ... ON
+    CONFLICT DO UPDATE shape set_symbol_type already uses for its own upsert, just
+    keyed on a fixed id instead of a natural key since there's only ever one shared
+    password for this whole app."""
+    c, should_close = _with_connection(conn)
+    c.execute(
+        "INSERT INTO app_password (id, salt, password_hash, updated_at) VALUES (1, ?, ?, datetime('now')) "
+        "ON CONFLICT(id) DO UPDATE SET salt=excluded.salt, password_hash=excluded.password_hash, "
+        "updated_at=excluded.updated_at",
+        (salt, password_hash),
     )
     c.commit()
     if should_close:
