@@ -35,6 +35,21 @@ def cached_fetch_symbol_types():
     return db.fetch_symbol_types()
 
 
+@st.cache_data
+def cached_fetch_target_categories():
+    return db.fetch_target_categories()
+
+
+@st.cache_data
+def cached_fetch_target_sectors():
+    return db.fetch_target_sectors()
+
+
+@st.cache_data
+def cached_fetch_target_allocations():
+    return db.fetch_target_allocations()
+
+
 def invalidate_trades():
     cached_fetch_trades.clear()
 
@@ -45,6 +60,18 @@ def invalidate_dividends():
 
 def invalidate_symbol_types():
     cached_fetch_symbol_types.clear()
+
+
+def invalidate_target_categories():
+    cached_fetch_target_categories.clear()
+
+
+def invalidate_target_sectors():
+    cached_fetch_target_sectors.clear()
+
+
+def invalidate_target_allocations():
+    cached_fetch_target_allocations.clear()
 
 
 @st.cache_data(ttl=300)
