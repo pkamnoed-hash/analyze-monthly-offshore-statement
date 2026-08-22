@@ -2,7 +2,7 @@ import pandas as pd
 import streamlit as st
 
 import cached_db
-from core import calculations, db, slip_parser
+from core import calculations, db, market_data, slip_parser, target_allocation
 
 
 def render_trade_form(symbol, side, quantity, price, trade_date, prefill=None, form_key="manual_trade", oversell_blocked=False):
@@ -138,6 +138,26 @@ def _handle_parse_slip():
     st.session_state["parsed_slip"] = parsed
 
 
+# DB-first price fetch, same pattern as monitor_stocks.py/target_allocation.py/rebalance.py,
+# duplicated locally per this app's established per-page convention -- needed only for the
+# whole-portfolio Target Status/Trade $ hints below (Actual % has to be relative to total
+# portfolio value, which isn't computable without knowing every holding's current price).
+# Read-only, no live-refresh variant -- a secondary reminder here, not this page's core data;
+# it picks up whatever any other page's own "Refresh now" has most recently captured.
+@st.cache_data
+def _cached_read_stock_profile_from_db(symbols: list[str]) -> pd.DataFrame:
+    cached = db.fetch_market_profile_cache()
+    cached_symbols = set(cached["Symbol"]) if not cached.empty else set()
+    missing = [s for s in symbols if s not in cached_symbols]
+    if missing:
+        live_missing = market_data.fetch_stock_profile(missing)
+        successful = live_missing[live_missing["Latest Price"].notna()]
+        if not successful.empty:
+            db.save_market_profile_cache(successful.to_dict("records"))
+        cached = db.fetch_market_profile_cache()
+    return cached[cached["Symbol"].isin(symbols)]
+
+
 def _clear_outer_trade_widgets():
     """Resets the shared Trade Date/Symbol/Side/Quantity/Executed Price widgets after a
     successful save, so the form is ready for a fresh entry immediately. These live
@@ -158,6 +178,23 @@ st.title("Record Trade")
 # (seed + manual + slip), since a current position is a right-now snapshot,
 # not duration-scoped.
 db_trades = cached_db.cached_fetch_trades()
+
+# v4.8 -- Target Allocation hints: reuses core/target_allocation.py's own pipeline, same as
+# monitor_stocks.py/rebalance.py's own copies of this block (see rebalance.py's comment for
+# the full reasoning). Computed once, unconditionally, against the WHOLE portfolio -- feeds
+# both an existing symbol's live Actual/Target/Status/Action/Trade $ reminder below, and a
+# new symbol's suggested Trade $ (against the same total portfolio value), so both numbers
+# agree with what Analysis -> Target Allocation itself would show.
+all_positions = calculations.compute_current_positions(db_trades)
+all_profile = _cached_read_stock_profile_from_db(all_positions["Symbol"].tolist())
+ta_holdings = target_allocation.compute_actual_weights(db_trades, all_profile)
+portfolio_total_value = ta_holdings["Current Value"].sum()
+ta_status = target_allocation.compute_stock_target_status(
+    ta_holdings, cached_db.cached_fetch_symbol_types(), cached_db.cached_fetch_target_allocations()
+)
+ta_status.loc[ta_status["Status"] == "Hit Target", "Trade $"] = None
+ta_status["Target Status"] = ta_status["Status"].str.replace(" Target", "", regex=False)
+ta_status = ta_status.rename(columns={"Action": "Rebalance Action"})
 
 # Shared across both tabs, and rendered outside any form so they rerun
 # immediately on each change -- a form only reruns on submit, which would make
@@ -202,13 +239,56 @@ with oc4:
 # same reasoning as the confirm_oversell checkbox above.
 is_new_symbol = bool(symbol) and symbol not in known_symbols
 allocation_type = "Others"
+target_pct_input = 0.0
 if is_new_symbol:
-    allocation_type = st.selectbox(
-        "Allocation Type (first trade of this symbol)", ["Others", "Dividend", "Growth"],
-        index=0, key=f"record_trade_allocation_type_{symbol}",
-        help="Optional -- classify Dividend/Growth now, or leave as Others and set it later "
-             "under Tools -> Allocation Type.",
-    )
+    nc0, nc1 = st.columns(2)
+    with nc0:
+        allocation_type = st.selectbox(
+            "Allocation Type (first trade of this symbol)", ["Others", "Dividend", "Growth"],
+            index=0, key=f"record_trade_allocation_type_{symbol}",
+            help="Optional -- classify Dividend/Growth now, or leave as Others and set it later "
+                 "under Tools -> Allocation Type.",
+        )
+    with nc1:
+        target_pct_input = st.number_input(
+            "Target % of portfolio (optional)", min_value=0.0, max_value=100.0, value=0.0, step=0.5,
+            key=f"record_trade_target_pct_{symbol}",
+            help="Optional -- set an initial target weight now, or leave blank and set it later "
+                 "under Analysis -> Target Allocation.",
+        )
+    # A brand-new symbol has no Actual % yet (nothing held), so Status/Action would just
+    # trivially read Short/Buy More no matter what -- not useful. What IS useful: how much
+    # to actually buy to hit the target just typed above. Trade $ = target %/100 x total
+    # portfolio value (same formula compute_stock_target_status() uses when Actual % = 0),
+    # computed live as you type since these widgets sit outside any form. Uses YOUR entered
+    # Executed Price for the share count, not a live fetch -- there's no cached price for a
+    # symbol that's never been held, and you're about to type one in anyway.
+    if target_pct_input > 0:
+        suggested_dollars = target_pct_input / 100 * portfolio_total_value
+        if price > 0:
+            st.caption(
+                f"💡 To hit a {target_pct_input:.1f}% target: ≈ ${suggested_dollars:,.2f} "
+                f"≈ {suggested_dollars / price:g} shares at your entered price of ${price:,.4f}"
+            )
+        else:
+            st.caption(f"💡 To hit a {target_pct_input:.1f}% target: ≈ ${suggested_dollars:,.2f}")
+elif symbol:
+    # Full Actual/Target/Status/Action/Trade $ reminder -- same pipeline Monitor Stocks and
+    # Rebalance & Reallocate show elsewhere, reused here so you can see it right before
+    # deciding to buy more or sell. Suppressed entirely for a symbol with no target set
+    # (the common case) -- Status/Action would otherwise just trivially read Hit/Hold for
+    # most untargeted holdings, not useful noise on every trade. Also empty (silently) for
+    # a symbol that's fully sold out -- ta_status only covers currently-held symbols, same
+    # as the position lookup below.
+    target_match = ta_status[ta_status["Symbol"] == symbol]
+    if not target_match.empty and target_match.iloc[0]["Target %"] > 0:
+        row = target_match.iloc[0]
+        trade_str = f"${row['Trade $']:,.2f}" if pd.notna(row["Trade $"]) else "—"
+        st.caption(
+            f"🎯 Actual {row['Actual %']:.1f}% → Target {row['Target %']:.1f}% → "
+            f"Δ {row['Delta %']:+.1f}% → **{row['Target Status']}** → {row['Rebalance Action']} → "
+            f"Trade {trade_str}"
+        )
 
 is_oversell = False
 confirm_oversell = False
@@ -265,6 +345,9 @@ with tab_manual:
         if is_new_symbol and allocation_type != "Others":
             db.set_symbol_type(symbol, allocation_type)
             cached_db.invalidate_symbol_types()
+        if is_new_symbol and target_pct_input > 0:
+            db.set_target_allocation(symbol, target_pct_input)
+            cached_db.invalidate_target_allocations()
         st.success(f"Saved: {result['side']} {result['quantity']:g} {result['symbol']} @ ${result['price']:,.4f}")
         _clear_outer_trade_widgets()
         st.rerun()
@@ -293,6 +376,9 @@ with tab_upload:
             if is_new_symbol and allocation_type != "Others":
                 db.set_symbol_type(symbol, allocation_type)
                 cached_db.invalidate_symbol_types()
+            if is_new_symbol and target_pct_input > 0:
+                db.set_target_allocation(symbol, target_pct_input)
+                cached_db.invalidate_target_allocations()
             del st.session_state["parsed_slip"]
             st.success(f"Saved: {result['side']} {result['quantity']:g} {result['symbol']} @ ${result['price']:,.4f}")
             _clear_outer_trade_widgets()

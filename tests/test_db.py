@@ -334,13 +334,22 @@ class TestSymbolTypes:
         rows = conn.execute("SELECT allocation_type FROM symbol_types WHERE symbol='PLTR'").fetchall()
         assert rows == [("Growth",)]  # exactly one row, updated in place -- not a duplicate insert
 
-    def test_invalid_allocation_type_is_rejected_by_check_constraint(self, conn):
+    def test_a_new_category_beyond_dividend_and_growth_is_accepted(self, conn):
+        # Confirms the CHECK constraint is open-ended (Target Allocation Tracker,
+        # relaxed from V2.1's fixed Dividend/Growth enum) -- categories the app has
+        # no UI to create yet still work at the schema layer.
+        db.set_symbol_type("VRIG", "Crypto", conn=conn)
+        row = conn.execute("SELECT allocation_type FROM symbol_types WHERE symbol='VRIG'").fetchone()
+        assert row == ("Crypto",)
+
+    def test_empty_string_allocation_type_is_rejected_by_check_constraint(self, conn):
         with pytest.raises(sqlite3.IntegrityError):
-            db.set_symbol_type("VRIG", "Speculative", conn=conn)
+            db.set_symbol_type("VRIG", "", conn=conn)
 
     def test_others_itself_is_rejected_as_a_stored_value(self, conn):
         # "Others" is the absence-of-a-row default, never a value actually
-        # written to the table -- confirms the CHECK constraint enforces that.
+        # written to the table -- confirms the CHECK constraint enforces that,
+        # the one restriction that survives the open-category relaxation above.
         with pytest.raises(sqlite3.IntegrityError):
             db.set_symbol_type("VRIG", "Others", conn=conn)
 
@@ -374,6 +383,200 @@ class TestSymbolTypes:
         result = db.fetch_symbol_types(conn=conn)
         assert result.empty
         assert list(result.columns) == ["Symbol", "Allocation Type"]
+
+
+class TestSymbolTypesOpenCategoryMigration:
+    """Simulates the real, already-shipped V2.1 schema (CHECK IN ('Dividend',
+    'Growth')) directly via SQL, bypassing init_db()/the module `conn` fixture
+    (which already builds on the new, relaxed schema) -- this is the test that
+    proves the migration is safe against real production data before it's ever
+    run against the live Turso database. See core/db.py's
+    _migrate_symbol_types_open_category()."""
+
+    def _old_schema_conn(self):
+        c = sqlite3.connect(":memory:")
+        c.execute(
+            "CREATE TABLE symbol_types ("
+            "symbol TEXT PRIMARY KEY, "
+            "allocation_type TEXT NOT NULL CHECK(allocation_type IN ('Dividend', 'Growth')), "
+            "updated_at TEXT NOT NULL DEFAULT (datetime('now')))"
+        )
+        return c
+
+    def test_migration_preserves_existing_dividend_and_growth_rows(self):
+        c = self._old_schema_conn()
+        c.execute("INSERT INTO symbol_types (symbol, allocation_type) VALUES ('AAPL', 'Growth')")
+        c.execute("INSERT INTO symbol_types (symbol, allocation_type) VALUES ('SHV', 'Dividend')")
+        c.commit()
+
+        db.init_db(conn=c)
+
+        rows = dict(c.execute("SELECT symbol, allocation_type FROM symbol_types").fetchall())
+        assert rows == {"AAPL": "Growth", "SHV": "Dividend"}
+
+    def test_migration_allows_a_new_category_afterward(self):
+        c = self._old_schema_conn()
+        c.commit()
+        db.init_db(conn=c)
+
+        # Before the migration this INSERT would have raised sqlite3.IntegrityError --
+        # confirms the old CHECK constraint is actually gone, not just untriggered.
+        db.set_symbol_type("BTCUSD", "Crypto", conn=c)
+        row = c.execute("SELECT allocation_type FROM symbol_types WHERE symbol='BTCUSD'").fetchone()
+        assert row == ("Crypto",)
+
+    def test_migration_is_a_noop_on_an_already_migrated_table(self):
+        c = self._old_schema_conn()
+        c.commit()
+        db.init_db(conn=c)  # migrates
+        db.init_db(conn=c)  # should not raise the second time around
+
+        db.set_symbol_type("BTCUSD", "Crypto", conn=c)
+        row = c.execute("SELECT allocation_type FROM symbol_types WHERE symbol='BTCUSD'").fetchone()
+        assert row == ("Crypto",)
+
+    def test_fresh_database_gets_the_relaxed_constraint_directly_no_migration_needed(self):
+        # A database that's never had symbol_types before goes straight to the new
+        # schema via CREATE TABLE IF NOT EXISTS -- the migration function only exists
+        # for a table that already existed under the old constraint.
+        c = sqlite3.connect(":memory:")
+        db.init_db(conn=c)
+        db.set_symbol_type("BTCUSD", "Crypto", conn=c)
+        row = c.execute("SELECT allocation_type FROM symbol_types WHERE symbol='BTCUSD'").fetchone()
+        assert row == ("Crypto",)
+
+
+class TestTargetAllocationCategories:
+    def test_set_target_category_pct_inserts(self, conn):
+        db.set_target_category_pct("Growth", 65.0, conn=conn)
+        row = conn.execute(
+            "SELECT target_pct FROM target_allocation_categories WHERE category='Growth'"
+        ).fetchone()
+        assert row == (65.0,)
+
+    def test_set_target_category_pct_upserts_an_existing_category(self, conn):
+        db.set_target_category_pct("Growth", 65.0, conn=conn)
+        db.set_target_category_pct("Growth", 70.0, conn=conn)
+        rows = conn.execute(
+            "SELECT target_pct FROM target_allocation_categories WHERE category='Growth'"
+        ).fetchall()
+        assert rows == [(70.0,)]  # exactly one row, updated in place
+
+    def test_fetch_target_categories_returns_empty_frame_when_none_set(self, conn):
+        result = db.fetch_target_categories(conn=conn)
+        assert result.empty
+
+    def test_fetch_target_categories_reflects_only_what_was_actually_set(self, conn):
+        # No synthetic full-coverage fill at this layer -- unlike fetch_symbol_types(),
+        # a category nobody has targeted yet simply doesn't appear.
+        db.set_target_category_pct("Growth", 65.0, conn=conn)
+        result = db.fetch_target_categories(conn=conn)
+        assert dict(zip(result["Category"], result["Target %"])) == {"Growth": 65.0}
+
+    def test_fetch_target_categories_column_names(self, conn):
+        db.set_target_category_pct("Growth", 65.0, conn=conn)
+        result = db.fetch_target_categories(conn=conn)
+        assert list(result.columns) == ["Category", "Target %"]
+
+
+class TestTargetAllocationSectors:
+    def test_set_target_sector_pct_inserts(self, conn):
+        db.set_target_sector_pct("Growth", "Technology", 15.0, conn=conn)
+        row = conn.execute(
+            "SELECT target_pct FROM target_allocation_sectors WHERE category='Growth' AND sector='Technology'"
+        ).fetchone()
+        assert row == (15.0,)
+
+    def test_set_target_sector_pct_upserts_on_the_composite_key(self, conn):
+        db.set_target_sector_pct("Growth", "Technology", 15.0, conn=conn)
+        db.set_target_sector_pct("Growth", "Technology", 20.0, conn=conn)
+        rows = conn.execute(
+            "SELECT target_pct FROM target_allocation_sectors WHERE category='Growth' AND sector='Technology'"
+        ).fetchall()
+        assert rows == [(20.0,)]
+
+    def test_same_sector_name_under_a_different_category_is_a_separate_row(self, conn):
+        # The whole point of the composite key -- Technology under Growth and Technology
+        # under Dividend are independently targeted, not the same logical row.
+        db.set_target_sector_pct("Growth", "Technology", 15.0, conn=conn)
+        db.set_target_sector_pct("Dividend", "Technology", 10.0, conn=conn)
+        result = db.fetch_target_sectors(conn=conn).set_index(["Category", "Sector"])["Target %"]
+        assert result[("Growth", "Technology")] == 15.0
+        assert result[("Dividend", "Technology")] == 10.0
+
+    def test_target_pct_below_zero_rejected_by_check_constraint(self, conn):
+        with pytest.raises(sqlite3.IntegrityError):
+            db.set_target_sector_pct("Growth", "Technology", -1.0, conn=conn)
+
+    def test_target_pct_above_100_rejected_by_check_constraint(self, conn):
+        with pytest.raises(sqlite3.IntegrityError):
+            db.set_target_sector_pct("Growth", "Technology", 100.1, conn=conn)
+
+    def test_clear_target_sector_pct_removes_the_row(self, conn):
+        db.set_target_sector_pct("Growth", "Technology", 15.0, conn=conn)
+        db.clear_target_sector_pct("Growth", "Technology", conn=conn)
+        row = conn.execute(
+            "SELECT * FROM target_allocation_sectors WHERE category='Growth' AND sector='Technology'"
+        ).fetchone()
+        assert row is None
+
+    def test_clear_target_sector_pct_on_unknown_pair_is_a_noop(self, conn):
+        db.clear_target_sector_pct("Growth", "Nope", conn=conn)  # never existed -- should not raise
+
+    def test_fetch_target_sectors_returns_only_stored_rows(self, conn):
+        db.set_target_sector_pct("Growth", "Technology", 15.0, conn=conn)
+        result = db.fetch_target_sectors(conn=conn)
+        assert list(result.columns) == ["Category", "Sector", "Target %"]
+        assert len(result) == 1
+
+
+class TestTargetAllocations:
+    def test_set_target_allocation_inserts(self, conn):
+        db.set_target_allocation("AAPL", 5.0, conn=conn)
+        row = conn.execute("SELECT target_pct FROM target_allocations WHERE symbol='AAPL'").fetchone()
+        assert row == (5.0,)
+
+    def test_set_target_allocation_upserts_an_existing_symbol(self, conn):
+        db.set_target_allocation("AAPL", 5.0, conn=conn)
+        db.set_target_allocation("AAPL", 7.5, conn=conn)
+        rows = conn.execute("SELECT target_pct FROM target_allocations WHERE symbol='AAPL'").fetchall()
+        assert rows == [(7.5,)]
+
+    def test_target_pct_below_zero_rejected_by_check_constraint(self, conn):
+        with pytest.raises(sqlite3.IntegrityError):
+            db.set_target_allocation("AAPL", -0.1, conn=conn)
+
+    def test_target_pct_above_100_rejected_by_check_constraint(self, conn):
+        with pytest.raises(sqlite3.IntegrityError):
+            db.set_target_allocation("AAPL", 100.1, conn=conn)
+
+    def test_clear_target_allocation_removes_the_row(self, conn):
+        db.set_target_allocation("AAPL", 5.0, conn=conn)
+        db.clear_target_allocation("AAPL", conn=conn)
+        row = conn.execute("SELECT * FROM target_allocations WHERE symbol='AAPL'").fetchone()
+        assert row is None
+
+    def test_clear_target_allocation_on_unknown_symbol_is_a_noop(self, conn):
+        db.clear_target_allocation("NOPE", conn=conn)  # never existed -- should not raise
+
+    def test_fetch_target_allocations_covers_every_traded_symbol_defaulting_missing_to_zero(self, conn):
+        db.insert_trade(trade_date="2026-01-05", side="buy", symbol="AAA", quantity=1, price=1.0, conn=conn)
+        db.insert_trade(trade_date="2026-01-06", side="buy", symbol="BBB", quantity=1, price=1.0, conn=conn)
+        db.set_target_allocation("AAA", 5.0, conn=conn)
+        result = db.fetch_target_allocations(conn=conn)
+        assert dict(zip(result["Symbol"], result["Target %"])) == {"AAA": 5.0, "BBB": 0.0}
+
+    def test_fetch_target_allocations_includes_a_fully_sold_out_symbol(self, conn):
+        # Same real-data-shaped regression fetch_symbol_types() already guards against.
+        db.insert_trade(trade_date="2026-01-05", side="buy", symbol="AAA", quantity=10, price=1.0, conn=conn)
+        db.insert_trade(trade_date="2026-01-06", side="sell", symbol="AAA", quantity=10, price=1.0, conn=conn)
+        result = db.fetch_target_allocations(conn=conn)
+        assert "AAA" in set(result["Symbol"])
+
+    def test_fetch_target_allocations_returns_empty_frame_without_error_when_no_trades(self, conn):
+        result = db.fetch_target_allocations(conn=conn)
+        assert result.empty
+        assert list(result.columns) == ["Symbol", "Target %"]
 
 
 class TestReferenceLines:

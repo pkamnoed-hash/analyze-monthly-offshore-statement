@@ -6,7 +6,7 @@ import plotly.express as px
 import streamlit as st
 
 import cached_db
-from core import calculations, db, rebalance
+from core import calculations, db, market_data, rebalance, target_allocation
 from core.market_data import fetch_usd_thb_rate
 
 DEFAULT_THB_RATE = 33.0
@@ -39,6 +39,28 @@ with st.expander("What does this page do?"):
 @st.cache_data(ttl=300)
 def _cached_dividend_holdings():
     return rebalance.get_dividend_holdings(), datetime.now()
+
+
+# DB-first price fetch, same pattern as monitor_stocks.py/target_allocation.py,
+# duplicated locally per this app's established per-page convention -- needed here
+# only for the whole-PORTFOLIO Target Status/Rebalance Action/Trade $ block below
+# (Actual % has to be relative to total portfolio value, not just this page's
+# Dividend-only basket, to match what Analysis -> Target Allocation itself shows).
+# Read-only: no live-refresh variant, since this is a secondary reminder, not this
+# page's core data -- it picks up whatever any other page's own "Refresh now" has
+# most recently captured into market_profile_cache.
+@st.cache_data
+def _cached_read_stock_profile_from_db(symbols: list[str]) -> pd.DataFrame:
+    cached = db.fetch_market_profile_cache()
+    cached_symbols = set(cached["Symbol"]) if not cached.empty else set()
+    missing = [s for s in symbols if s not in cached_symbols]
+    if missing:
+        live_missing = market_data.fetch_stock_profile(missing)
+        successful = live_missing[live_missing["Latest Price"].notna()]
+        if not successful.empty:
+            db.save_market_profile_cache(successful.to_dict("records"))
+        cached = db.fetch_market_profile_cache()
+    return cached[cached["Symbol"].isin(symbols)]
 
 
 @st.cache_data
@@ -88,6 +110,29 @@ holdings["Current Total P/L %"] = (
     holdings["Current Total P/L"] / holdings["Cost Basis"] * 100
 ).where(holdings["Cost Basis"] > 0, float("nan"))
 
+# v4.8 -- Target Allocation reminder: reuses core/target_allocation.py's own pipeline,
+# same as monitor_stocks.py's own copy of this block (see that page's comment for the
+# full reasoning). Fed by the WHOLE portfolio's trades/profile (not just this page's
+# Dividend-only `holdings`) since Actual % has to be relative to total portfolio value
+# to match what Analysis -> Target Allocation itself shows -- computing it against just
+# the dividend basket would silently answer a different question. "Action" is renamed
+# to "Rebalance Action" for clarity alongside "Target Status"; Trade $ is blanked for
+# Hit Target rows, same convention Target Allocation's own stock table uses.
+db_trades = cached_db.cached_fetch_trades()
+symbol_types = cached_db.cached_fetch_symbol_types()
+all_positions = calculations.compute_current_positions(db_trades)
+all_profile = _cached_read_stock_profile_from_db(all_positions["Symbol"].tolist())
+ta_holdings = target_allocation.compute_actual_weights(db_trades, all_profile)
+ta_status = target_allocation.compute_stock_target_status(
+    ta_holdings, symbol_types, cached_db.cached_fetch_target_allocations()
+)
+ta_status.loc[ta_status["Status"] == "Hit Target", "Trade $"] = None
+ta_status["Target Status"] = ta_status["Status"].str.replace(" Target", "", regex=False)
+ta_status = ta_status.rename(columns={"Action": "Rebalance Action"})
+holdings = holdings.merge(
+    ta_status[["Symbol", "Target Status", "Rebalance Action", "Trade $"]], on="Symbol", how="left",
+)
+
 
 def _pie(source_df, names_col, values_col, title):
     fig = px.pie(source_df, names=names_col, values=values_col, title=title, hole=0.4)
@@ -96,7 +141,7 @@ def _pie(source_df, names_col, values_col, title):
 
 
 DISPLAY_COLS = [
-    "Symbol", "History90D", "% Reinvest", "Invest $", "Beta", "Ex-Date",
+    "Symbol", "History90D", "Target Status", "Rebalance Action", "Trade $", "% Reinvest", "Invest $", "Beta", "Ex-Date",
     "Current Expected Div/Yr %", "New Expected Div/Yr %",
     "Current Cat Weight %", "New Cat Weight %",
     "Current Div Contrib %", "New Div Contrib %",
@@ -124,7 +169,8 @@ TAB_COLUMNS = {
                      "Current Unrealized %", "New Unrealized %", "Dividends Received",
                      "Current Total P/L", "New Total P/L",
                      "Current Total P/L %", "New Total P/L %"],
-    "Analyze": ["Symbol", "History90D", "% Reinvest", "Invest $", "Beta", "Ex-Date",
+    "Analyze": ["Symbol", "History90D", "Target Status", "Rebalance Action", "Trade $",
+                "% Reinvest", "Invest $", "Beta", "Ex-Date",
                 "Current Expected Div/Yr %", "New Expected Div/Yr %",
                 "Current Cat Weight %", "New Cat Weight %",
                 "Current Div Contrib %", "New Div Contrib %",
@@ -148,6 +194,7 @@ def _refresh_snapshot(holdings, plan, refreshed_at):
     grid_source = allocated.copy()
     grid_source["% Reinvest"] = grid_source["Symbol"].map(pct_by_symbol)
     grid_source["Bought?"] = grid_source["Symbol"].map(bought_by_symbol)
+
     st.session_state[SNAPSHOT_KEY] = {
         "plan_id": plan["id"],
         "refreshed_at": refreshed_at,
@@ -308,6 +355,22 @@ def _rebalance_body(holdings: pd.DataFrame, refreshed_at: datetime):
 
     column_config = {
         "History90D": st.column_config.LineChartColumn("90D Trend", width=200, help="90 Day Trend"),
+        "Target Status": st.column_config.TextColumn(
+            "Target Status",
+            help="Over / Short / Hit vs the target you set on Analysis -> Target Allocation "
+                 "(+/-2 percentage points), based on your WHOLE portfolio, not just this "
+                 "Dividend basket. Reads Hit at a 0% target if you haven't set one yet, "
+                 "unless this position is already large enough to read Over on its own.",
+        ),
+        "Rebalance Action": st.column_config.TextColumn(
+            "Rebalance Action", help="Sell / Buy More / Hold, matching Target Status. A reminder only -- doesn't place a trade.",
+        ),
+        "Trade $": st.column_config.NumberColumn(
+            "Trade $", format="$%.2f",
+            help="Positive = buy this many more dollars; negative = sell. Approximate -- assumes "
+                 "your total portfolio value stays fixed. Blank for Hit Target rows. Full detail "
+                 "on Analysis -> Target Allocation.",
+        ),
         "% Reinvest": st.column_config.NumberColumn(
             "% Reinvest", format="%.1f%%", min_value=0.0, max_value=100.0, step=1.0,
             help="% of the $ amount above to put into this stock. Click Save changes below to apply.",

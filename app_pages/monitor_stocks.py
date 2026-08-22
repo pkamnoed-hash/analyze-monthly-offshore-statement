@@ -5,7 +5,7 @@ import plotly.express as px
 import streamlit as st
 
 import cached_db
-from core import calculations, db, market_data
+from core import calculations, db, market_data, target_allocation
 
 # Matches Dashboard's own "Dividends"/"Avg. Monthly Dividend" KPIs (app_pages/dashboard.py),
 # which are net of the 15% Thai (NRA) withholding tax -- there, that's already baked into
@@ -247,6 +247,26 @@ holdings["Action"] = "view →"
 latest_price_map = dict(zip(holdings["Symbol"], holdings["Latest Price"]))
 reference_line_summary = cached_db.reference_line_summary(holdings["Symbol"].tolist(), latest_price_map)
 holdings = holdings.merge(reference_line_summary, on="Symbol", how="left")
+
+# v4.8 -- Target Allocation reminder: reuses core/target_allocation.py's own pipeline
+# (fed by this page's own db_trades/profile, not a fresh fetch) so Status/Action/Trade $
+# here always match what Analysis -> Target Allocation itself would show for the same
+# symbol -- one shared source of truth, computed independently per page per this app's
+# own per-page-duplication convention (see rebalance.py's DATA_FILE comment). "Action"
+# is renamed to "Rebalance Action" before merging to avoid colliding with this page's
+# own "Action" column (the view-chart link, set above). Trade $ is blanked for Hit
+# Target rows -- "how much to buy" is meaningless when the answer is "nothing" -- same
+# convention Analysis -> Target Allocation's own stock table already uses.
+ta_holdings = target_allocation.compute_actual_weights(db_trades, profile)
+ta_status = target_allocation.compute_stock_target_status(
+    ta_holdings, symbol_types, cached_db.cached_fetch_target_allocations()
+)
+ta_status.loc[ta_status["Status"] == "Hit Target", "Trade $"] = None
+ta_status["Target Status"] = ta_status["Status"].str.replace(" Target", "", regex=False)
+ta_status = ta_status.rename(columns={"Action": "Rebalance Action"})
+holdings = holdings.merge(
+    ta_status[["Symbol", "Target Status", "Rebalance Action", "Trade $"]], on="Symbol", how="left",
+)
 
 holdings["Position Value"] = holdings["Quantity"] * holdings["Latest Price"]
 total_value = holdings["Position Value"].sum()
@@ -532,14 +552,15 @@ TAB_COLUMNS = {
     # real usability gap.
     "Highlight": ["Symbol", "History90D", "Ex-Date", "Expected Div Per Month", "Total P/L",
                   "Total P/L %", "Dividend Yield %", "Nearest Resistance (R %)",
-                  "Nearest Support (S %)", "Passed R/S", "Action"],
+                  "Nearest Support (S %)", "Passed R/S", "Target Status", "Rebalance Action", "Trade $", "Action"],
     "Overall": ["Symbol", "History90D", "Description", "Category", "Asset Class", "Portfolio Group", "Weight %",
                 "Category Weight %", "Quantity", "Avg Cost", "Latest Price", "Cost Basis", "Position Value",
                 "Unrealized", "Unrealized %", "Dividends Received", "Total P/L", "Total P/L %",
                 "Holding Period (Years)", "Total P/L %/yr", "Dividend Yield %", "Dividend Frequency",
                 "Ex-Date", "Expected Div Per Year", "Expected Div Per Month", "Beta",
                 "Div Return Contribution %",
-                "Nearest Resistance (R %)", "Nearest Support (S %)", "Passed R/S", "Action"],
+                "Nearest Resistance (R %)", "Nearest Support (S %)", "Passed R/S",
+                "Target Status", "Rebalance Action", "Trade $", "Action"],
     "Position": ["Symbol", "History90D", "Quantity", "Avg Cost", "Latest Price", "Cost Basis", "Position Value"],
     "Performance": ["Symbol", "History90D", "Unrealized", "Unrealized %", "Dividends Received", "Total P/L",
                      "Total P/L %", "Holding Period (Years)", "Total P/L %/yr"],
@@ -605,6 +626,21 @@ column_config = {
     ),
     "Action": st.column_config.TextColumn(
         "Action", help="Click this cell to open a price chart with these levels drawn, and adjust them manually if you want.",
+    ),
+    "Target Status": st.column_config.TextColumn(
+        "Target Status",
+        help="Over / Short / Hit vs the target you set on Analysis -> Target Allocation "
+             "(+/-2 percentage points). Reads Hit at a 0% target if you haven't set one yet, "
+             "unless this position is already large enough to read Over on its own.",
+    ),
+    "Rebalance Action": st.column_config.TextColumn(
+        "Rebalance Action", help="Sell / Buy More / Hold, matching Target Status. A reminder only -- doesn't place a trade.",
+    ),
+    "Trade $": st.column_config.NumberColumn(
+        "Trade $", format="$%.2f",
+        help="Positive = buy this many more dollars; negative = sell. Approximate -- assumes "
+             "your total portfolio value stays fixed. Blank for Hit Target rows. Full detail on "
+             "Analysis -> Target Allocation.",
     ),
     "Nearest Resistance (R %)": st.column_config.TextColumn(
         help="The captured swing high nearest to current price, above it, with its live % distance. "

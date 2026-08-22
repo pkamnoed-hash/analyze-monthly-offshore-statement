@@ -61,8 +61,31 @@ SCHEMA_STATEMENTS = [
     """
     CREATE TABLE IF NOT EXISTS symbol_types (
         symbol           TEXT PRIMARY KEY,
-        allocation_type  TEXT NOT NULL CHECK(allocation_type IN ('Dividend', 'Growth')),
+        allocation_type  TEXT NOT NULL CHECK(allocation_type NOT IN ('Others', '')),
         updated_at       TEXT NOT NULL DEFAULT (datetime('now'))
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS target_allocation_categories (
+        category    TEXT PRIMARY KEY,
+        target_pct  REAL NOT NULL DEFAULT 0,
+        updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS target_allocation_sectors (
+        category    TEXT NOT NULL,
+        sector      TEXT NOT NULL,
+        target_pct  REAL NOT NULL DEFAULT 0 CHECK(target_pct >= 0 AND target_pct <= 100),
+        updated_at  TEXT NOT NULL DEFAULT (datetime('now')),
+        PRIMARY KEY (category, sector)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS target_allocations (
+        symbol      TEXT PRIMARY KEY,
+        target_pct  REAL NOT NULL DEFAULT 0 CHECK(target_pct >= 0 AND target_pct <= 100),
+        updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
     )
     """,
     """
@@ -157,6 +180,32 @@ def _migrate_reference_lines_columns(c):
         if column not in existing:
             c.execute(statement)
 
+
+def _migrate_symbol_types_open_category(c):
+    """symbol_types.allocation_type was CHECK-constrained to exactly ('Dividend',
+    'Growth') in V2.1. Relaxed (Target Allocation Tracker) to accept any category
+    except the reserved 'Others' sentinel, so categories beyond Growth/Dividend can
+    exist app-wide without another schema migration later. SQLite can't ALTER a CHECK
+    constraint in place, so this recreates the table -- rename old, create new with the
+    relaxed constraint, copy rows across, drop old. Detects the old constraint via
+    sqlite_master's stored SQL text; a no-op once already migrated (idempotent, safe to
+    run on every init_db() call, same convention as _migrate_reference_lines_columns)."""
+    row = c.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='symbol_types'"
+    ).fetchone()
+    if row is None or "IN ('Dividend', 'Growth')" not in (row[0] or ""):
+        return
+    c.execute("ALTER TABLE symbol_types RENAME TO symbol_types_old")
+    c.execute(
+        "CREATE TABLE symbol_types ("
+        "symbol TEXT PRIMARY KEY, "
+        "allocation_type TEXT NOT NULL CHECK(allocation_type NOT IN ('Others', '')), "
+        "updated_at TEXT NOT NULL DEFAULT (datetime('now')))"
+    )
+    c.execute("INSERT INTO symbol_types SELECT * FROM symbol_types_old")
+    c.execute("DROP TABLE symbol_types_old")
+
+
 TRADE_COLUMNS = [
     "trade_date", "entry_type", "side", "symbol", "description", "quantity", "price",
     "amount", "commission", "vat", "reserved_fee", "fee_rebate", "order_id", "order_type",
@@ -207,6 +256,7 @@ def init_db(conn=None):
     for statement in SCHEMA_STATEMENTS:
         c.execute(statement)
     _migrate_reference_lines_columns(c)
+    _migrate_symbol_types_open_category(c)
     c.commit()
     if should_close:
         c.close()
@@ -352,10 +402,12 @@ def fetch_dividends(conn=None):
 
 
 def set_symbol_type(symbol, allocation_type, conn=None):
-    """Upserts a symbol's allocation type. `allocation_type` must be
-    'Dividend' or 'Growth' (CHECK-constrained) -- returning a symbol to the
-    default is clear_symbol_type(), not set_symbol_type(symbol, "Others"),
-    since "Others" is never itself a stored value (see fetch_symbol_types)."""
+    """Upserts a symbol's allocation type. `allocation_type` can be any
+    non-empty category except 'Others' (CHECK-constrained -- open-ended
+    since the Target Allocation Tracker, previously a fixed Dividend/Growth
+    enum) -- returning a symbol to the default is clear_symbol_type(), not
+    set_symbol_type(symbol, "Others"), since "Others" is never itself a
+    stored value (see fetch_symbol_types)."""
     c, should_close = _with_connection(conn)
     c.execute(
         "INSERT INTO symbol_types (symbol, allocation_type, updated_at) VALUES (?, ?, datetime('now')) "
@@ -402,6 +454,130 @@ def fetch_symbol_types(conn=None):
 
     merged = all_symbols.merge(types, on="Symbol", how="left")
     merged["Allocation Type"] = merged["Allocation Type"].fillna("Others")
+    return merged
+
+
+def set_target_category_pct(category, target_pct, conn=None):
+    """Upserts one category's target %. `category` is free text -- any value
+    already present in symbol_types.allocation_type, including 'Others'
+    (unlike symbol_types itself, 'Others' is a perfectly legitimate stored
+    target here; nothing reserves it)."""
+    c, should_close = _with_connection(conn)
+    c.execute(
+        "INSERT INTO target_allocation_categories (category, target_pct, updated_at) "
+        "VALUES (?, ?, datetime('now')) ON CONFLICT(category) DO UPDATE "
+        "SET target_pct=excluded.target_pct, updated_at=excluded.updated_at",
+        (category, target_pct),
+    )
+    c.commit()
+    if should_close:
+        c.close()
+
+
+def fetch_target_categories(conn=None):
+    """Returns a DataFrame (Category, Target %) of whatever category targets
+    have actually been set -- no synthetic full-coverage fill at this layer,
+    unlike fetch_symbol_types()/fetch_target_allocations(). Reason: the
+    universe of "real" categories depends on live symbol_types + current
+    holdings data, which this function has no access to -- core/
+    target_allocation.py fills the 0.0 default once it has that context."""
+    c, should_close = _with_connection(conn)
+    rows = _read_sql(c, "SELECT category, target_pct FROM target_allocation_categories")
+    if should_close:
+        c.close()
+    return rows.rename(columns={"category": "Category", "target_pct": "Target %"})
+
+
+def set_target_sector_pct(category, sector, target_pct, conn=None):
+    """Upserts one (category, sector) pair's target %. Both are free text --
+    `sector` is whatever Classification (Sector for equities, Industry
+    otherwise -- see core/rebalance.py's get_dividend_holdings()) currently
+    reads for a held stock; not constrained to a fixed list since Yahoo
+    Finance's own sector/industry vocabulary isn't fixed or known in advance."""
+    c, should_close = _with_connection(conn)
+    c.execute(
+        "INSERT INTO target_allocation_sectors (category, sector, target_pct, updated_at) "
+        "VALUES (?, ?, ?, datetime('now')) ON CONFLICT(category, sector) DO UPDATE "
+        "SET target_pct=excluded.target_pct, updated_at=excluded.updated_at",
+        (category, sector, target_pct),
+    )
+    c.commit()
+    if should_close:
+        c.close()
+
+
+def clear_target_sector_pct(category, sector, conn=None):
+    """Deletes the row. An unknown (category, sector) pair is a no-op,
+    matching clear_symbol_type()'s convention."""
+    c, should_close = _with_connection(conn)
+    c.execute(
+        "DELETE FROM target_allocation_sectors WHERE category=? AND sector=?",
+        (category, sector),
+    )
+    c.commit()
+    if should_close:
+        c.close()
+
+
+def fetch_target_sectors(conn=None):
+    """Returns a DataFrame (Category, Sector, Target %) of whatever (category,
+    sector) targets have actually been set -- same no-synthetic-fill reasoning
+    as fetch_target_categories()."""
+    c, should_close = _with_connection(conn)
+    rows = _read_sql(c, "SELECT category, sector, target_pct FROM target_allocation_sectors")
+    if should_close:
+        c.close()
+    return rows.rename(columns={"category": "Category", "sector": "Sector", "target_pct": "Target %"})
+
+
+def set_target_allocation(symbol, target_pct, conn=None):
+    """Upserts one symbol's target %. `target_pct` must be 0-100
+    (CHECK-constrained) -- unlike symbol_types, 0.0 is a normal storable
+    value here (no reserved-default concept); clear_target_allocation()
+    below is a convenience for removing the row entirely, functionally
+    identical to set_target_allocation(symbol, 0.0) as far as
+    fetch_target_allocations() is concerned."""
+    c, should_close = _with_connection(conn)
+    c.execute(
+        "INSERT INTO target_allocations (symbol, target_pct, updated_at) VALUES (?, ?, datetime('now')) "
+        "ON CONFLICT(symbol) DO UPDATE SET target_pct=excluded.target_pct, updated_at=excluded.updated_at",
+        (symbol, target_pct),
+    )
+    c.commit()
+    if should_close:
+        c.close()
+
+
+def clear_target_allocation(symbol, conn=None):
+    """Deletes the row, returning the symbol to the 0.0 default. Unknown
+    symbol is a no-op, matching clear_symbol_type()'s convention."""
+    c, should_close = _with_connection(conn)
+    c.execute("DELETE FROM target_allocations WHERE symbol=?", (symbol,))
+    c.commit()
+    if should_close:
+        c.close()
+
+
+def fetch_target_allocations(conn=None):
+    """Returns a DataFrame (Symbol, Target %) covering EVERY symbol that's
+    ever appeared in trades -- not just symbols someone has actively
+    targeted. A symbol with no target_allocations row defaults to Target %
+    = 0.0. Same full-coverage-at-fetch-time convention as
+    fetch_symbol_types() -- a plain, DB-derivable universe (every ever-traded
+    symbol), unlike fetch_target_categories()/fetch_target_sectors()."""
+    import pandas as pd
+
+    trades = fetch_trades(conn=conn)
+    all_symbols = pd.DataFrame({"Symbol": pd.Series(sorted(trades["Symbol"].dropna().unique()), dtype="object")})
+
+    c, should_close = _with_connection(conn)
+    rows = _read_sql(c, "SELECT symbol, target_pct FROM target_allocations")
+    if should_close:
+        c.close()
+    rows = rows.rename(columns={"symbol": "Symbol", "target_pct": "Target %"})
+
+    merged = all_symbols.merge(rows, on="Symbol", how="left")
+    merged["Target %"] = merged["Target %"].fillna(0.0)
     return merged
 
 

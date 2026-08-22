@@ -331,6 +331,7 @@ pg = st.navigation({
         # (st.switch_page(..., query_params={"symbol": ...}), which pre-selects a symbol
         # and skips the picker).
         st.Page("app_pages/symbol_analysis.py", title="Auto Trendline", url_path="symbol-analysis"),
+        st.Page("app_pages/target_allocation.py", title="Target Allocation"),
     ],
 })
 pg.run()
