@@ -117,14 +117,17 @@ holdings["Current Total P/L %"] = (
 # to match what Analysis -> Target Allocation itself shows -- computing it against just
 # the dividend basket would silently answer a different question. "Action" is renamed
 # to "Rebalance Action" for clarity alongside "Target Status"; Trade $ is blanked for
-# Hit Target rows, same convention Target Allocation's own stock table uses.
+# Hit Target rows, same convention Target Allocation's own stock table uses. v4.9 --
+# compute_full_target_status() replaces the old compute_actual_weights()+
+# compute_stock_target_status() pair -- see monitor_stocks.py's matching comment.
 db_trades = cached_db.cached_fetch_trades()
 symbol_types = cached_db.cached_fetch_symbol_types()
 all_positions = calculations.compute_current_positions(db_trades)
 all_profile = _cached_read_stock_profile_from_db(all_positions["Symbol"].tolist())
-ta_holdings = target_allocation.compute_actual_weights(db_trades, all_profile)
-ta_status = target_allocation.compute_stock_target_status(
-    ta_holdings, symbol_types, cached_db.cached_fetch_target_allocations()
+_, _, ta_status = target_allocation.compute_full_target_status(
+    db_trades, all_profile, symbol_types,
+    cached_db.cached_fetch_target_categories(), cached_db.cached_fetch_target_sectors(),
+    cached_db.cached_fetch_target_allocations(),
 )
 ta_status.loc[ta_status["Status"] == "Hit Target", "Trade $"] = None
 ta_status["Target Status"] = ta_status["Status"].str.replace(" Target", "", regex=False)
