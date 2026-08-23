@@ -256,10 +256,15 @@ holdings = holdings.merge(reference_line_summary, on="Symbol", how="left")
 # is renamed to "Rebalance Action" before merging to avoid colliding with this page's
 # own "Action" column (the view-chart link, set above). Trade $ is blanked for Hit
 # Target rows -- "how much to buy" is meaningless when the answer is "nothing" -- same
-# convention Analysis -> Target Allocation's own stock table already uses.
-ta_holdings = target_allocation.compute_actual_weights(db_trades, profile)
-ta_status = target_allocation.compute_stock_target_status(
-    ta_holdings, symbol_types, cached_db.cached_fetch_target_allocations()
+# convention Analysis -> Target Allocation's own stock table already uses. v4.9 --
+# compute_full_target_status() replaces the old compute_actual_weights()+
+# compute_stock_target_status() pair now that Stock's target is relative to its Sector
+# (itself relative to its Category) rather than absolute -- getting Status/Trade $ right
+# requires the whole tag -> category -> sector -> stock chain, not the stock level alone.
+_, _, ta_status = target_allocation.compute_full_target_status(
+    db_trades, profile, symbol_types,
+    cached_db.cached_fetch_target_categories(), cached_db.cached_fetch_target_sectors(),
+    cached_db.cached_fetch_target_allocations(),
 )
 ta_status.loc[ta_status["Status"] == "Hit Target", "Trade $"] = None
 ta_status["Target Status"] = ta_status["Status"].str.replace(" Target", "", regex=False)

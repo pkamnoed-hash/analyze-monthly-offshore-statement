@@ -11,12 +11,21 @@ with st.expander("What does this page do?"):
         "Compares your current holdings against targets you set at three levels -- "
         "category, sector, and stock -- and flags each one: **Over target** (more than "
         "2 points above) means sell down, **Hit target** (within 2 points either way) "
-        "means hold, **Short target** (more than 2 points below) means buy more. A held "
-        "stock with no target set defaults to 0% -- it only reads Over if its own actual "
-        "weight already exceeds 2%. Sector and stock targets don't have to sum exactly to "
-        "their parent's target; the running totals shown below are informational, not "
-        "enforced. Unlike Rebalance & Reallocate (which only decides where new cash goes), "
-        "this page covers your whole portfolio and will tell you to sell."
+        "means hold, **Short target** (more than 2 points below) means buy more, and "
+        "**Untargeted** means nobody's set a target anywhere in this row's chain yet -- "
+        "not a verdict, just a reminder to configure it, shown instead of guessing "
+        "against an implicit 0%. **Category** targets are a % of your whole portfolio; "
+        "**Sector** targets are a % of their own Category; **Stock** targets are a % of "
+        "their own Sector -- multiply down the chain to reach a stock's real, "
+        "whole-portfolio target (shown as **Target %** everywhere below; the raw number "
+        "you type into Sections 2/3 is **Target % of Parent**). Set targets top-down: a "
+        "category with no target set makes everything under it read Untargeted too, "
+        "even if you've filled in its sector/stock splits -- an explicit 0% is treated "
+        "as a real decision, not the same as never setting one. Sector and stock "
+        "targets don't have to sum to exactly 100% of their parent; the running totals "
+        "shown below are informational, not enforced. Unlike Rebalance & Reallocate "
+        "(which only decides where new cash goes), this page covers your whole "
+        "portfolio and will tell you to sell."
     )
 
 
@@ -59,13 +68,19 @@ def _pie(source_df, names_col, values_col, title):
 
 
 # Red/amber/green for Over/Short/Hit -- same conditional-background pattern
-# rebalance.py's own _styled() uses for Ex-Date, keyed off Status instead.
+# rebalance.py's own _styled() uses for Ex-Date, keyed off Status instead. v4.9.1 --
+# "Untargeted" gets a neutral gray, deliberately NOT one of the red/amber/green judgment
+# colors: it isn't a verdict on the position, it's "nobody has told the app what this
+# should be yet" (see core/target_allocation.py's top docstring).
 _STATUS_ROW_COLOR = {
     "Over Target": "background-color: rgba(220, 53, 69, 0.25)",
     "Short Target": "background-color: rgba(255, 193, 7, 0.25)",
     "Hit Target": "background-color: rgba(40, 167, 69, 0.20)",
+    "Untargeted": "background-color: rgba(108, 117, 125, 0.15)",
 }
-_STATUS_MD_COLOR = {"Over Target": "red", "Short Target": "orange", "Hit Target": "green"}
+_STATUS_MD_COLOR = {
+    "Over Target": "red", "Short Target": "orange", "Hit Target": "green", "Untargeted": "gray",
+}
 
 
 def _styled(df):
@@ -74,23 +89,38 @@ def _styled(df):
     return df.style.apply(lambda row: [_STATUS_ROW_COLOR.get(row["Status"], "")] * len(row), axis=1)
 
 
-def _target_sum_caption(filter_value, grid_source, category_status, noun, *, live=False):
-    """Running total of Target % in `grid_source`, grouped by Category, compared
-    against each category's own stored target -- informational only, never enforced.
-    `grid_source` is whatever's currently visible (already scoped to `filter_value` if
-    it's not "All"), so grouping by Category naturally covers exactly the categories
-    on screen either way.
+def _data_freshness_caption(profile: pd.DataFrame) -> str:
+    """Small reusable "as of" note, per user request repeated at each section below
+    (Sector Targets/Stock Targets/Actual vs Target) rather than shown only once near
+    the top of the page -- the top-level caption is easy to miss once you've scrolled
+    past it, and every one of these sections displays data (sector classification,
+    price-derived Actual %/Current Value) that traces back to this same profile
+    fetch, so it's worth repeating exactly where that data is used, not just once."""
+    if profile.empty or profile["Fetched At"].isna().all():
+        return "No profile data captured yet -- click \"Refresh now\" above."
+    return f"Data as of: {profile['Fetched At'].max().strftime('%d/%m/%Y %H:%M')}"
+
+
+def _target_sum_caption(grid_source, group_cols, noun, *, live=False):
+    """v4.9 -- running total of "Target % of Parent" in `grid_source`, grouped by
+    `group_cols` (this level's own parent key: "Category" for Section 2's sector grid,
+    ["Category", "Sector"] for Section 3's stock grid), compared against a flat 100% --
+    "do these children sum to 100% of their shared parent" -- informational only, never
+    enforced. No longer needs a `category_status`/`filter_value` lookup like before
+    v4.9: the relative model always compares against a flat 100, not the parent's own
+    absolute value, and `grid_source` is already scoped to whatever's on screen, so
+    grouping it directly covers exactly the parents currently visible.
 
     `live=True` (the current design, since the Sector/Stock Targets grids run outside
     st.form) means `grid_source` is the data_editor's own live return value -- this
     updates on every committed cell edit (Tab/Enter/click away), not just after Save."""
-    categories_to_show = [filter_value] if filter_value != "All" else category_status["Category"].tolist()
-    lines = []
-    for cat in categories_to_show:
-        cat_target = float(category_status.loc[category_status["Category"] == cat, "Target %"].iloc[0])
-        cat_sum = float(grid_source.loc[grid_source["Category"] == cat, "Target %"].sum())
-        lines.append(f"{cat}: {noun} sum to **{cat_sum:.1f}%** vs category target **{cat_target:.1f}%**")
-    st.caption(" · ".join(lines))
+    grouped = grid_source.groupby(group_cols)["Target % of Parent"].sum()
+    lines = [
+        f"{' / '.join(str(part) for part in (key if isinstance(key, tuple) else (key,)))}: "
+        f"{noun} at **{total:.1f} / 100%**"
+        for key, total in grouped.items()
+    ]
+    st.caption(" · ".join(lines) if lines else "Nothing to show for this filter yet.")
     if live:
         st.caption("*(Live -- updates as you edit. Not yet saved until you click Save changes.)*")
     else:
@@ -100,11 +130,21 @@ def _target_sum_caption(filter_value, grid_source, category_status, noun, *, liv
 _PCT_COLUMN_CONFIG = {
     "Current Value": st.column_config.NumberColumn("Value", format="$%.2f"),
     "Actual %": st.column_config.NumberColumn("Actual Wt %", format="%.2f%%"),
-    "Target %": st.column_config.NumberColumn("Target Wt %", format="%.2f%%"),
+    "Target % of Parent": st.column_config.NumberColumn(
+        "Target % of Parent", format="%.2f%%",
+        help="Raw target you set, as a share of this row's own parent (Category for a "
+             "sector row, Sector for a stock row) -- not of your whole portfolio.",
+    ),
+    "Target %": st.column_config.NumberColumn(
+        "Target Wt %", format="%.2f%%",
+        help="Effective, whole-portfolio target -- Target % of Parent multiplied down "
+             "through every level above it. This is the number compared against Actual %.",
+    ),
     "Delta %": st.column_config.NumberColumn("Δ", format="%.2f%%"),
     "Stock Targets Sum %": st.column_config.NumberColumn(
         "Stock Targets Sum %", format="%.1f%%",
-        help="Sum of this sector's own held stocks' Target % -- informational, not enforced to match this row's own Target %.",
+        help="Sum of this sector's own held stocks' Target % of Parent -- informational, "
+             "should be ≈100% if this sector's stock splits are fully allocated, but not enforced.",
     ),
     "Trade $": st.column_config.NumberColumn(
         "Trade $", format="$%.2f",
@@ -154,19 +194,23 @@ def _target_allocation_body(trades: pd.DataFrame, profile: pd.DataFrame):
     target_sectors_df = cached_db.cached_fetch_target_sectors()
     target_categories_df = cached_db.cached_fetch_target_categories()
 
-    stock_status = target_allocation.compute_stock_target_status(holdings, symbol_types, target_allocations_df)
-    stock_status = stock_status.rename(columns={"Classification": "Sector"})
-    sector_status = target_allocation.compute_sector_target_status(
-        stock_status.rename(columns={"Sector": "Classification"}), target_sectors_df,
+    # v4.9 -- single call runs the whole tag -> category -> sector -> stock pipeline in
+    # the dependency order the relative-target model requires (each level's effective %
+    # needs the one above it already computed) -- see core/target_allocation.py's own
+    # docstring for the full reasoning. `holdings` above is recomputed internally here
+    # too (cheap, pure pandas) -- kept as a separate call above only because the NaN
+    # price warning needs it before this point.
+    category_status, sector_status, stock_status = target_allocation.compute_full_target_status(
+        trades, profile, symbol_types, target_categories_df, target_sectors_df, target_allocations_df,
     )
-    category_status = target_allocation.compute_category_target_status(stock_status, target_categories_df)
+    stock_status = stock_status.rename(columns={"Classification": "Sector"})
     categories = category_status["Category"].tolist()
 
     stock_targets_by_sector = target_allocation.sum_stock_targets_by_sector(
         stock_status.rename(columns={"Sector": "Classification"}),
-    ).rename(columns={"Classification": "Sector", "Target %": "Stock Targets Sum %"})
+    ).rename(columns={"Target % of Parent": "Stock Targets Sum %"})
     sector_targets_by_category = target_allocation.sum_sector_targets_by_category(sector_status).rename(
-        columns={"Target %": "Sector Targets Sum %"},
+        columns={"Target % of Parent": "Sector Targets Sum %"},
     )
 
     # ---------- Section 1: Category Targets ----------
@@ -188,32 +232,42 @@ def _target_allocation_body(trades: pd.DataFrame, profile: pd.DataFrame):
 
     st.divider()
 
+    # ---------- Shared category filter for Sections 2 & 3 ----------
+    # v4.9.2 -- one shared control instead of two independent "Filter by category"
+    # radios (Section 2 and Section 3 each used to have their own, requiring the same
+    # selection twice for no reason -- they always show the same category's data) --
+    # per user request. Placed once here, right above both grids it scopes.
+    st.markdown("**Filter by category** *(scopes both Sector Targets and Stock Targets below)*")
+    shared_category_filter = st.radio(
+        "Filter by category", ["All"] + categories, horizontal=True, label_visibility="collapsed",
+        key="target_alloc_category_filter",
+    )
+    st.divider()
+
     # ---------- Section 2: Sector Targets ----------
     st.subheader("2. Sector Targets")
     st.caption(
         "Sectors are read automatically from your holdings' Yahoo Finance classification -- "
         "only sectors you actually hold appear here."
     )
+    st.caption(_data_freshness_caption(profile))
 
-    sector_filter = st.radio(
-        "Filter by category", ["All"] + categories, horizontal=True, key="target_alloc_sector_filter",
-    )
     sector_grid_source = stock_status[["Category", "Sector"]].drop_duplicates().reset_index(drop=True)
     sector_target_map = {
         (row["Category"], row["Sector"]): row["Target %"] for _, row in target_sectors_df.iterrows()
     }
-    sector_grid_source["Target %"] = [
+    sector_grid_source["Target % of Parent"] = [
         sector_target_map.get((row["Category"], row["Sector"]), 0.0) for _, row in sector_grid_source.iterrows()
     ]
-    if sector_filter != "All":
-        sector_grid_source = sector_grid_source[sector_grid_source["Category"] == sector_filter].reset_index(drop=True)
+    if shared_category_filter != "All":
+        sector_grid_source = sector_grid_source[sector_grid_source["Category"] == shared_category_filter].reset_index(drop=True)
 
     # No st.form here, deliberately -- unlike Rebalance & Reallocate's grid (which
     # recomputes OTHER columns, e.g. New Cat Weight %, from the very cell being
     # edited, the bug that forced it into a form), this table's only column that
-    # changes IS Target % itself, so nothing about its shape/identity changes
-    # between reruns just from editing -- safe to let it rerun live, per user
-    # request, so the running total below updates as you type instead of only
+    # changes IS Target % of Parent itself, so nothing about its shape/identity
+    # changes between reruns just from editing -- safe to let it rerun live, per
+    # user request, so the running total below updates as you type instead of only
     # after Save. Trade-off: clicking Save immediately after typing, without
     # first pressing Tab/Enter/clicking another cell, can still miss that very
     # last edit -- press Tab or click elsewhere before Save if a change doesn't
@@ -223,19 +277,23 @@ def _target_allocation_body(trades: pd.DataFrame, profile: pd.DataFrame):
         sector_grid_source, use_container_width=True, hide_index=True,
         disabled=["Category", "Sector"],
         column_config={
-            "Target %": st.column_config.NumberColumn(format="%.1f%%", min_value=0.0, max_value=100.0, step=0.5),
+            "Target % of Parent": st.column_config.NumberColumn(
+                "Target % of Category", format="%.1f%%", min_value=0.0, max_value=100.0, step=0.5,
+                help="This sector's share of its OWN Category's target -- not of your whole "
+                     "portfolio. See Section 4 for the resulting whole-portfolio (effective) %.",
+            ),
         },
         key="target_allocation_sector_editor",
     )
-    _target_sum_caption(sector_filter, sector_edited, category_status, "sector targets", live=True)
+    _target_sum_caption(sector_edited, "Category", "sector targets", live=True)
     sector_submitted = st.button("Save changes", type="primary", key="target_allocation_sector_save")
 
     if sector_submitted:
-        previous = {(row["Category"], row["Sector"]): row["Target %"] for _, row in sector_grid_source.iterrows()}
+        previous = {(row["Category"], row["Sector"]): row["Target % of Parent"] for _, row in sector_grid_source.iterrows()}
         changed = 0
         for _, row in sector_edited.iterrows():
             key = (row["Category"], row["Sector"])
-            new_pct = float(row["Target %"]) if pd.notna(row["Target %"]) else 0.0
+            new_pct = float(row["Target % of Parent"]) if pd.notna(row["Target % of Parent"]) else 0.0
             if new_pct != previous.get(key):
                 db.set_target_sector_pct(row["Category"], row["Sector"], new_pct)
                 changed += 1
@@ -251,31 +309,34 @@ def _target_allocation_body(trades: pd.DataFrame, profile: pd.DataFrame):
     # ---------- Section 3: Stock Targets ----------
     st.subheader("3. Stock Targets")
     st.caption("Scoped to symbols you currently hold. A symbol with no target set defaults to 0%.")
+    st.caption(f"Filtered to **{shared_category_filter}** -- change this in the filter above Section 2.")
+    st.caption(_data_freshness_caption(profile))
 
-    stock_filter = st.radio(
-        "Filter by category", ["All"] + categories, horizontal=True, key="target_alloc_stock_filter",
-    )
-    stock_grid_source = stock_status[["Symbol", "Category", "Sector", "Target %"]].reset_index(drop=True)
-    if stock_filter != "All":
-        stock_grid_source = stock_grid_source[stock_grid_source["Category"] == stock_filter].reset_index(drop=True)
+    stock_grid_source = stock_status[["Symbol", "Category", "Sector", "Target % of Parent"]].reset_index(drop=True)
+    if shared_category_filter != "All":
+        stock_grid_source = stock_grid_source[stock_grid_source["Category"] == shared_category_filter].reset_index(drop=True)
 
     # No st.form here either -- same reasoning as the Sector Targets grid above.
     stock_edited = st.data_editor(
         stock_grid_source, use_container_width=True, hide_index=True,
         disabled=["Symbol", "Category", "Sector"],
         column_config={
-            "Target %": st.column_config.NumberColumn(format="%.1f%%", min_value=0.0, max_value=100.0, step=0.5),
+            "Target % of Parent": st.column_config.NumberColumn(
+                "Target % of Sector", format="%.1f%%", min_value=0.0, max_value=100.0, step=0.5,
+                help="This stock's share of its OWN Sector's target -- not of your whole "
+                     "portfolio. See Section 4 for the resulting whole-portfolio (effective) %.",
+            ),
         },
         key="target_allocation_stock_editor",
     )
-    _target_sum_caption(stock_filter, stock_edited, category_status, "stock targets", live=True)
+    _target_sum_caption(stock_edited, ["Category", "Sector"], "stock targets", live=True)
     stock_submitted = st.button("Save changes", type="primary", key="target_allocation_stock_save")
 
     if stock_submitted:
-        previous = dict(zip(stock_grid_source["Symbol"], stock_grid_source["Target %"]))
+        previous = dict(zip(stock_grid_source["Symbol"], stock_grid_source["Target % of Parent"]))
         changed = 0
         for _, row in stock_edited.iterrows():
-            new_pct = float(row["Target %"]) if pd.notna(row["Target %"]) else 0.0
+            new_pct = float(row["Target % of Parent"]) if pd.notna(row["Target % of Parent"]) else 0.0
             if new_pct != previous.get(row["Symbol"]):
                 db.set_target_allocation(row["Symbol"], new_pct)
                 changed += 1
@@ -290,6 +351,7 @@ def _target_allocation_body(trades: pd.DataFrame, profile: pd.DataFrame):
 
     # ---------- Section 4: Actual vs Target ----------
     st.subheader("4. Actual vs Target")
+    st.caption(_data_freshness_caption(profile))
 
     tabs = st.tabs(["All"] + categories)
 
@@ -335,9 +397,10 @@ def _target_allocation_body(trades: pd.DataFrame, profile: pd.DataFrame):
             sector_display = cat_sectors.merge(stock_targets_by_sector, on=["Category", "Sector"], how="left")
             sector_display["Stock Targets Sum %"] = sector_display["Stock Targets Sum %"].fillna(0.0)
             st.dataframe(
-                _styled(sector_display[
-                    ["Sector", "Current Value", "Actual %", "Target %", "Delta %", "Status", "Action", "Stock Targets Sum %"]
-                ]),
+                _styled(sector_display[[
+                    "Sector", "Current Value", "Actual %", "Target % of Parent", "Target %",
+                    "Delta %", "Status", "Action", "Stock Targets Sum %",
+                ]]),
                 use_container_width=True, hide_index=True, column_config=_PCT_COLUMN_CONFIG,
             )
 
@@ -349,18 +412,15 @@ def _target_allocation_body(trades: pd.DataFrame, profile: pd.DataFrame):
             cat_stocks.loc[cat_stocks["Status"] == "Hit Target", ["Trade $", "Trade Shares"]] = None
             st.dataframe(
                 _styled(cat_stocks[[
-                    "Symbol", "Sector", "Current Value", "Actual %", "Target %", "Delta %",
-                    "Status", "Action", "Trade $", "Trade Shares",
+                    "Symbol", "Sector", "Current Value", "Actual %", "Target % of Parent", "Target %",
+                    "Delta %", "Status", "Action", "Trade $", "Trade Shares",
                 ]]),
                 use_container_width=True, hide_index=True, column_config=_PCT_COLUMN_CONFIG,
             )
 
             sector_sum_row = sector_targets_by_category[sector_targets_by_category["Category"] == cat]
             sector_sum_val = sector_sum_row["Sector Targets Sum %"].iloc[0] if not sector_sum_row.empty else 0.0
-            st.caption(
-                f"Sum of sector targets in {cat}: **{sector_sum_val:.1f}%** "
-                f"(category target: {cat_row['Target %']:.1f}%)"
-            )
+            st.caption(f"Sum of sector targets in {cat}: **{sector_sum_val:.1f}%** of this category (should be ≈100%)")
 
 
 _target_allocation_body(trades, profile)

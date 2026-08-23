@@ -184,14 +184,19 @@ db_trades = cached_db.cached_fetch_trades()
 # the full reasoning). Computed once, unconditionally, against the WHOLE portfolio -- feeds
 # both an existing symbol's live Actual/Target/Status/Action/Trade $ reminder below, and a
 # new symbol's suggested Trade $ (against the same total portfolio value), so both numbers
-# agree with what Analysis -> Target Allocation itself would show.
+# agree with what Analysis -> Target Allocation itself would show. v4.9 --
+# compute_full_target_status() replaces the old compute_actual_weights()+
+# compute_stock_target_status() pair -- see monitor_stocks.py's matching comment. Also keeps
+# `sector_status` (not just the final stock-level `ta_status`), needed below to scale a
+# brand-new symbol's own suggested-$ hint through its Sector's effective %.
 all_positions = calculations.compute_current_positions(db_trades)
 all_profile = _cached_read_stock_profile_from_db(all_positions["Symbol"].tolist())
-ta_holdings = target_allocation.compute_actual_weights(db_trades, all_profile)
-portfolio_total_value = ta_holdings["Current Value"].sum()
-ta_status = target_allocation.compute_stock_target_status(
-    ta_holdings, cached_db.cached_fetch_symbol_types(), cached_db.cached_fetch_target_allocations()
+category_status, sector_status, ta_status = target_allocation.compute_full_target_status(
+    db_trades, all_profile, cached_db.cached_fetch_symbol_types(),
+    cached_db.cached_fetch_target_categories(), cached_db.cached_fetch_target_sectors(),
+    cached_db.cached_fetch_target_allocations(),
 )
+portfolio_total_value = category_status["Current Value"].sum()
 ta_status.loc[ta_status["Status"] == "Hit Target", "Trade $"] = None
 ta_status["Target Status"] = ta_status["Status"].str.replace(" Target", "", regex=False)
 ta_status = ta_status.rename(columns={"Action": "Rebalance Action"})
@@ -251,41 +256,72 @@ if is_new_symbol:
         )
     with nc1:
         target_pct_input = st.number_input(
-            "Target % of portfolio (optional)", min_value=0.0, max_value=100.0, value=0.0, step=0.5,
+            "Target % of Sector (optional)", min_value=0.0, max_value=100.0, value=0.0, step=0.5,
             key=f"record_trade_target_pct_{symbol}",
-            help="Optional -- set an initial target weight now, or leave blank and set it later "
-                 "under Analysis -> Target Allocation.",
+            help="Optional -- this stock's share of its own Sector's target, not of your whole "
+                 "portfolio (v4.9: targets are now relative to their parent level). Set now, or "
+                 "leave blank and set it later under Analysis -> Target Allocation.",
         )
     # A brand-new symbol has no Actual % yet (nothing held), so Status/Action would just
     # trivially read Short/Buy More no matter what -- not useful. What IS useful: how much
-    # to actually buy to hit the target just typed above. Trade $ = target %/100 x total
-    # portfolio value (same formula compute_stock_target_status() uses when Actual % = 0),
-    # computed live as you type since these widgets sit outside any form. Uses YOUR entered
+    # to actually buy to hit the target just typed above. v4.9 -- the typed % is now "% of
+    # this stock's own Sector," so reaching a whole-portfolio $ figure needs that Sector's
+    # own effective % too: fetch the new symbol's own profile (DB-first, live fallback --
+    # same helper this page already uses for the whole portfolio) purely to read its Sector/
+    # Industry classification, then look that Sector up in `sector_status`. Uses YOUR entered
     # Executed Price for the share count, not a live fetch -- there's no cached price for a
     # symbol that's never been held, and you're about to type one in anyway.
     if target_pct_input > 0:
-        suggested_dollars = target_pct_input / 100 * portfolio_total_value
-        if price > 0:
+        new_symbol_profile = _cached_read_stock_profile_from_db([symbol])
+        new_symbol_sector = None
+        if not new_symbol_profile.empty:
+            prow = new_symbol_profile.iloc[0]
+            new_symbol_sector = prow["Sector"] if prow["Quote Type"] == "EQUITY" else prow["Industry"]
+        if new_symbol_sector is None or pd.isna(new_symbol_sector):
             st.caption(
-                f"💡 To hit a {target_pct_input:.1f}% target: ≈ ${suggested_dollars:,.2f} "
-                f"≈ {suggested_dollars / price:g} shares at your entered price of ${price:,.4f}"
+                f"💡 Couldn't determine {symbol}'s sector yet, so its effective target can't be "
+                "estimated here -- it'll compute correctly on Analysis -> Target Allocation once "
+                "this trade is saved and its profile is captured."
             )
         else:
-            st.caption(f"💡 To hit a {target_pct_input:.1f}% target: ≈ ${suggested_dollars:,.2f}")
+            sector_match = sector_status[
+                (sector_status["Category"] == allocation_type) & (sector_status["Sector"] == new_symbol_sector)
+            ]
+            sector_effective_pct = float(sector_match.iloc[0]["Target %"]) if not sector_match.empty else 0.0
+            if sector_effective_pct == 0.0:
+                st.caption(
+                    f"💡 {new_symbol_sector}'s own target isn't set yet (Analysis -> Target "
+                    "Allocation, Section 2) -- until it is, this stock's effective target is $0 "
+                    "regardless of the % above (targets apply top-down)."
+                )
+            else:
+                suggested_dollars = target_pct_input / 100 * sector_effective_pct / 100 * portfolio_total_value
+                if price > 0:
+                    st.caption(
+                        f"💡 To hit a {target_pct_input:.1f}% target of {new_symbol_sector}: "
+                        f"≈ ${suggested_dollars:,.2f} ≈ {suggested_dollars / price:g} shares at "
+                        f"your entered price of ${price:,.4f}"
+                    )
+                else:
+                    st.caption(
+                        f"💡 To hit a {target_pct_input:.1f}% target of {new_symbol_sector}: "
+                        f"≈ ${suggested_dollars:,.2f}"
+                    )
 elif symbol:
     # Full Actual/Target/Status/Action/Trade $ reminder -- same pipeline Monitor Stocks and
     # Rebalance & Reallocate show elsewhere, reused here so you can see it right before
-    # deciding to buy more or sell. Suppressed entirely for a symbol with no target set
-    # (the common case) -- Status/Action would otherwise just trivially read Hit/Hold for
-    # most untargeted holdings, not useful noise on every trade. Also empty (silently) for
-    # a symbol that's fully sold out -- ta_status only covers currently-held symbols, same
-    # as the position lookup below.
+    # deciding to buy more or sell. Suppressed entirely for a symbol with no (effective)
+    # target set (the common case) -- Status/Action would otherwise just trivially read
+    # Hit/Hold for most untargeted holdings, not useful noise on every trade. Also empty
+    # (silently) for a symbol that's fully sold out -- ta_status only covers currently-held
+    # symbols, same as the position lookup below.
     target_match = ta_status[ta_status["Symbol"] == symbol]
     if not target_match.empty and target_match.iloc[0]["Target %"] > 0:
         row = target_match.iloc[0]
         trade_str = f"${row['Trade $']:,.2f}" if pd.notna(row["Trade $"]) else "—"
         st.caption(
-            f"🎯 Actual {row['Actual %']:.1f}% → Target {row['Target %']:.1f}% → "
+            f"🎯 Actual {row['Actual %']:.1f}% → Target {row['Target %']:.1f}% "
+            f"({row['Target % of Parent']:.1f}% of its Sector) → "
             f"Δ {row['Delta %']:+.1f}% → **{row['Target Status']}** → {row['Rebalance Action']} → "
             f"Trade {trade_str}"
         )
