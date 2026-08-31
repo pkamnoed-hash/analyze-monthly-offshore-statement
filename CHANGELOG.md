@@ -1,5 +1,38 @@
 # Changelog
 
+## Hotfix: Rebalance & Reallocate's Blank Pie Charts (v4.9.3)
+
+Fixes the Summary section on Rebalance & Reallocate (four pie charts)
+rendering completely blank, even after clicking "Refresh now."
+
+- **Root cause**: the underlying price fetch had no fallback -- if it
+  failed even briefly (a temporary Yahoo Finance rate-limit), every
+  chart had nothing to plot, and Refresh just retried the same
+  unprotected fetch.
+- **Fix**: now uses the same safe, fallback-protected price data every
+  other page in the app already relies on -- a failed fetch shows your
+  last known values instead of going blank.
+- No breaking changes. Full test suite: 429/429 passing.
+
+## Target Allocation Tracker (v4.8, refined in v4.9)
+
+Set portfolio targets at three levels -- Category, Sector, and Stock --
+and see how far your actual holdings have drifted, with a suggested
+Buy/Sell/Hold action.
+
+- New **Target Allocation** page (Analysis section): set targets, see
+  Over/Short/Hit status for every level, with a suggested trade $
+  amount to close the gap.
+- Sector and Stock targets are set **relative to their own parent**
+  (e.g. "30% of Growth"), not the whole portfolio -- so adjusting one
+  level doesn't require retyping everything underneath it.
+- The same target/status numbers now show up as reminders on Record
+  Trade, Rebalance & Reallocate, and Monitor Stocks, so every page
+  agrees.
+- No breaking changes to existing data -- your dividend/growth symbol
+  classifications carry over unchanged. Full test suite: 429/429
+  passing.
+
 ## Change Password (v4.7)
 
 Change your password right from the app -- no more hand-editing

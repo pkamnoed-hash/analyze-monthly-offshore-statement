@@ -2639,18 +2639,15 @@ renders correctly) plus the manual-edit-survives-Refresh check above.
   branch, per explicit decision. Real time-series table, incremental
   vs. full refetch, and stock-split revision risk all need their own
   design pass.
-- **Rebalance & Reallocate's own redundant yfinance fetch** -- found
-  during a follow-up discussion, not fixed this round. `core/rebalance.py`'s
-  `get_dividend_holdings()` calls `market_data.fetch_stock_profile()`
-  directly, on its own separate 5-minute in-memory cache
-  (`_cached_dividend_holdings`), completely independent of Monitor
-  Stocks' `market_profile_cache`. Since Rebalance's dividend holdings
-  are a subset of what Monitor Stocks already tracks, this is a real,
-  overlapping redundant fetch -- worth its own small step later,
-  either giving Rebalance the same DB-first treatment or (better)
-  having it read Monitor Stocks' already-captured cache instead of
-  fetching its own copy. Not urgent -- the page works fine today, just
-  slightly slower and more rate-limit-exposed than it needs to be.
+- ~~**Rebalance & Reallocate's own redundant yfinance fetch**~~ --
+  **fixed in V4.9.3.** Was found during a follow-up discussion here and
+  not fixed this round; the exposure this note called out ("more
+  rate-limit-exposed than it needs to be") turned into a real
+  production bug (Summary pie charts rendering blank on a failed live
+  fetch) before it got addressed. `get_dividend_holdings()` now takes
+  an already-fetched profile as a parameter, sharing Rebalance &
+  Reallocate's own DB-first fetch instead of running its own separate
+  one -- see V4.9.3's section for the full fix.
 - **Rebalance's/Monitor Stocks' own dividends-received staleness gap**
   -- unchanged from V4.5's own deferred note, still not fixed.
 - **Per-symbol "Refresh just this one" action** -- "Refresh now" stays
@@ -3251,6 +3248,241 @@ rather than accumulating.
 - **Password strength/complexity rules** -- not added; matches this
   app's existing minimal, single-user-trust model (no such rules
   existed for the original password either).
+
+## V4.8: Target Allocation Tracker
+
+Branch `v4.8-asset-allocation`, cut from `main` after v4.7 merged in.
+
+**Documentation note**: this section, V4.9's, and V4.9.3's below were
+written after the fact, reconstructed from these branches' own detailed
+commit messages (`git log`) -- the original build sessions shipped and
+merged all three without folding their design history into this file
+at the time, breaking `CLAUDE.md`'s standing "fold the plan into
+ROADMAP.md once a feature ships" rule. V4.8/V4.9 also merged without
+being tagged; both tags were applied retroactively to their original
+merge commits while fixing V4.9.3. Treat the level of detail here as a
+faithful summary of what the commit messages recorded, not a first-hand
+build narrative the way every earlier section in this file is.
+
+### Context
+
+Requested as "asset allocation" -- scoped down through discussion into
+a narrower, concrete feature: a way to set portfolio targets and see
+how far actual holdings have drifted from them, rather than either a
+purely passive breakdown (which Monitor Stocks' sector pie and
+Rebalance & Reallocate's existing-vs-new comparison already provided)
+or the full hierarchical Dividend/Growth/Cash-then-sector-then-stock
+"money management" tree originally sketched in discussion.
+
+### Design decisions
+
+**Three nested target levels**: Category (Dividend/Growth/Others, the
+existing `symbol_types.allocation_type` classification) -> Sector ->
+Stock. Each level compares an Actual % (from current holdings) against
+a stored Target %, flagged Over/Short/Hit Target with a +/-2 percentage
+point tolerance, alongside a Sell/Buy More/Hold action and a Trade
+$/Trade Shares suggestion.
+
+**Schema change**: `symbol_types.allocation_type`'s `CHECK` constraint
+relaxed from a hard `Dividend`/`Growth`-only enum to open-ended (any
+category except the reserved `"Others"` sentinel) -- Category targets
+needed to support more than just those two values. SQLite/libsql can't
+`ALTER` a `CHECK` constraint in place, so this required a table-recreate
+migration (`_migrate_symbol_types_open_category`). The real production
+`symbol_types` table was backed up first
+(`scripts/backup_symbol_types_before_migration.py`) -- verified all 77
+rows preserved unchanged post-migration.
+
+Three new tables: `target_allocation_categories`, `target_allocation_sectors`,
+`target_allocations`.
+
+**`core/target_allocation.py`** (new, pure calculation pipeline, no
+Streamlit/DB imports): computes Actual % at each level from current
+holdings, with no hardcoded category list -- the category universe is
+derived at call time as the union of "categories with at least one held
+stock" and "categories with a stored target," so a new category
+appearing in `symbol_types` needs zero code changes here to be picked
+up.
+
+**Three existing pages get reminder touchpoints** reusing the same
+pipeline, so the numbers always agree with what the Target Allocation
+page itself shows:
+- Record Trade: a full Actual/Target/Status/Action/Trade $ line for an
+  existing symbol with a target set; a live "suggested $ to hit target"
+  hint for a brand-new symbol, using the user's own entered price.
+- Rebalance & Reallocate: Target Status/Rebalance Action/Trade $
+  columns on the Analyze/Overview tabs, replacing an earlier
+  lightweight "Target %" caption.
+- Monitor Stocks: the same three columns on the Highlight/Overall tabs.
+
+### Testing and verification
+
+414/414 tests passing. Verified live in the browser at each step
+(category/sector/stock target grids, donut charts, all three reminder
+touchpoints).
+
+## V4.9: Relative-to-Parent Target Allocation Percentages
+
+Branch `v4.9-relative-target-percentages`, cut from `main` after v4.8
+merged in. See the documentation note under V4.8 above.
+
+### Context
+
+V4.8 stored every level's Target % as a share of the whole portfolio
+(an "absolute" model). Real usage surfaced a mismatch: the user's own
+Growth sector entries summed to 100%, matching a *relative* model
+(each sector as a % of Growth's own allocation), not Growth's absolute
+whole-portfolio target -- the two models look similar until the numbers
+stop adding up.
+
+### Design decisions
+
+**Relative-to-parent targets.** Category stays a % of the whole
+portfolio (it has no parent, so its stored value already IS the
+effective one). Sector is now a % of its own Category. Stock is now a
+% of its own Sector -- the standard "pie of pies" shape nested
+allocation tools generally use: changing a parent's own split doesn't
+require retyping every child underneath it, since each child is stored
+as a ratio of its parent, not of the whole.
+
+Two Target-%-shaped columns exist at the Sector/Stock levels because of
+this: "Target % of Parent" is the raw, user-edited, stored value (e.g.
+Technology = 30 means "30% of Growth"); "Target %" is the *effective*,
+whole-portfolio-comparable value (raw/100 x the parent's own effective
+%) -- what Delta %/Status/Trade $ actually use, keeping the same name
+and meaning every existing caller already expected.
+
+**`core/target_allocation.py`**: Category-tagging split out into its
+own `tag_holdings_category()` function so Category status can be
+computed before Sector/Stock -- each level's effective % now depends on
+its parent's, so the three levels can't be computed independently or
+out of order. `compute_full_target_status()` is the new single entry
+point every caller uses, replacing an older two-call pattern
+(`compute_actual_weights()` + `compute_stock_target_status()`).
+
+**Two further fixes bundled into this same merge** (informally labeled
+"v4.9.1"/"v4.9.2" in the commit message, but never separately tagged --
+not to be confused with the real, separately-tagged **V4.9.3** hotfix
+below):
+- A real "Untargeted" status/Action: once only Category targets are
+  set (the common early state), every Sector/Stock used to read an
+  implicit 0% target, making anything actually held read "Over Target
+  -> Sell" -- technically correct under the "untargeted defaults to
+  0%" rule (unchanged since V1), but indistinguishable from genuine
+  over-allocation. Added a real Untargeted status, propagated top-down
+  (a row is Untargeted if its own value was never saved OR its parent
+  is Untargeted), carefully distinct from an explicit, deliberate 0%.
+- A real dtype bug: `fillna()` on a merged boolean column leaves it
+  object-dtype, and bitwise `~` on an object-dtype "bool" column
+  silently performs Python's integer bitwise-NOT instead of logical
+  negation -- fixed with an explicit `.astype(bool)` after every such
+  `fillna()`.
+
+Also: Target Allocation page's Sections 2 and 3 now share one "Filter
+by category" control instead of two independent ones requiring the
+same selection twice. All three V4.8 reminder touchpoints (Record
+Trade, Rebalance & Reallocate, Monitor Stocks) updated to call
+`compute_full_target_status()` instead of the old two-call pattern;
+Record Trade's new-symbol hint relabeled "Target % of Sector" with a
+sector-scaled suggested-$ formula.
+
+### Testing and verification
+
+429/429 tests passing. Verified against real production data: Actual %
+still sums to 100% at every level; Category-level Dividend/Growth (real
+stored targets) derive Delta/Status correctly; previously-empty
+Sector/Stock targets correctly read Untargeted instead of a false Over
+Target.
+
+## V4.9.3: Fix Rebalance & Reallocate's Blank Pie Charts on a Failed Live Fetch
+
+Branch `v4.9.3-fix-rebalance-live-fetch`, hotfix cut directly from
+`main` after v4.9 merged in. Numbered `.3` (not `.1`) deliberately, to
+avoid colliding with the two informal, never-separately-tagged
+"v4.9.1"/"v4.9.2" sub-fixes already described inside V4.9's own commit
+message above -- this is a distinct, separately-tagged fix, not a third
+one folded into that same merge.
+
+### Context
+
+Reported by the user: Rebalance & Reallocate's Summary section (four
+pie charts -- existing/new weight by symbol, existing/new weight by
+sector/asset class) rendered completely blank, even after clicking
+"Refresh now."
+
+### Root cause
+
+`core/rebalance.py`'s `get_dividend_holdings()` called
+`market_data.fetch_stock_profile()` directly, live, on every
+invocation, with **no database fallback** -- the one place left in the
+app still vulnerable to a transient yfinance/Yahoo failure (the exact
+incident class V4.5 fixed everywhere else: Yahoo Finance rate-limiting
+Streamlit Community Cloud's shared outbound IP, blanking every
+yfinance-derived column app-wide right after v4.4.1 deployed). A failed
+fetch meant every row's `Latest Price` went `NaN`, cascading to
+`Current Value`/`Current Cat Weight %` also `NaN`, leaving the pie
+charts nothing to plot. Clicking "Refresh now" didn't help since it
+just retried the same unprotected fetch.
+
+This gap was already flagged, but not fixed, in this file's own V4.5.1
+section ("Considered and explicitly deferred" -- "Rebalance &
+Reallocate's own redundant yfinance fetch") and in
+`docs/VERSION_CONTROL.md`'s deferred notes: `get_dividend_holdings()`
+ran its own separate live fetch, completely independent of Monitor
+Stocks' `market_profile_cache`, a real overlapping redundant fetch on
+top of being unprotected.
+
+Confirmed by reading the code directly (not guessed), then verified
+empirically: a local repro against real prod data succeeded (the live
+fetch happened to be working at test time), but reading purely from
+`market_profile_cache` -- simulating a fully-failed live fetch --
+also produced zero `NaN` prices, proving a DB-only path works
+correctly once wired in.
+
+### Fix
+
+`get_dividend_holdings()` now takes an already-fetched `profile`
+DataFrame as a parameter instead of fetching live itself, matching
+`core/target_allocation.py`'s own established convention of taking
+already-fetched data as a parameter rather than reaching for
+`market_data`/`db.*` internally. `app_pages/rebalance.py` now fetches
+profile data once (DB-first, same pattern Monitor Stocks established in
+V4.5.1) and reuses it for both the dividend basket and the
+whole-portfolio Target Status block -- removing the previously-flagged
+redundant second fetch at the same time. "Refresh now" now performs a
+real live-fetch-with-fallback
+(`calculations.apply_market_profile_fallback`, the same function
+Monitor Stocks' own Refresh button uses) instead of an unprotected
+fetch, with a stale-count warning matching Monitor Stocks' own
+convention -- a failed symbol degrades to its last known-good cached
+value instead of going blank.
+
+### Implementation
+
+- **`core/rebalance.py`**: `get_dividend_holdings(profile, *, conn=None)`
+  -- `profile` parameter replaces the internal `market_data.fetch_stock_profile()`
+  call and the now-removed `yf_module` parameter.
+- **`app_pages/rebalance.py`**: added a local `_refresh_stock_profile_live()`
+  (mirrors Monitor Stocks' own), reordered so `all_profile` is fetched
+  once up front and passed into both `get_dividend_holdings()` and the
+  Target Status block; "Refresh now" drives the shared DB-first cache
+  for the whole page instead of just the dividend-holdings cache.
+- **`scripts/dividend_category_stats.py`**: updated call site to fetch
+  a live profile directly (a one-off manual script has no persistent
+  DB-fallback cache to reuse, same live-fetch behavior as before this
+  change).
+- **`tests/test_rebalance.py`**: `TestGetDividendHoldings` rewritten to
+  build a `profile` DataFrame directly instead of faking a yfinance
+  module -- `FakeTicker`/`FakeYfModule`/`_history`/`_dividends` removed
+  as dead code, no longer used anywhere in the file.
+
+### Testing and verification
+
+429/429 tests passing. Verified end-to-end against real prod data:
+`get_dividend_holdings()` fed purely from `market_profile_cache`
+produces correct, non-`NaN` prices and weights with zero live fetch
+attempted -- directly demonstrating the fallback holds even if yfinance
+is completely unreachable.
 
 ## Deferred / future
 
