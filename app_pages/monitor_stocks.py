@@ -408,13 +408,8 @@ def _category_summary(holdings_df: pd.DataFrame) -> pd.DataFrame:
 
 # Moved above Category Summary (was below it) -- type_filter now also gates which single
 # category's KPIs render below, not just the pie charts/table further down the page.
-# key= -- so this survives navigating to Symbol Analysis (via the Action column's "view →"
-# below) and back, instead of resetting to "All" every time. st.session_state is shared
-# across every page in the same browser session, so a keyed widget's last value is
-# restored automatically on the next visit to this page.
 type_filter = st.radio(
     "Filter by type", ["All", "Others", "Dividend", "Growth"], horizontal=True, label_visibility="collapsed",
-    key="monitor_stocks_type_filter",
 )
 
 view = holdings.copy()
@@ -709,19 +704,7 @@ def _highlight_passed_nearest_reference(row: pd.Series) -> list[str]:
     return styles
 
 
-# key= + on_change="rerun" -- same reasoning as type_filter above: survives navigating to
-# Symbol Analysis and back instead of resetting to the first tab. Requires on_change="rerun"
-# (this Streamlit version's own requirement for a tab's selection to be tracked in
-# st.session_state[key] at all -- the default "ignore" mode is purely client-side, with no
-# way to read or restore which tab was active). default="Highlight" only matters on this
-# session's very first render of this page; every re-visit after that reads the persisted
-# selection from st.session_state instead, same "key wins over default" rule every other
-# Streamlit widget already follows.
-for tab_name, tab, cols in zip(
-    TAB_COLUMNS.keys(),
-    st.tabs(list(TAB_COLUMNS.keys()), key="monitor_stocks_active_tab", default="Highlight", on_change="rerun"),
-    TAB_COLUMNS.values(),
-):
+for tab_name, tab, cols in zip(TAB_COLUMNS.keys(), st.tabs(list(TAB_COLUMNS.keys())), TAB_COLUMNS.values()):
     with tab:
         # "_R Passed At"/"_S Passed At" ride along in `table` (for the highlighter below
         # to read) whenever either Nearest column is on this tab, but are never added to
