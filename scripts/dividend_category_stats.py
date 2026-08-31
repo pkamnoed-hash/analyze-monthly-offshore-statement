@@ -18,7 +18,7 @@ sys.path.insert(0, PROJECT_ROOT)
 
 import pandas as pd  # noqa: E402
 
-from core import calculations, db, rebalance  # noqa: E402
+from core import calculations, db, market_data, rebalance  # noqa: E402
 
 DATA_FILE = os.path.join(PROJECT_ROOT, "data", "Offshore_Statements_2023-01_to_2026-06.xlsx")
 SECRETS_FILE = os.path.join(PROJECT_ROOT, ".streamlit", "secrets.toml")
@@ -74,7 +74,12 @@ def main():
     realized_dividend_cat = realized_events[realized_events["Symbol"].isin(dividend_symbols)]["Realized P/L"].sum()
 
     # --- Currently-held Dividend-category positions: Unrealized $ + Cost Basis ---
-    dividend_holdings = rebalance.get_dividend_holdings()
+    # v4.9.1 -- get_dividend_holdings() now takes an already-fetched profile instead
+    # of fetching live itself; a one-off manual script has no persistent DB-fallback
+    # cache to reuse, so this fetches live directly, same as before this change.
+    all_positions = calculations.compute_current_positions(db_trades)
+    profile = market_data.fetch_stock_profile(all_positions["Symbol"].tolist())
+    dividend_holdings = rebalance.get_dividend_holdings(profile)
     unrealized_dividend_cat = dividend_holdings["Current Unrealized $"].sum()
     cost_basis_dividend_cat = dividend_holdings["Cost Basis"].sum()
 
