@@ -36,19 +36,17 @@ with st.expander("What does this page do?"):
     )
 
 
-@st.cache_data(ttl=300)
-def _cached_dividend_holdings():
-    return rebalance.get_dividend_holdings(), datetime.now()
-
-
 # DB-first price fetch, same pattern as monitor_stocks.py/target_allocation.py,
-# duplicated locally per this app's established per-page convention -- needed here
-# only for the whole-PORTFOLIO Target Status/Rebalance Action/Trade $ block below
-# (Actual % has to be relative to total portfolio value, not just this page's
-# Dividend-only basket, to match what Analysis -> Target Allocation itself shows).
-# Read-only: no live-refresh variant, since this is a secondary reminder, not this
-# page's core data -- it picks up whatever any other page's own "Refresh now" has
-# most recently captured into market_profile_cache.
+# duplicated locally per this app's established per-page convention. v4.9.1 -- now
+# feeds BOTH this page's dividend-basket pies/table AND the whole-PORTFOLIO Target
+# Status/Rebalance Action/Trade $ block below (Actual % has to be relative to total
+# portfolio value, not just this page's Dividend-only basket, to match what
+# Analysis -> Target Allocation itself shows) -- one fetch instead of two. Used to
+# be read-only here (no live-refresh variant, since only the Target Status block
+# read it), but core/rebalance.py's get_dividend_holdings() used to do its OWN
+# separate, unprotected live fetch for its half of this same data -- see that
+# function's docstring for the real incident this caused. "Refresh now" below now
+# drives this cache for the whole page instead.
 @st.cache_data
 def _cached_read_stock_profile_from_db(symbols: list[str]) -> pd.DataFrame:
     cached = db.fetch_market_profile_cache()
@@ -61,6 +59,32 @@ def _cached_read_stock_profile_from_db(symbols: list[str]) -> pd.DataFrame:
             db.save_market_profile_cache(successful.to_dict("records"))
         cached = db.fetch_market_profile_cache()
     return cached[cached["Symbol"].isin(symbols)]
+
+
+# v4.9.1 -- "Refresh now" button's handler, same logic Monitor Stocks' own
+# _refresh_stock_profile_live uses: attempts a real live fetch for every symbol,
+# calculations.apply_market_profile_fallback() replaces any row that fails THIS
+# attempt with the last real values captured in market_profile_cache (if any),
+# rather than leaving it NaN -- what actually fixes the blank-pie-chart bug, since a
+# transient Yahoo/yfinance failure now degrades to "last known good data" instead of
+# "nothing at all." Only successful rows get upserted back into the cache, so a
+# still-failing symbol never overwrites a real captured value with a blank one.
+def _refresh_stock_profile_live(symbols: list[str]) -> int:
+    live = market_data.fetch_stock_profile(symbols)
+    cached = db.fetch_market_profile_cache()
+    merged = calculations.apply_market_profile_fallback(live, cached)
+
+    fresh_rows = merged[~merged["Stale"] & merged["Latest Price"].notna()]
+    if not fresh_rows.empty:
+        db.save_market_profile_cache(fresh_rows.drop(columns=["Stale", "Fetched At"]).to_dict("records"))
+
+    _cached_read_stock_profile_from_db.clear()
+    return int(merged["Stale"].sum())
+
+
+@st.cache_data(ttl=300)
+def _cached_dividend_holdings(profile: pd.DataFrame):
+    return rebalance.get_dividend_holdings(profile), datetime.now()
 
 
 @st.cache_data
@@ -91,11 +115,29 @@ def _cached_usd_thb_rate():
     return fetch_usd_thb_rate()
 
 
-if st.button("Refresh now", help="Bypass the 5-minute cache and re-fetch live prices."):
+db_trades = cached_db.cached_fetch_trades()
+symbol_types = cached_db.cached_fetch_symbol_types()
+all_positions = calculations.compute_current_positions(db_trades)
+
+just_refreshed_stale_count = None
+if st.button("Refresh now", help="Bypass the cache and re-fetch live prices."):
+    just_refreshed_stale_count = _refresh_stock_profile_live(all_positions["Symbol"].tolist())
     _cached_dividend_holdings.clear()
 
-holdings, last_refreshed = _cached_dividend_holdings()
+all_profile = _cached_read_stock_profile_from_db(all_positions["Symbol"].tolist())
+holdings, last_refreshed = _cached_dividend_holdings(all_profile)
 st.caption(f"Last refreshed: {last_refreshed.strftime('%d/%m/%Y %H:%M')}")
+
+# v4.9.1 -- mirrors Monitor Stocks' own warning: shown only right after an actual
+# Refresh click, since a normal load never attempts a live fetch at all. A failed
+# symbol still shows its last successfully captured value (see
+# _refresh_stock_profile_live above) rather than going blank.
+if just_refreshed_stale_count:
+    st.warning(
+        f"{just_refreshed_stale_count} symbol(s) couldn't be fetched live just now "
+        "(likely a temporary yfinance/Yahoo issue) -- showing the last successfully "
+        "captured values for those instead."
+    )
 
 if holdings.empty:
     st.info("No Dividend-classified symbols currently held -- classify some in Allocation Type first.")
@@ -120,10 +162,6 @@ holdings["Current Total P/L %"] = (
 # Hit Target rows, same convention Target Allocation's own stock table uses. v4.9 --
 # compute_full_target_status() replaces the old compute_actual_weights()+
 # compute_stock_target_status() pair -- see monitor_stocks.py's matching comment.
-db_trades = cached_db.cached_fetch_trades()
-symbol_types = cached_db.cached_fetch_symbol_types()
-all_positions = calculations.compute_current_positions(db_trades)
-all_profile = _cached_read_stock_profile_from_db(all_positions["Symbol"].tolist())
 _, _, ta_status = target_allocation.compute_full_target_status(
     db_trades, all_profile, symbol_types,
     cached_db.cached_fetch_target_categories(), cached_db.cached_fetch_target_sectors(),

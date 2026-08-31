@@ -6,7 +6,7 @@ Kept free of Streamlit imports so it can be unit tested in isolation
 
 import pandas as pd
 
-from core import calculations, db, market_data
+from core import calculations, db
 
 # Mirrors app_pages/monitor_stocks.py's own WITHHOLDING_TAX_RATE. Duplicated
 # rather than imported -- core/ never imports from app_pages/ (see
@@ -16,14 +16,35 @@ from core import calculations, db, market_data
 WITHHOLDING_TAX_RATE = 0.15
 
 
-def get_dividend_holdings(*, conn=None, yf_module=None) -> pd.DataFrame:
+def get_dividend_holdings(profile: pd.DataFrame, *, conn=None) -> pd.DataFrame:
     """Current holdings for every Dividend-classified symbol still held
     (quantity > 0) -- the universe Section 3's table is built from. Merges
     db.fetch_symbol_types() (filtered to "Dividend"), calculations
-    .compute_current_positions() (FIFO quantity/cost), and market_data
-    .fetch_stock_profile() (live price, sector/industry, dividend rate). A
+    .compute_current_positions() (FIFO quantity/cost), and `profile` (price,
+    sector/industry, dividend rate -- same shape market_data
+    .fetch_stock_profile()/db.fetch_market_profile_cache() return). A
     Dividend-tagged symbol that's been fully sold out of is simply absent,
     same convention compute_current_positions() itself uses.
+
+    v4.9.1 -- `profile` is now a parameter instead of this function calling
+    market_data.fetch_stock_profile() itself. This used to be the one place
+    in the app still doing a live-only yfinance fetch with no database
+    fallback (every other page moved to a DB-first/fallback pattern in V4.5/
+    V4.5.1 after a real incident: Yahoo Finance rate-limiting Streamlit
+    Community Cloud's shared IP blanked every yfinance-derived column
+    app-wide). A transient rate-limit here meant every row's Latest Price
+    went NaN, so Current Value/Current Cat Weight % went NaN too, and the
+    Summary section's pie charts rendered with nothing to plot -- confirmed
+    live on the real deployed app; clicking "Refresh now" didn't help since
+    it just retried the same unprotected fetch. Fixed by having the caller
+    (app_pages/rebalance.py) fetch profile data the same safe way it already
+    does for its own whole-portfolio Target Status block, and pass it in
+    here -- matches core/target_allocation.py's own established convention
+    of taking already-fetched data as a parameter rather than reaching for
+    market_data/db.* internally. Also removes a real, previously-flagged
+    redundant fetch (see docs/ROADMAP.md's V4.5.1 "Considered and explicitly
+    deferred" note) -- this and the Target Status block now share one fetch
+    instead of two independent ones.
 
     Adds:
     - Classification: Sector for equities, Industry for everything else --
@@ -58,7 +79,6 @@ def get_dividend_holdings(*, conn=None, yf_module=None) -> pd.DataFrame:
     positions = calculations.compute_current_positions(db.fetch_trades(conn=conn))
     holdings = positions[positions["Symbol"].isin(dividend_symbols)].reset_index(drop=True)
 
-    profile = market_data.fetch_stock_profile(holdings["Symbol"].tolist(), yf_module=yf_module)
     holdings = holdings.merge(profile, on="Symbol", how="left")
 
     holdings["Classification"] = holdings["Sector"].where(holdings["Quote Type"] == "EQUITY", holdings["Industry"])

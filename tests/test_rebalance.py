@@ -14,35 +14,26 @@ def conn():
     c.close()
 
 
-class FakeTicker:
-    def __init__(self, info=None, history_df=None, dividends=None):
-        self.info = info or {}
-        self._history_df = history_df
-        self.dividends = dividends if dividends is not None else pd.Series([], dtype=float)
-
-    def history(self, start=None, end=None):
-        return self._history_df
-
-
-class FakeYfModule:
-    def __init__(self, tickers: dict):
-        self._tickers = tickers
-
-    def Ticker(self, symbol):
-        return self._tickers[symbol]
-
-
-def _history(closes):
-    # High/Low default to Close -- degenerate but harmless here, this module's tests
-    # don't assert on High90D/Low90D (see tests/test_market_data.py for those).
-    return pd.DataFrame({"Open": closes, "High": closes, "Low": closes, "Close": closes})
-
-
-def _dividends(payouts: dict):
-    """payouts: {days_ago: amount} -- matches yfinance's real Ticker.dividends shape."""
-    today = pd.Timestamp.today().normalize()
-    index = [today - pd.Timedelta(days=d) for d in payouts]
-    return pd.Series(list(payouts.values()), index=pd.DatetimeIndex(index))
+def _profile(rows: list[dict]) -> pd.DataFrame:
+    """Builds a minimal profile DataFrame in the shape get_dividend_holdings() expects
+    (same columns market_data.fetch_stock_profile()/db.fetch_market_profile_cache()
+    return) -- v4.9.1, get_dividend_holdings() takes this as a parameter instead of
+    fetching live itself, so tests build it directly instead of faking yfinance.
+    dtype="object" for an empty `rows` -- same reasoning core/db.py's own empty-frame
+    builders use: a plain [] otherwise defaults to float64, and get_dividend_holdings()'s
+    .merge(profile, on="Symbol", ...) needs a real "Symbol" column to merge on even with
+    zero rows."""
+    if not rows:
+        return pd.DataFrame({
+            "Symbol": pd.Series([], dtype="object"),
+            "Sector": pd.Series([], dtype="object"),
+            "Industry": pd.Series([], dtype="object"),
+            "Quote Type": pd.Series([], dtype="object"),
+            "Latest Price": pd.Series([], dtype="float64"),
+            "Dividend Yield %": pd.Series([], dtype="float64"),
+        })
+    defaults = {"Sector": None, "Industry": None, "Quote Type": "EQUITY", "Dividend Yield %": 0.0}
+    return pd.DataFrame([{**defaults, **row} for row in rows])
 
 
 class TestGetDividendHoldings:
@@ -56,10 +47,8 @@ class TestGetDividendHoldings:
         db.set_symbol_type("BBB", "Growth", conn=conn)
         db.set_symbol_type("CCC", "Dividend", conn=conn)
 
-        yf_module = FakeYfModule({
-            "AAA": FakeTicker(info={"quoteType": "EQUITY", "sector": "Tech"}, history_df=_history([100.0])),
-        })
-        result = rebalance.get_dividend_holdings(conn=conn, yf_module=yf_module)
+        profile = _profile([{"Symbol": "AAA", "Sector": "Tech", "Latest Price": 100.0}])
+        result = rebalance.get_dividend_holdings(profile, conn=conn)
 
         assert list(result["Symbol"]) == ["AAA"]
 
@@ -69,11 +58,11 @@ class TestGetDividendHoldings:
         db.set_symbol_type("AAA", "Dividend", conn=conn)
         db.set_symbol_type("BBB", "Dividend", conn=conn)
 
-        yf_module = FakeYfModule({
-            "AAA": FakeTicker(info={"quoteType": "EQUITY", "sector": "Tech"}, history_df=_history([150.0])),  # value 1500
-            "BBB": FakeTicker(info={"quoteType": "EQUITY", "sector": "Health"}, history_df=_history([50.0])),  # value 500
-        })
-        result = rebalance.get_dividend_holdings(conn=conn, yf_module=yf_module).set_index("Symbol")
+        profile = _profile([
+            {"Symbol": "AAA", "Sector": "Tech", "Latest Price": 150.0},  # value 1500
+            {"Symbol": "BBB", "Sector": "Health", "Latest Price": 50.0},  # value 500
+        ])
+        result = rebalance.get_dividend_holdings(profile, conn=conn).set_index("Symbol")
 
         assert result.loc["AAA", "Current Value"] == pytest.approx(1500.0)
         assert result.loc["BBB", "Current Value"] == pytest.approx(500.0)
@@ -84,10 +73,8 @@ class TestGetDividendHoldings:
     def test_computes_unrealized_dollar_and_pct(self, conn):
         db.insert_trade(trade_date="2026-01-05", side="buy", symbol="AAA", quantity=10, price=100.0, conn=conn)
         db.set_symbol_type("AAA", "Dividend", conn=conn)
-        yf_module = FakeYfModule({
-            "AAA": FakeTicker(info={"quoteType": "EQUITY", "sector": "Tech"}, history_df=_history([120.0])),
-        })
-        result = rebalance.get_dividend_holdings(conn=conn, yf_module=yf_module).iloc[0]
+        profile = _profile([{"Symbol": "AAA", "Sector": "Tech", "Latest Price": 120.0}])
+        result = rebalance.get_dividend_holdings(profile, conn=conn).iloc[0]
 
         # Cost Basis 1000, Current Value 1200 -> unrealized $200, 20%
         assert result["Current Unrealized $"] == pytest.approx(200.0)
@@ -96,14 +83,10 @@ class TestGetDividendHoldings:
     def test_computes_expected_dividend_net_of_withholding(self, conn):
         db.insert_trade(trade_date="2026-01-05", side="buy", symbol="AAA", quantity=10, price=100.0, conn=conn)
         db.set_symbol_type("AAA", "Dividend", conn=conn)
-        yf_module = FakeYfModule({
-            "AAA": FakeTicker(
-                info={"quoteType": "EQUITY", "sector": "Tech"},
-                history_df=_history([100.0]),
-                dividends=_dividends({10: 4.0}),  # $4/share trailing 12mo -> yield 4%
-            ),
-        })
-        result = rebalance.get_dividend_holdings(conn=conn, yf_module=yf_module).iloc[0]
+        profile = _profile([
+            {"Symbol": "AAA", "Sector": "Tech", "Latest Price": 100.0, "Dividend Yield %": 4.0},
+        ])
+        result = rebalance.get_dividend_holdings(profile, conn=conn).iloc[0]
 
         # Current Value 1000, yield 4% gross -> $40 gross/yr, net of 15% withholding -> $34/yr
         assert result["Current Expected Div/Yr"] == pytest.approx(34.0)
@@ -112,14 +95,10 @@ class TestGetDividendHoldings:
     def test_computes_expected_dividend_pct_net_of_withholding(self, conn):
         db.insert_trade(trade_date="2026-01-05", side="buy", symbol="AAA", quantity=10, price=100.0, conn=conn)
         db.set_symbol_type("AAA", "Dividend", conn=conn)
-        yf_module = FakeYfModule({
-            "AAA": FakeTicker(
-                info={"quoteType": "EQUITY", "sector": "Tech"},
-                history_df=_history([100.0]),
-                dividends=_dividends({10: 4.0}),  # yield 4% gross
-            ),
-        })
-        result = rebalance.get_dividend_holdings(conn=conn, yf_module=yf_module).iloc[0]
+        profile = _profile([
+            {"Symbol": "AAA", "Sector": "Tech", "Latest Price": 100.0, "Dividend Yield %": 4.0},
+        ])
+        result = rebalance.get_dividend_holdings(profile, conn=conn).iloc[0]
 
         # 4% gross yield, net of 15% withholding -> 3.4% -- quantity-independent, unlike
         # Current Div Contrib % (which also factors in Cat Weight %).
@@ -130,30 +109,26 @@ class TestGetDividendHoldings:
         db.insert_trade(trade_date="2026-01-05", side="buy", symbol="BBB", quantity=1, price=100.0, conn=conn)
         db.set_symbol_type("AAA", "Dividend", conn=conn)
         db.set_symbol_type("BBB", "Dividend", conn=conn)
-        yf_module = FakeYfModule({
-            "AAA": FakeTicker(info={"quoteType": "EQUITY", "sector": "Tech", "industry": "Software"}, history_df=_history([100.0])),
-            "BBB": FakeTicker(info={"quoteType": "ETF", "sector": None, "category": "Bond"}, history_df=_history([100.0])),
-        })
-        result = rebalance.get_dividend_holdings(conn=conn, yf_module=yf_module).set_index("Symbol")
+        profile = _profile([
+            {"Symbol": "AAA", "Quote Type": "EQUITY", "Sector": "Tech", "Industry": "Software", "Latest Price": 100.0},
+            {"Symbol": "BBB", "Quote Type": "ETF", "Sector": None, "Industry": "Bond", "Latest Price": 100.0},
+        ])
+        result = rebalance.get_dividend_holdings(profile, conn=conn).set_index("Symbol")
 
         assert result.loc["AAA", "Classification"] == "Tech"
         assert result.loc["BBB", "Classification"] == "Bond"
 
     def test_returns_empty_frame_with_no_dividend_holdings(self, conn):
-        result = rebalance.get_dividend_holdings(conn=conn, yf_module=FakeYfModule({}))
+        result = rebalance.get_dividend_holdings(_profile([]), conn=conn)
         assert result.empty
 
     def test_computes_div_contrib_pct(self, conn):
         db.insert_trade(trade_date="2026-01-05", side="buy", symbol="AAA", quantity=10, price=100.0, conn=conn)
         db.set_symbol_type("AAA", "Dividend", conn=conn)
-        yf_module = FakeYfModule({
-            "AAA": FakeTicker(
-                info={"quoteType": "EQUITY", "sector": "Tech"},
-                history_df=_history([100.0]),
-                dividends=_dividends({10: 4.0}),  # yield 4%
-            ),
-        })
-        result = rebalance.get_dividend_holdings(conn=conn, yf_module=yf_module).iloc[0]
+        profile = _profile([
+            {"Symbol": "AAA", "Sector": "Tech", "Latest Price": 100.0, "Dividend Yield %": 4.0},
+        ])
+        result = rebalance.get_dividend_holdings(profile, conn=conn).iloc[0]
 
         # Sole holding -> Cat Weight % = 100 -> Contrib % = 100/100 * 4.0 * 0.85 = 3.4
         assert result["Current Div Contrib %"] == pytest.approx(3.4)
