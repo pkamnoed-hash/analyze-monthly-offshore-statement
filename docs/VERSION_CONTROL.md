@@ -122,12 +122,12 @@ tip commit was already an ancestor of `main`). Feature branches that are
 still useful as a labeled reference point (`V1-record-trade-and-view`,
 `v2-Reconciliation`) are kept rather than deleted by default.
 
-## Current status (as of `v4.10.1`, merged)
+## Current status (as of `v4.11`, merged)
 
 `main` has V1, V2, V2.1, V2.2, V2.3, V2.4, V3, V3.1, V4, V4.1.1, V4.1,
 V4.1.2, V4.2, V4.3, V4.3.1, V4.4, V4.4.1, V4.5, V4.5.1, V4.5.2, V4.6,
-V4.6.1, V4.7, V4.8, V4.9, V4.9.3, V4.10, and **V4.10.1** merged in
-(456/456 passing on `main`, tagged `v4.10.1`). V4.3 overhauls Rebalance &
+V4.6.1, V4.7, V4.8, V4.9, V4.9.3, V4.10, V4.10.1, and **V4.11** merged
+in (465/465 passing on `main`, tagged `v4.11`). V4.3 overhauls Rebalance &
 Reallocate (5-tab split, Analyze as the sole editable tab, Total P/L,
 Beta, THB calculator, Summary KPI redesign), adds a Monitor Stocks
 Monthly Dividend chart (validated against a real broker statement
@@ -315,8 +315,7 @@ and switching to `LineChartColumn` to match the requested line style.
 456/456 tests passing. See `docs/ROADMAP.md`'s V4.10.1 section for the
 full list.
 
-**In progress: V4.11 (`v4.11-monitor-stocks-fundamentals`)**, not yet
-merged into `main`. Brings V4.10's Analyst Target valuation into
+V4.11 brings V4.10's Analyst Target valuation into
 Monitor Stocks across all current holdings at once -- a new
 Fundamentals tab, a combined `Fundamental Assessment` column on
 Highlight, and three new columns on Overall. Extracted the verdict
