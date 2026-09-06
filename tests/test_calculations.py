@@ -25,6 +25,7 @@ from core.calculations import (
     nearest_reference_cell,
     resample_ohlc,
     to_heikin_ashi,
+    valuation_assessment,
 )
 
 
@@ -1103,6 +1104,54 @@ class TestApplyFundamentalsFallback:
         assert result.loc["HASFALLBACK", "Current Price"] == 440.0
         assert bool(result.loc["NOTHINGCACHED", "Stale"]) is False
         assert pd.isna(result.loc["NOTHINGCACHED", "Current Price"])
+
+
+class TestValuationAssessment:
+    def test_overvalued_above_the_positive_threshold(self):
+        result = valuation_assessment(current_price=110.0, target_mean_price=100.0)
+        assert result["pct"] == pytest.approx(10.0)
+        assert result["verdict"] == "Overvalued"
+
+    def test_undervalued_below_the_negative_threshold(self):
+        result = valuation_assessment(current_price=85.0, target_mean_price=100.0)
+        assert result["pct"] == pytest.approx(-15.0)
+        assert result["verdict"] == "Undervalued"
+
+    def test_fair_value_within_the_band(self):
+        result = valuation_assessment(current_price=101.0, target_mean_price=100.0)
+        assert result["pct"] == pytest.approx(1.0)
+        assert result["verdict"] == "Fair value"
+
+    def test_exact_positive_two_percent_boundary_is_still_fair_value(self):
+        # >2% is Overvalued -- exactly 2% is not yet over the line.
+        result = valuation_assessment(current_price=102.0, target_mean_price=100.0)
+        assert result["pct"] == pytest.approx(2.0)
+        assert result["verdict"] == "Fair value"
+
+    def test_exact_negative_two_percent_boundary_is_still_fair_value(self):
+        result = valuation_assessment(current_price=98.0, target_mean_price=100.0)
+        assert result["pct"] == pytest.approx(-2.0)
+        assert result["verdict"] == "Fair value"
+
+    def test_just_over_the_positive_boundary_is_overvalued(self):
+        result = valuation_assessment(current_price=102.01, target_mean_price=100.0)
+        assert result["verdict"] == "Overvalued"
+
+    def test_no_coverage_when_target_is_none(self):
+        result = valuation_assessment(current_price=100.0, target_mean_price=None)
+        assert result["pct"] is None
+        assert result["verdict"] == "No coverage"
+
+    def test_no_coverage_when_target_is_nan(self):
+        result = valuation_assessment(current_price=100.0, target_mean_price=float("nan"))
+        assert result["pct"] is None
+        assert result["verdict"] == "No coverage"
+
+    def test_no_coverage_when_current_price_is_missing_too(self):
+        # Shouldn't happen in practice (fetch_fundamentals's own failure branch means
+        # this row would never reach here), but stays a graceful non-crash regardless.
+        result = valuation_assessment(current_price=None, target_mean_price=100.0)
+        assert result["verdict"] == "No coverage"
 
 
 class TestApplyMarketProfileFallback:

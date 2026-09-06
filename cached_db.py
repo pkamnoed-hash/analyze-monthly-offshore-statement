@@ -195,3 +195,43 @@ def reference_line_summary(symbols: list[str], latest_prices: dict) -> pd.DataFr
 
 def invalidate_reference_line_summary():
     reference_line_summary.clear()
+
+
+@st.cache_data
+def fundamentals_summary(symbols: list[str]) -> pd.DataFrame:
+    """V4.11 -- shared DB-first read for Company Fundamentals AND Monitor Stocks'
+    Fundamentals tab, promoted here from Company Fundamentals' own private
+    _cached_read_fundamentals_from_db once a second page needed the exact same
+    DB-first-with-auto-capture cache -- same precedent as reference_line_summary
+    above (moved here in V4.5.2 for the same reason: a cache only one page's
+    module can see can't be invalidated from a save that happens on a DIFFERENT
+    page).
+
+    Reads db.fetch_fundamentals_cache() first; any symbol not yet captured gets
+    one live market_data.fetch_fundamentals() attempt -- batched, not one call
+    per symbol (unlike reference_line_summary's own per-symbol price-history
+    fetch, fetch_fundamentals() already accepts a list) -- and its successful
+    rows saved, then re-reads. A symbol whose live attempt fails stays absent
+    here, same "absence means never captured" convention
+    db.fetch_market_profile_cache() already uses, until a later "Refresh now" or
+    page visit succeeds.
+
+    No ttl, matching Company Fundamentals' own original reasoning: the point of
+    caching this at all is to skip a redundant DB read on every rerun within a
+    session, not to expire data on a timer -- only .clear() (called by
+    invalidate_fundamentals_summary(), wired into both pages' own "Refresh now"
+    handlers) or a changed `symbols` list busts it."""
+    cached = db.fetch_fundamentals_cache()
+    cached_symbols = set(cached["Symbol"]) if not cached.empty else set()
+    missing = [s for s in symbols if s not in cached_symbols]
+    if missing:
+        live_missing = market_data.fetch_fundamentals(missing)
+        successful = live_missing[live_missing["Current Price"].notna()]
+        if not successful.empty:
+            db.save_fundamentals_cache(successful.to_dict("records"))
+        cached = db.fetch_fundamentals_cache()
+    return cached[cached["Symbol"].isin(symbols)]
+
+
+def invalidate_fundamentals_summary():
+    fundamentals_summary.clear()
