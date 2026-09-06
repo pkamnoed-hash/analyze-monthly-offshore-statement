@@ -93,6 +93,41 @@ def _refresh_stock_profile_live(symbols: list[str]) -> int:
     return int(merged["Stale"].sum())
 
 
+def _refresh_fundamentals_live(symbols: list[str]) -> int:
+    """V4.11 -- "Refresh now" button's Analyst Target counterpart, mirroring
+    _refresh_stock_profile_live above and Company Fundamentals' own identical
+    function (app_pages/company_fundamentals.py) -- deliberately page-local, not
+    shared, matching this app's established precedent (V4.9.3 gave rebalance.py its
+    own local mirror of this exact pattern rather than importing one). Busts
+    cached_db.fundamentals_summary() so the very next read reflects what was just
+    fetched. Returns the count of symbols that failed THIS live attempt."""
+    live = market_data.fetch_fundamentals(symbols)
+    cached = db.fetch_fundamentals_cache()
+    merged = calculations.apply_fundamentals_fallback(live, cached)
+
+    fresh_rows = merged[~merged["Stale"] & merged["Current Price"].notna()]
+    if not fresh_rows.empty:
+        db.save_fundamentals_cache(fresh_rows.drop(columns=["Stale", "Fetched At"]).to_dict("records"))
+
+    cached_db.invalidate_fundamentals_summary()
+    return int(merged["Stale"].sum())
+
+
+def _fundamental_assessment_text(row: pd.Series) -> str:
+    """V4.11 -- Highlight tab's single combined column, e.g. "Undervalued
+    (-11.3%, $423.00)" -- small presentation-layer helper (not core/calculations.py,
+    same rationale as _relative_time below: pure string formatting around numbers
+    calculations.valuation_assessment() already computed, nothing worth unit-testing
+    in isolation). "No coverage" alone (no parenthetical) when there's nothing to
+    compare against -- either a real "no analyst target" result, or a symbol
+    fundamentals_summary() never captured at all (e.g. the rare unresolvable
+    symbol, same "absence means never captured" convention this app already uses
+    elsewhere)."""
+    if row["Assessment"] == "No coverage" or pd.isna(row["Analyst Target %"]):
+        return "No coverage"
+    return f"{row['Assessment']} ({row['Analyst Target %']:+.1f}%, ${row['Analyst Target']:,.2f})"
+
+
 def _relative_time(ts: pd.Timestamp, now: pd.Timestamp) -> str:
     """Small presentation-layer helper (not core/calculations.py -- pure string
     formatting, no business logic worth unit-testing in isolation). Mirrors the
@@ -168,9 +203,11 @@ holdings["Allocation Type"] = holdings["Allocation Type"].fillna("Others")
 holdings = holdings.rename(columns={"Allocation Type": "Category"})
 
 just_refreshed_stale_count = None
+just_refreshed_fundamentals_stale_count = None
 if st.button("Refresh now", help="Fetch the latest live data from yfinance now (normal page loads read from the database instead)."):
     just_refreshed_stale_count = _refresh_stock_profile_live(holdings["Symbol"].tolist())
     cached_db.invalidate_reference_line_summary()
+    just_refreshed_fundamentals_stale_count = _refresh_fundamentals_live(holdings["Symbol"].tolist())
 
 profile = _cached_read_stock_profile_from_db(holdings["Symbol"].tolist())
 
@@ -208,6 +245,15 @@ if just_refreshed_stale_count:
         "(likely a temporary yfinance/Yahoo issue) -- showing the last successfully "
         "captured values for those instead. Symbol/Category/Quantity/Cost columns are "
         "unaffected (they don't come from yfinance)."
+    )
+# V4.11 -- separate warning from the profile one above: a different data source
+# (fundamentals_cache, not market_profile_cache) can fail independently, and mixing
+# the two counts into one message would misreport which columns are actually stale.
+if just_refreshed_fundamentals_stale_count:
+    st.warning(
+        f"{just_refreshed_fundamentals_stale_count} symbol(s)' Analyst Target couldn't "
+        "be fetched live just now -- showing the last successfully captured value for "
+        "those instead."
     )
 
 holdings = holdings.merge(profile, on="Symbol", how="left")
@@ -272,6 +318,33 @@ ta_status = ta_status.rename(columns={"Action": "Rebalance Action"})
 holdings = holdings.merge(
     ta_status[["Symbol", "Target Status", "Rebalance Action", "Trade $"]], on="Symbol", how="left",
 )
+
+# V4.11 -- Analyst Target valuation, reusing Company Fundamentals' own
+# cached_db.fundamentals_summary()/core/calculations.valuation_assessment() so the
+# two pages can never disagree about the same symbol's verdict -- one shared source
+# of truth, same "computed independently per page" precedent as the Target
+# Allocation reminder above.
+#
+# Deliberately assessed against THIS page's own "Latest Price" (already merged in
+# above from market_profile_cache), not fundamentals_summary()'s own separate
+# "Current Price" field -- the two are two different yfinance fetches that could
+# show a slightly different quote. Using Latest Price keeps every price-derived
+# column on this page (Unrealized %, Weight %, and now Analyst Target %) reading
+# off the exact same number a user can see right next to it, rather than silently
+# introducing a second "current price" a sharp-eyed reader could catch disagreeing.
+fundamentals = cached_db.fundamentals_summary(holdings["Symbol"].tolist())
+holdings = holdings.merge(
+    fundamentals[["Symbol", "Target Mean Price"]].rename(columns={"Target Mean Price": "Analyst Target"}),
+    on="Symbol", how="left",
+)
+# Row-wise apply is fine at this scale (~50 holdings, not a hot loop), same
+# convention _highlight_passed_nearest_reference already uses further down this file.
+assessed = holdings.apply(
+    lambda r: calculations.valuation_assessment(r["Latest Price"], r["Analyst Target"]), axis=1,
+)
+holdings["Analyst Target %"] = [a["pct"] for a in assessed]
+holdings["Assessment"] = [a["verdict"] for a in assessed]
+holdings["Fundamental Assessment"] = holdings.apply(_fundamental_assessment_text, axis=1)
 
 holdings["Position Value"] = holdings["Quantity"] * holdings["Latest Price"]
 total_value = holdings["Position Value"].sum()
@@ -556,14 +629,20 @@ TAB_COLUMNS = {
     # an attention-worthy row with no way to jump to that symbol's own chart would be a
     # real usability gap.
     "Highlight": ["Symbol", "History90D", "Ex-Date", "Expected Div Per Month", "Total P/L",
-                  "Total P/L %", "Dividend Yield %", "Nearest Resistance (R %)",
+                  "Total P/L %", "Dividend Yield %", "Fundamental Assessment", "Nearest Resistance (R %)",
                   "Nearest Support (S %)", "Passed R/S", "Target Status", "Rebalance Action", "Trade $", "Action"],
+    # V4.11 -- Analyst Target valuation (real sell-side analyst price targets,
+    # aggregated by yfinance -- not something this app calculates itself), same
+    # verdict logic (core/calculations.valuation_assessment) Company Fundamentals'
+    # own Valuation card already shows, just across every holding at once instead
+    # of one symbol at a time.
+    "Fundamentals": ["Symbol", "History90D", "Analyst Target", "Assessment", "Analyst Target %"],
     "Overall": ["Symbol", "History90D", "Description", "Category", "Asset Class", "Portfolio Group", "Weight %",
                 "Category Weight %", "Quantity", "Avg Cost", "Latest Price", "Cost Basis", "Position Value",
                 "Unrealized", "Unrealized %", "Dividends Received", "Total P/L", "Total P/L %",
                 "Holding Period (Years)", "Total P/L %/yr", "Dividend Yield %", "Dividend Frequency",
                 "Ex-Date", "Expected Div Per Year", "Expected Div Per Month", "Beta",
-                "Div Return Contribution %",
+                "Div Return Contribution %", "Analyst Target", "Analyst Target %", "Assessment",
                 "Nearest Resistance (R %)", "Nearest Support (S %)", "Passed R/S",
                 "Target Status", "Rebalance Action", "Trade $", "Action"],
     "Position": ["Symbol", "History90D", "Quantity", "Avg Cost", "Latest Price", "Cost Basis", "Position Value"],
@@ -666,6 +745,29 @@ column_config = {
              "The highlight itself lives on the Nearest Resistance/Support cell, not here -- this "
              "stays a plain, sortable date. Stays set until you Regenerate, drag, delete, or add a "
              "line on that symbol's own Auto Trendline page.",
+    ),
+    "Analyst Target": st.column_config.NumberColumn(
+        "Analyst Target", format="$%.2f",
+        help="The average 12-month price target from real sell-side analysts covering this "
+             "stock, as aggregated by Yahoo Finance -- not a value this app calculates itself. "
+             "Blank when there's no analyst coverage (common for ETFs/funds).",
+    ),
+    "Analyst Target %": st.column_config.NumberColumn(
+        "Analyst Target %", format="%+.1f%%",
+        help="(Latest Price - Analyst Target) / Analyst Target. Negative means the current "
+             "price sits below the target (Undervalued); positive means above it (Overvalued).",
+    ),
+    "Assessment": st.column_config.TextColumn(
+        "Assessment",
+        help="Overvalued if Latest Price is >2% above the Analyst Target, Undervalued if >2% "
+             "below, Fair value in between. \"No coverage\" when there's no analyst target to "
+             "compare against.",
+    ),
+    "Fundamental Assessment": st.column_config.TextColumn(
+        "Fundamental Assessment",
+        help="Assessment + Analyst Target % + Analyst Target combined into one cell, e.g. "
+             "\"Undervalued (-11.3%, $423.00)\" -- see the Fundamentals tab for these as "
+             "separate, sortable columns.",
     ),
 }
 

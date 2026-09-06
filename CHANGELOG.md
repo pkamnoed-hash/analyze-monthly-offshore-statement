@@ -1,5 +1,21 @@
 # Changelog
 
+## Fundamentals on Monitor Stocks (v4.11)
+
+Brings Company Fundamentals' Analyst Target valuation into Monitor
+Stocks, across every current holding at once.
+
+- New **Fundamentals** tab -- Analyst Target, the Overvalued/
+  Undervalued/Fair value assessment, and the % gap for every holding
+  at once.
+- **Highlight** tab gets a combined "Fundamental Assessment" column,
+  e.g. `Undervalued (-8.0%, $47.63)`.
+- **Overall** tab gets the same Analyst Target, Assessment, and %
+  columns.
+- "Refresh now" pulls fresh Analyst Target data alongside everything
+  else the page already refreshes.
+- No breaking changes. Full test suite: 465/465 passing.
+
 ## Company Fundamentals (v4.10)
 
 New **Company Fundamentals** page (Analysis section) -- one holding's

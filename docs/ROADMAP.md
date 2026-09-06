@@ -3655,6 +3655,109 @@ next:
 456/456 tests passing (page-level UI change, no new test surface).
 Merged into `main`, tagged `v4.10.1`.
 
+## V4.11: Fundamentals on Monitor Stocks
+
+Branch `v4.11-monitor-stocks-fundamentals`, cut from `main` after
+v4.10.1 merged in.
+
+### Context
+
+V4.10 built the Analyst Target valuation (Current Price vs. real
+sell-side analyst targets, Overvalued/Undervalued/Fair value) into a
+new single-symbol Company Fundamentals page. Direct user request: bring
+that same assessment into Monitor Stocks, the portfolio-wide table,
+across all current holdings at once -- a new **Fundamentals** tab, a
+combined column on the existing **Highlight** tab, and the same new
+columns folded into **Overall**.
+
+Confirmed with the user (AskUserQuestion): the %-gap number keeps the
+exact sign convention Company Fundamentals already ships --
+`% = (current - target) / target`, undervalued reads negative -- rather
+than a mirror-image "upside" framing that would make the same stock
+show a different-signed number on two different pages.
+
+### Design decisions
+
+**Extracted the verdict logic to `core/calculations.py`** as
+`valuation_assessment(current_price, target_mean_price) -> dict`
+(`{"pct": float | None, "verdict": str}`, verdict one of
+Overvalued/Undervalued/Fair value/"No coverage"). This ~10-line
+threshold (>+2%/<-2%/between) previously lived inline in
+`app_pages/company_fundamentals.py`; duplicating it a second time for
+Monitor Stocks would let the two pages drift out of sync. Company
+Fundamentals was refactored to call this function too (its own inline
+copy deleted), so both pages share one tested source of truth
+(`tests/test_calculations.py::TestValuationAssessment`, covering every
+verdict plus the exact ±2% boundary).
+
+**Promoted the DB-first fundamentals read to `cached_db.py`** as
+`fundamentals_summary()`/`invalidate_fundamentals_summary()`, mirroring
+`reference_line_summary()`'s own V4.5.2 precedent exactly -- that move
+happened specifically because a second page needed the same
+DB-first-with-auto-capture cache, and that's the exact situation here.
+Company Fundamentals' own private `_cached_read_fundamentals_from_db`
+was deleted in favor of calling this shared version with a one-symbol
+list.
+
+**The "Refresh now" live-fetch handler stayed page-local**, deliberately
+NOT centralized -- matching the *other* half of this app's own
+established precedent: V4.9.3 gave `rebalance.py` its own local
+`_refresh_stock_profile_live()` (a mirror of Monitor Stocks' own, not a
+shared import) rather than sharing one. Monitor Stocks got a new local
+`_refresh_fundamentals_live(symbols)`, wired into the page's existing
+"Refresh now" button alongside the profile refresh (with its own,
+separate stale-count warning -- mixing the two counts into one message
+would misreport which columns are actually affected), and calling
+`cached_db.invalidate_fundamentals_summary()` after saving.
+
+**A real design correction made during implementation**: the plan
+originally called for assessing against `fundamentals_summary()`'s own
+`Current Price` field. Built that way first, then switched to assessing
+against Monitor Stocks' own already-merged `Latest Price` column
+instead -- `Current Price` (from `fetch_fundamentals()`'s `yfinance`
+`.info` call) and `Latest Price` (from `fetch_stock_profile()`'s 90-day
+price history) are two independent fetches that could show a slightly
+different quote for the same symbol at the same moment. Assessing
+against `Latest Price` keeps every price-derived column on this page
+(Unrealized %, Weight %, and now Analyst Target %) reading off the
+exact same number a user can see right next to it, instead of silently
+introducing a second "current price" a sharp-eyed reader could catch
+disagreeing.
+
+**New columns merged into `holdings`** (right after the existing Target
+Allocation merge): `Analyst Target` (= Target Mean Price), `Analyst
+Target %`, `Assessment` -- computed via `valuation_assessment` applied
+row-wise over `holdings["Latest Price"]`/`holdings["Analyst Target"]`.
+A fourth, presentation-only column, `Fundamental Assessment` (Highlight
+tab only, via a new small helper `_fundamental_assessment_text`),
+combines all three into one string -- `"Undervalued (-8.0%, $47.63)"`
+-- or `"No coverage"` alone when there's no analyst target.
+
+**`TAB_COLUMNS`**: new `"Fundamentals"` entry -- `["Symbol",
+"History90D", "Analyst Target", "Assessment", "Analyst Target %"]`
+(reuses the page's existing History90D column, no new fetch) --
+inserted right after `"Highlight"`. `"Highlight"` gets one new column,
+`"Fundamental Assessment"`, appended after `"Dividend Yield %"`.
+`"Overall"` gets the three non-duplicate columns (`Analyst Target`,
+`Analyst Target %`, `Assessment` -- `Symbol`/`History90D` already
+there) inserted right before `"Nearest Resistance (R %)"`, clustering
+every assessment-style column together. Four new `column_config`
+entries (`NumberColumn`/`TextColumn`, `help=` text explaining what
+Analyst Target means and the sign convention).
+
+### Testing and verification
+
+465/465 tests passing (9 new `TestValuationAssessment` cases). Verified
+against real `yfinance` data and the real dev Turso database: a direct
+end-to-end round trip on `valuation_assessment()` fed from real cached
+data before touching the page, matching Company Fundamentals' own
+already-shown numbers exactly for the same symbol (BMY: `Fair value
+(+0.9%, $66.21)` on both pages) -- confirming the two pages can't
+disagree. A full sweep of all 55 real current holdings through the
+exact merge/assessment logic (not just a few hand-picked symbols)
+completed with zero exceptions -- 31 correctly read "No coverage"
+(ETFs plus one thin-coverage closed-end fund).
+
 ## Deferred / future
 
 - **A "view" link from Monitor Stocks straight into Company

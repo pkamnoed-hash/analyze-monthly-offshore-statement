@@ -689,6 +689,35 @@ def apply_market_profile_fallback(live_rows: pd.DataFrame, cached_rows: pd.DataF
     return pd.DataFrame(out_rows)
 
 
+def valuation_assessment(current_price, target_mean_price) -> dict:
+    """V4.10.1 (extracted from app_pages/company_fundamentals.py, which had this
+    exact ~10-line threshold inline) -- the Overvalued/Undervalued/Fair value
+    verdict shared between Company Fundamentals and Monitor Stocks' new
+    Fundamentals tab (V4.11), so the two pages can never drift out of sync on what
+    counts as "over" or "under."
+
+    `pct = (current_price - target_mean_price) / target_mean_price * 100` -- the
+    sign convention already shipped on Company Fundamentals' Valuation card:
+    negative means current price sits BELOW the analyst target (Undervalued),
+    positive means ABOVE it (Overvalued). >+2%/<-2% are the Overvalued/Undervalued
+    thresholds; the ±2% band between them reads as Fair value.
+
+    `target_mean_price` being `None`/`NaN` (real for any symbol yfinance has no
+    analyst coverage for, e.g. most ETFs -- see fetch_fundamentals()'s own
+    docstring) returns `{"pct": None, "verdict": "No coverage"}` rather than
+    raising or dividing by zero. Pure, Streamlit/DB-free by design."""
+    if target_mean_price is None or pd.isna(target_mean_price) or current_price is None or pd.isna(current_price):
+        return {"pct": None, "verdict": "No coverage"}
+    pct = (current_price - target_mean_price) / target_mean_price * 100
+    if pct > 2:
+        verdict = "Overvalued"
+    elif pct < -2:
+        verdict = "Undervalued"
+    else:
+        verdict = "Fair value"
+    return {"pct": pct, "verdict": verdict}
+
+
 def apply_fundamentals_fallback(live_rows: pd.DataFrame, cached_rows: pd.DataFrame) -> pd.DataFrame:
     """V4.10 -- Company Fundamentals' durable fallback for a failed live yfinance
     fetch, a direct sibling of apply_market_profile_fallback() above using the same
