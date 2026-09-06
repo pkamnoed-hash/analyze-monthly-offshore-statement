@@ -1,0 +1,354 @@
+import pandas as pd
+import plotly.graph_objects as go
+import streamlit as st
+
+import cached_db
+from core import calculations, db, market_data
+
+
+def _latest_value(statement: dict, label: str) -> float | None:
+    """Most recent value for one row label in a statement dict (see
+    market_data._statement_to_dict), or None when the label is absent -- e.g. "Cash
+    Dividends Paid" for a non-payer, or any label at all when the whole statement is
+    empty (a real, confirmed outcome for an ETF, not a fetch failure). Dates are
+    "YYYY-MM-DD" strings, so lexicographic max is also chronological max."""
+    series = statement.get(label)
+    if not series:
+        return None
+    return series[max(series.keys())]
+
+
+def _series(statement: dict, label: str) -> tuple[list[str], list[float]]:
+    """Full date-ascending (label, value) series for one row -- used by the
+    Revenue/Net Income chart, which needs every year, not just the latest."""
+    values = statement.get(label) or {}
+    dates = sorted(values.keys())
+    return dates, [values[d] for d in dates]
+
+
+def _safe_div(numerator, denominator):
+    """None propagates (a missing line item, e.g. no Stockholders Equity captured)
+    rather than raising -- callers render "N/A" for a None result instead of crashing
+    the whole page over one absent ratio input."""
+    if numerator is None or denominator in (None, 0) or pd.isna(denominator):
+        return None
+    return numerator / denominator
+
+
+# Curated rows per statement -- confirmed real yfinance row labels (see
+# core/market_data.fetch_fundamentals's own docstring for the empirical check). Each
+# tagged "money" (raw dollars, displayed in millions) or "eps" (already a per-share
+# dollar figure -- must NOT be divided by a million alongside the rest) since these
+# are the only rows this page assigns a known unit to; everything else a statement
+# returns is left unformatted in the "View all line items" expander below.
+INCOME_ROWS = [
+    ("Total Revenue", "money"), ("Gross Profit", "money"), ("Operating Income", "money"),
+    ("Net Income", "money"), ("Diluted EPS", "eps"),
+]
+BALANCE_ROWS = [
+    ("Total Assets", "money"), ("Total Debt", "money"), ("Cash And Cash Equivalents", "money"),
+    ("Stockholders Equity", "money"), ("Current Assets", "money"), ("Current Liabilities", "money"),
+]
+CASHFLOW_ROWS = [
+    ("Operating Cash Flow", "money"), ("Capital Expenditure", "money"),
+    ("Free Cash Flow", "money"), ("Cash Dividends Paid", "money"),
+]
+
+
+def _format_cell(value, kind: str) -> str:
+    if value is None or pd.isna(value):
+        return "—"
+    if kind == "eps":
+        return f"${value:,.2f}"
+    return f"${value / 1e6:,.0f}M"
+
+
+def _curated_table(statement: dict, rows: list[tuple[str, str]]) -> pd.DataFrame:
+    """Rows=curated labels (index), columns=dates ascending, each cell pre-formatted
+    per its own known unit. Empty when the statement has none of these labels at all
+    (e.g. an ETF's empty statement)."""
+    all_dates = sorted({d for label, _ in rows for d in (statement.get(label) or {})})
+    if not all_dates:
+        return pd.DataFrame()
+    data = {label: [_format_cell((statement.get(label) or {}).get(d), kind) for d in all_dates] for label, kind in rows}
+    return pd.DataFrame(data, index=all_dates).T
+
+
+def _raw_table(statement: dict, exclude_labels: set) -> pd.DataFrame:
+    """Every OTHER row the statement actually returned, in its native (unformatted)
+    units -- deliberately not forced into the curated table's money/EPS formatting,
+    since a raw statement mixes dollar amounts, per-share figures, share counts, and
+    ratios/rates with no metadata telling this page which is which."""
+    remaining = {label: values for label, values in statement.items() if label not in exclude_labels}
+    if not remaining:
+        return pd.DataFrame()
+    all_dates = sorted({d for values in remaining.values() for d in values})
+    data = {label: [values.get(d) for d in all_dates] for label, values in remaining.items()}
+    return pd.DataFrame(data, index=all_dates).T
+
+
+def _render_statement_tab(statement: dict, rows: list[tuple[str, str]], unit_caption: str):
+    if not statement:
+        st.info("No data available for this statement.")
+        return
+    st.caption(unit_caption)
+    st.dataframe(_curated_table(statement, rows), use_container_width=True)
+    raw = _raw_table(statement, {label for label, _ in rows})
+    if not raw.empty:
+        with st.expander(f"View all line items ({len(raw)} more)"):
+            st.caption(
+                "Values as reported by Yahoo Finance, in their native units (not "
+                "reformatted) -- dollar amounts, per-share figures, and share counts "
+                "may appear side by side."
+            )
+            st.dataframe(raw, use_container_width=True)
+
+st.title("Company Fundamentals")
+with st.expander("What does this page do?"):
+    st.caption(
+        "Shows one holding's real income statement, balance sheet, and cash flow "
+        "(annual, straight from yfinance), plus an Analyst Target valuation -- the "
+        "current price compared against sell-side analysts' own real price targets, "
+        "not a value this app computes itself."
+    )
+
+
+@st.cache_data
+def _cached_read_fundamentals_from_db(symbols: list[str]) -> pd.DataFrame:
+    """V4.10 -- Company Fundamentals' normal read path: DB-first, mirroring Monitor
+    Stocks' own _cached_read_stock_profile_from_db (app_pages/monitor_stocks.py) --
+    never calls yfinance for a symbol already captured before. Normal navigation
+    reads fundamentals_cache directly and only touches yfinance when "Refresh now" is
+    explicitly clicked, or for a symbol never captured before (fetched live exactly
+    once, right here, and saved -- same precedent as Monitor Stocks' own DB-first read).
+
+    No ttl -- the point of caching this at all is to skip a redundant DB read on every
+    rerun within a session, not to expire data on a timer; only .clear() (called by
+    _refresh_fundamentals_live) or a changed `symbols` list busts it."""
+    cached = db.fetch_fundamentals_cache()
+    cached_symbols = set(cached["Symbol"]) if not cached.empty else set()
+    missing = [s for s in symbols if s not in cached_symbols]
+    if missing:
+        live_missing = market_data.fetch_fundamentals(missing)
+        successful = live_missing[live_missing["Current Price"].notna()]
+        if not successful.empty:
+            db.save_fundamentals_cache(successful.to_dict("records"))
+        cached = db.fetch_fundamentals_cache()
+    return cached[cached["Symbol"].isin(symbols)]
+
+
+def _refresh_fundamentals_live(symbols: list[str]) -> int:
+    """"Refresh now" button's handler -- the live-fetch-with-fallback logic, mirroring
+    Monitor Stocks' own _refresh_stock_profile_live. calculations.
+    apply_fundamentals_fallback() replaces any row that fails THIS live attempt with
+    the last real values captured in fundamentals_cache, if any. Rows that DID succeed
+    live get upserted right after -- deliberately only the successful ones, so a still
+    -blocked symbol never overwrites a real captured value with another blank. Busts
+    _cached_read_fundamentals_from_db so the very next read reflects what was just
+    fetched. Returns the count of symbols that failed THIS live attempt."""
+    live = market_data.fetch_fundamentals(symbols)
+    cached = db.fetch_fundamentals_cache()
+    merged = calculations.apply_fundamentals_fallback(live, cached)
+
+    fresh_rows = merged[~merged["Stale"] & merged["Current Price"].notna()]
+    if not fresh_rows.empty:
+        db.save_fundamentals_cache(fresh_rows.drop(columns=["Stale", "Fetched At"]).to_dict("records"))
+
+    _cached_read_fundamentals_from_db.clear()
+    return int(merged["Stale"].sum())
+
+
+# ---------------------------------------------------------------------------------
+# Zone 1: category filter -> symbol picker, same category vocabulary and
+# radio-filter pattern as Auto Trendline / Monitor Stocks (see
+# app_pages/symbol_analysis.py's own Zone 1).
+# ---------------------------------------------------------------------------------
+positions = calculations.compute_current_positions(cached_db.cached_fetch_trades())
+symbol_types = cached_db.cached_fetch_symbol_types()
+
+available = positions.merge(symbol_types, on="Symbol", how="left")
+available["Allocation Type"] = available["Allocation Type"].fillna("Others")
+if available.empty:
+    st.info("No current holdings to look up.")
+    st.stop()
+
+category = st.radio(
+    "Filter by type", ["All", "Others", "Dividend", "Growth"],
+    horizontal=True, label_visibility="collapsed", key="company_fundamentals_category_filter",
+)
+symbol_options = available if category == "All" else available[available["Allocation Type"] == category]
+if symbol_options.empty:
+    st.info(f"No current holdings in the {category} category.")
+    st.stop()
+symbol = st.selectbox("Symbol", sorted(symbol_options["Symbol"].tolist()))
+symbol = symbol.upper()
+
+just_refreshed_stale = False
+if st.button("Refresh now", help="Fetch the latest live data from yfinance now (normal page loads read from the database instead)."):
+    just_refreshed_stale = bool(_refresh_fundamentals_live([symbol]))
+
+profile = _cached_read_fundamentals_from_db([symbol])
+if profile.empty:
+    st.warning(f"Couldn't fetch fundamentals for {symbol}.")
+    st.stop()
+row = profile.iloc[0]
+
+if just_refreshed_stale:
+    st.warning(
+        f"{symbol} couldn't be fetched live just now (likely a temporary yfinance/Yahoo "
+        "issue) -- showing the last successfully captured values instead."
+    )
+
+st.subheader(symbol)
+st.caption(f"Data last refreshed: {pd.Timestamp(row['Fetched At']).strftime('%d/%m/%Y %H:%M')}")
+
+# Generic currency/financialCurrency comparison -- fires for ANY holding with the
+# mismatch (confirmed real for TSM: USD quote, TWD statements), not a TSM special case.
+# pd.notna(), not plain truthiness: a genuinely absent Financial Currency (every ETF)
+# reads back from a multi-row query as float NaN, not Python None -- and NaN is
+# truthy, so `if row["Financial Currency"]` would have fired this banner on nearly
+# every ETF holding (confirmed against real dev data: 24 of the portfolio's 27 ETFs).
+if pd.notna(row["Currency"]) and pd.notna(row["Financial Currency"]) and row["Currency"] != row["Financial Currency"]:
+    st.warning(
+        f"Statements reported in {row['Financial Currency']}, quote priced in {row['Currency']}. "
+        "Per-share figures and raw statement totals below aren't directly comparable to "
+        "the trading price without a currency conversion."
+    )
+
+income = row["Income Statement"]
+balance = row["Balance Sheet"]
+
+# ---------------------------------------------------------------------------------
+# Valuation card -- Analyst Target is real yfinance data (targetMeanPrice, an
+# aggregate of real sell-side analysts' own price targets), not something this app
+# calculates; the only original work here is the plain % comparison against the
+# current price and the Overvalued/Undervalued/Fair value labeling (>+2%/<-2%/between).
+# ---------------------------------------------------------------------------------
+st.subheader("Valuation — Analyst Target")
+target = row["Target Mean Price"]
+if target is None or pd.isna(target):
+    st.info("No analyst coverage.")
+else:
+    current_price = row["Current Price"]
+    pct = (current_price - target) / target * 100
+    if pct > 2:
+        verdict = "Overvalued"
+    elif pct < -2:
+        verdict = "Undervalued"
+    else:
+        verdict = "Fair value"
+    # pd.notna(), not plain truthiness -- int(float("nan")) raises, and a NaN read
+    # back from a multi-row query is truthy, so a bare `if row[...]` wouldn't even
+    # catch it before the crash.
+    analysts = int(row["Number Of Analysts"]) if pd.notna(row["Number Of Analysts"]) else 0
+
+    vcol1, vcol2, vcol3 = st.columns(3)
+    vcol1.metric("Current Price", f"${current_price:,.2f}")
+    vcol2.metric("Analyst Target (mean)", f"${target:,.2f}", delta=f"{pct:+.1f}%", delta_color="inverse")
+    vcol3.metric(verdict, f"{analysts} analyst{'s' if analysts != 1 else ''}")
+
+cashflow = row["Cash Flow"]
+
+# Confirmed real (see fetch_fundamentals's own docstring): an ETF's income_stmt/
+# balance_sheet/cashflow are all genuinely empty DataFrames, not a fetch failure --
+# nothing below (KPI row, ratios, chart, statement tabs) has anything to compute from.
+if not income and not balance and not cashflow:
+    st.info("No financial statements available for this symbol (likely an ETF or fund).")
+    st.stop()
+
+
+def _yoy_pct(values: list) -> float | None:
+    """Latest-vs-prior-year % change, or None ("n/m", rendered as no delta at all)
+    when there's no prior year or the prior year was zero/negative -- a plain %
+    change is meaningless there (e.g. TSM's Free Cash Flow swinging from negative to
+    positive in the chat mockup this page is based on)."""
+    if len(values) < 2:
+        return None
+    latest, prior = values[-1], values[-2]
+    if latest is None or pd.isna(latest) or prior is None or pd.isna(prior) or prior <= 0:
+        return None
+    return (latest - prior) / prior * 100
+
+
+def _kpi_card(col, label: str, values: list, delta_color: str):
+    """One KPI card: latest value (in millions), its YoY delta, and a 4-year
+    sparkline -- the mockup's own "Revenue/Net Income/FCF/Total Debt" row, ported
+    here almost directly since it's just a compact restatement of data the Overview
+    tab's own chart already fetches. `delta_color="inverse"` for Total Debt (a
+    decrease is the good direction), "normal" for the other three (an increase is)."""
+    with col:
+        latest = values[-1] if values else None
+        value_text = f"${latest / 1e6:,.0f}M" if latest is not None and not pd.isna(latest) else "N/A"
+        pct = _yoy_pct(values)
+        st.metric(
+            label, value_text,
+            delta=f"{pct:+.1f}% YoY" if pct is not None else None,
+            delta_color=delta_color,
+        )
+        if len(values) > 1:
+            st.bar_chart(
+                [v / 1e6 if v is not None and not pd.isna(v) else 0 for v in values],
+                height=60, use_container_width=True,
+            )
+
+
+kcol1, kcol2, kcol3, kcol4 = st.columns(4)
+_kpi_card(kcol1, "Revenue (latest FY)", _series(income, "Total Revenue")[1], "normal")
+_kpi_card(kcol2, "Net Income (latest FY)", _series(income, "Net Income")[1], "normal")
+_kpi_card(kcol3, "Free Cash Flow (latest FY)", _series(cashflow, "Free Cash Flow")[1], "normal")
+_kpi_card(kcol4, "Total Debt (latest FY)", _series(balance, "Total Debt")[1], "inverse")
+
+tab_overview, tab_income, tab_balance, tab_cashflow = st.tabs(
+    ["Overview", "Income Statement", "Balance Sheet", "Cash Flow"]
+)
+
+with tab_overview:
+    # _safe_div returns None (rendered "N/A") rather than raising when a line item is
+    # missing -- e.g. a company with no captured Stockholders Equity this year.
+    st.subheader("Key ratios")
+    revenue = _latest_value(income, "Total Revenue")
+    gross_margin = _safe_div(_latest_value(income, "Gross Profit"), revenue)
+    op_margin = _safe_div(_latest_value(income, "Operating Income"), revenue)
+    equity = _latest_value(balance, "Stockholders Equity")
+    roe = _safe_div(_latest_value(income, "Net Income"), equity)
+    debt_equity = _safe_div(_latest_value(balance, "Total Debt"), equity)
+    current_ratio = _safe_div(_latest_value(balance, "Current Assets"), _latest_value(balance, "Current Liabilities"))
+
+    rcol1, rcol2, rcol3, rcol4, rcol5 = st.columns(5)
+    rcol1.metric("Gross Margin", f"{gross_margin * 100:.1f}%" if gross_margin is not None else "N/A")
+    rcol2.metric("Operating Margin", f"{op_margin * 100:.1f}%" if op_margin is not None else "N/A")
+    rcol3.metric("Return on Equity", f"{roe * 100:.1f}%" if roe is not None else "N/A")
+    rcol4.metric("Debt / Equity", f"{debt_equity:.2f}x" if debt_equity is not None else "N/A")
+    rcol5.metric("Current Ratio", f"{current_ratio:.2f}x" if current_ratio is not None else "N/A")
+
+    # Revenue / Net Income trend -- every year the income statement actually
+    # returned, not just the latest. Raw yfinance values are absolute dollars
+    # (confirmed: MSFT's latest Total Revenue is ~3.3e11, not pre-scaled) --
+    # divided by 1e6 here so the axis reads in millions, matching the statement
+    # tables' own unit below. Plotly's graph_objects (not express) for the mixed
+    # bar+line trace -- this app already depends on Plotly via Monitor Stocks'
+    # plotly.express usage.
+    rev_dates, rev_values = _series(income, "Total Revenue")
+    _, ni_values = _series(income, "Net Income")
+    if rev_dates:
+        fig = go.Figure()
+        fig.add_bar(x=rev_dates, y=[v / 1e6 if v is not None else None for v in rev_values], name="Revenue")
+        fig.add_scatter(
+            x=rev_dates, y=[v / 1e6 if v is not None else None for v in ni_values],
+            name="Net Income", mode="lines+markers",
+        )
+        fig.update_layout(
+            height=320, margin=dict(t=20, b=20, l=10, r=10),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02),
+            yaxis_title="USD, millions",
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+with tab_income:
+    _render_statement_tab(income, INCOME_ROWS, "USD, millions (Diluted EPS in dollars/share)")
+
+with tab_balance:
+    _render_statement_tab(balance, BALANCE_ROWS, "USD, millions")
+
+with tab_cashflow:
+    _render_statement_tab(cashflow, CASHFLOW_ROWS, "USD, millions")
