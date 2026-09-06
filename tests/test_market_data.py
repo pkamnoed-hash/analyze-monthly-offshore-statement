@@ -1,16 +1,23 @@
 import pandas as pd
 import pytest
 
-from core.market_data import fetch_price_history, fetch_stock_profile, fetch_usd_thb_rate
+from core.market_data import fetch_fundamentals, fetch_price_history, fetch_stock_profile, fetch_usd_thb_rate
 
 
 class FakeTicker:
-    def __init__(self, info=None, history_df=None, raise_on_history=False, dividends=None):
+    def __init__(self, info=None, history_df=None, raise_on_history=False, dividends=None,
+                 income_stmt=None, balance_sheet=None, cashflow=None):
         self.info = info
         self._history_df = history_df
         self._raise_on_history = raise_on_history
         self.history_call_kwargs = None
         self.dividends = dividends if dividends is not None else pd.Series([], dtype=float)
+        # Real yfinance default for a symbol with no statements (confirmed for ETFs,
+        # e.g. SPY's income_stmt) is an empty DataFrame, not None -- matched here so
+        # a test that doesn't care about statements still exercises the real shape.
+        self.income_stmt = income_stmt if income_stmt is not None else pd.DataFrame()
+        self.balance_sheet = balance_sheet if balance_sheet is not None else pd.DataFrame()
+        self.cashflow = cashflow if cashflow is not None else pd.DataFrame()
 
     def history(self, start=None, end=None):
         self.history_call_kwargs = {"start": start, "end": end}
@@ -38,6 +45,13 @@ def _history(closes, highs=None, lows=None):
         "Low": lows if lows is not None else closes,
         "Close": closes,
     })
+
+
+def _statement(data: dict, dates: list[str]) -> pd.DataFrame:
+    """Builds a fake statement DataFrame matching yfinance's real shape (index = row
+    label, e.g. "Total Revenue"; columns = period-end Timestamps). `data` maps row
+    label -> list of values aligned to `dates`."""
+    return pd.DataFrame(data, index=[pd.Timestamp(d) for d in dates]).T
 
 
 def _dividends(payouts: dict):
@@ -342,3 +356,109 @@ class TestFetchUsdThbRate:
     def test_empty_history_returns_none(self):
         yf_module = FakeYfModule({"THB=X": FakeTicker(history_df=_history([]))})
         assert fetch_usd_thb_rate(yf_module=yf_module) is None
+
+
+class TestFetchFundamentals:
+    def test_happy_path_returns_statements_and_valuation(self):
+        income = _statement({"Total Revenue": [245122.0], "Net Income": [88136.0]}, ["2026-06-30"])
+        balance = _statement({"Total Assets": [512163.0]}, ["2026-06-30"])
+        cashflow = _statement({"Free Cash Flow": [74071.0]}, ["2026-06-30"])
+        yf_module = FakeYfModule({
+            "MSFT": FakeTicker(
+                info={"currentPrice": 452.0, "targetMeanPrice": 486.5, "numberOfAnalystOpinions": 42,
+                      "currency": "USD", "financialCurrency": "USD"},
+                income_stmt=income, balance_sheet=balance, cashflow=cashflow,
+            ),
+        })
+
+        result = fetch_fundamentals(["MSFT"], yf_module=yf_module)
+
+        row = result.iloc[0]
+        assert row["Symbol"] == "MSFT"
+        assert row["Currency"] == "USD"
+        assert row["Financial Currency"] == "USD"
+        assert row["Current Price"] == pytest.approx(452.0)
+        assert row["Target Mean Price"] == pytest.approx(486.5)
+        assert row["Number Of Analysts"] == 42
+        assert row["Income Statement"]["Total Revenue"]["2026-06-30"] == pytest.approx(245122.0)
+        assert row["Balance Sheet"]["Total Assets"]["2026-06-30"] == pytest.approx(512163.0)
+        assert row["Cash Flow"]["Free Cash Flow"]["2026-06-30"] == pytest.approx(74071.0)
+
+    def test_currency_mismatch_is_captured_verbatim(self):
+        # Real finding: TSM's quote currency (USD, the ADR) differs from its
+        # statements' own reporting currency (TWD) -- both captured as-is, no
+        # normalization or TSM-specific special-casing.
+        yf_module = FakeYfModule({
+            "TSM": FakeTicker(
+                info={"currentPrice": 428.91, "targetMeanPrice": 552.38, "numberOfAnalystOpinions": 19,
+                      "currency": "USD", "financialCurrency": "TWD"},
+            ),
+        })
+
+        result = fetch_fundamentals(["TSM"], yf_module=yf_module)
+
+        row = result.iloc[0]
+        assert row["Currency"] == "USD"
+        assert row["Financial Currency"] == "TWD"
+
+    def test_etf_has_no_analyst_coverage_and_no_statements_but_still_succeeds(self):
+        # Real finding (confirmed on SPY): an ETF has a real current price but None
+        # target/analyst-count and entirely empty statements -- a valid result, not a
+        # fetch failure.
+        yf_module = FakeYfModule({
+            "SPY": FakeTicker(
+                info={"currentPrice": 560.0, "targetMeanPrice": None, "numberOfAnalystOpinions": None,
+                      "currency": "USD", "financialCurrency": "USD"},
+            ),
+        })
+
+        result = fetch_fundamentals(["SPY"], yf_module=yf_module)
+
+        row = result.iloc[0]
+        assert row["Current Price"] == pytest.approx(560.0)
+        assert row["Target Mean Price"] is None
+        assert row["Number Of Analysts"] is None
+        assert row["Income Statement"] == {}
+        assert row["Balance Sheet"] == {}
+        assert row["Cash Flow"] == {}
+
+    def test_current_price_falls_back_to_regular_market_price(self):
+        yf_module = FakeYfModule({
+            "XYZ": FakeTicker(info={"currentPrice": None, "regularMarketPrice": 12.5,
+                                     "currency": "USD", "financialCurrency": "USD"}),
+        })
+
+        result = fetch_fundamentals(["XYZ"], yf_module=yf_module)
+
+        assert result.iloc[0]["Current Price"] == pytest.approx(12.5)
+
+    def test_symbol_with_no_price_at_all_falls_back_to_blank_failure_row(self):
+        # Neither currentPrice nor regularMarketPrice present -- treated the same as
+        # any other fetch failure, matching fetch_stock_profile's own convention.
+        yf_module = FakeYfModule({"GHOST": FakeTicker(info={"currency": "USD"})})
+
+        result = fetch_fundamentals(["GHOST"], yf_module=yf_module)
+
+        row = result.iloc[0]
+        assert pd.isna(row["Current Price"])
+        assert row["Currency"] is None
+        assert row["Income Statement"] == {}
+
+    def test_empty_symbols_list_returns_empty_dataframe_with_right_columns(self):
+        result = fetch_fundamentals([], yf_module=FakeYfModule({}))
+        assert result.empty
+        assert "Symbol" in result.columns
+        assert "Income Statement" in result.columns
+
+    def test_nan_cells_in_statement_normalize_to_none(self):
+        income = _statement({"Research And Development": [float("nan")]}, ["2026-06-30"])
+        yf_module = FakeYfModule({
+            "MSFT": FakeTicker(
+                info={"currentPrice": 452.0, "currency": "USD", "financialCurrency": "USD"},
+                income_stmt=income,
+            ),
+        })
+
+        result = fetch_fundamentals(["MSFT"], yf_module=yf_module)
+
+        assert result.iloc[0]["Income Statement"]["Research And Development"]["2026-06-30"] is None

@@ -2,6 +2,7 @@ import pandas as pd
 import pytest
 
 from core.calculations import (
+    apply_fundamentals_fallback,
     apply_market_profile_fallback,
     blended_dividends,
     blended_realized_pl,
@@ -1004,6 +1005,104 @@ def _cached_row(symbol, **overrides):
     }
     row.update(overrides)
     return row
+
+
+def _fund_live_row(symbol, **overrides):
+    row = {
+        "Symbol": symbol, "Currency": "USD", "Financial Currency": "USD",
+        "Current Price": 452.0, "Target Mean Price": 486.5, "Number Of Analysts": 42,
+        "Income Statement": {"Total Revenue": {"2026-06-30": 245122.0}},
+        "Balance Sheet": {"Total Assets": {"2026-06-30": 512163.0}},
+        "Cash Flow": {"Free Cash Flow": {"2026-06-30": 74071.0}},
+    }
+    row.update(overrides)
+    return row
+
+
+def _failed_fund_live_row(symbol):
+    # Exact shape fetch_fundamentals()'s own except branch produces.
+    return {
+        "Symbol": symbol, "Currency": None, "Financial Currency": None,
+        "Current Price": float("nan"), "Target Mean Price": None, "Number Of Analysts": None,
+        "Income Statement": {}, "Balance Sheet": {}, "Cash Flow": {},
+    }
+
+
+def _fund_cached_row(symbol, **overrides):
+    row = {
+        "Symbol": symbol, "Currency": "USD", "Financial Currency": "USD",
+        "Current Price": 440.0, "Target Mean Price": 480.0, "Number Of Analysts": 40,
+        "Income Statement": {"Total Revenue": {"2025-06-30": 230000.0}},
+        "Balance Sheet": {"Total Assets": {"2025-06-30": 500000.0}},
+        "Cash Flow": {"Free Cash Flow": {"2025-06-30": 70000.0}},
+        "Fetched At": pd.Timestamp("2026-08-14 12:00:00"),
+    }
+    row.update(overrides)
+    return row
+
+
+class TestApplyFundamentalsFallback:
+    def test_a_row_that_succeeded_live_is_returned_untouched_and_not_stale(self):
+        live = pd.DataFrame([_fund_live_row("MSFT")])
+        cached = pd.DataFrame([_fund_cached_row("MSFT")])
+        result = apply_fundamentals_fallback(live, cached)
+        row = result.iloc[0]
+        assert bool(row["Stale"]) is False
+        assert row["Current Price"] == 452.0  # the LIVE value, not the cached 440.0
+        assert pd.isna(row["Fetched At"])
+
+    def test_a_failed_row_with_a_cached_counterpart_falls_back_and_is_marked_stale(self):
+        live = pd.DataFrame([_failed_fund_live_row("MSFT")])
+        cached = pd.DataFrame([_fund_cached_row("MSFT")])
+        result = apply_fundamentals_fallback(live, cached)
+        row = result.iloc[0]
+        assert bool(row["Stale"]) is True
+        assert row["Current Price"] == 440.0
+        assert row["Income Statement"] == {"Total Revenue": {"2025-06-30": 230000.0}}
+        assert row["Fetched At"] == pd.Timestamp("2026-08-14 12:00:00")
+
+    def test_a_failed_row_with_nothing_ever_cached_stays_blank_not_a_regression(self):
+        live = pd.DataFrame([_failed_fund_live_row("NEWSYM")])
+        cached = pd.DataFrame([_fund_cached_row("MSFT")])  # cache has data, just not for this symbol
+        result = apply_fundamentals_fallback(live, cached)
+        row = result.iloc[0]
+        assert bool(row["Stale"]) is False
+        assert pd.isna(row["Current Price"])
+        assert row["Currency"] is None
+
+    def test_no_analyst_coverage_is_a_legitimate_result_not_a_failure(self):
+        # An ETF: real Current Price, but None Target Mean Price/Number Of Analysts --
+        # must NOT trigger a fallback just because those two fields are empty.
+        live = pd.DataFrame([_fund_live_row("SPY", **{
+            "Target Mean Price": None, "Number Of Analysts": None,
+            "Income Statement": {}, "Balance Sheet": {}, "Cash Flow": {},
+        })])
+        cached = pd.DataFrame([_fund_cached_row("SPY")])
+        result = apply_fundamentals_fallback(live, cached)
+        row = result.iloc[0]
+        assert bool(row["Stale"]) is False
+        assert row["Target Mean Price"] is None
+        assert row["Income Statement"] == {}
+
+    def test_empty_cache_never_crashes_and_never_falls_back(self):
+        live = pd.DataFrame([_failed_fund_live_row("MSFT")])
+        cached = pd.DataFrame(columns=["Symbol", "Current Price", "Fetched At"])
+        result = apply_fundamentals_fallback(live, cached)
+        assert bool(result.iloc[0]["Stale"]) is False
+
+    def test_mixed_batch_each_row_resolved_independently(self):
+        live = pd.DataFrame([
+            _fund_live_row("GOOD"),
+            _failed_fund_live_row("HASFALLBACK"),
+            _failed_fund_live_row("NOTHINGCACHED"),
+        ])
+        cached = pd.DataFrame([_fund_cached_row("HASFALLBACK")])
+        result = apply_fundamentals_fallback(live, cached).set_index("Symbol")
+        assert bool(result.loc["GOOD", "Stale"]) is False
+        assert bool(result.loc["HASFALLBACK", "Stale"]) is True
+        assert result.loc["HASFALLBACK", "Current Price"] == 440.0
+        assert bool(result.loc["NOTHINGCACHED", "Stale"]) is False
+        assert pd.isna(result.loc["NOTHINGCACHED", "Current Price"])
 
 
 class TestApplyMarketProfileFallback:

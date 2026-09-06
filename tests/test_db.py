@@ -15,6 +15,29 @@ def conn():
     c.close()
 
 
+class TestSqlLiteral:
+    def test_none_becomes_sql_null(self):
+        assert db._sql_literal(None) == "NULL"
+
+    def test_nan_becomes_sql_null_not_the_string_nan(self):
+        # Regression: a batched multi-symbol fetch (pd.DataFrame(list_of_dicts))
+        # silently turns a per-row None into a column-wide NaN whenever another row
+        # in the same batch has a real value for that column -- confirmed real for
+        # fetch_fundamentals()'s "Financial Currency" (routinely None for an ETF).
+        # Before this fix, _sql_literal only special-cased `is None`, so NaN fell
+        # through to str(value) and got stored as the literal text "nan".
+        assert db._sql_literal(float("nan")) == "NULL"
+
+    def test_normal_string_is_quoted(self):
+        assert db._sql_literal("USD") == "'USD'"
+
+    def test_single_quotes_are_escaped_by_doubling(self):
+        assert db._sql_literal("O'Brien") == "'O''Brien'"
+
+    def test_zero_is_not_mistaken_for_null(self):
+        assert db._sql_literal(0) == "'0'"
+
+
 class TestDbPath:
     def test_db_path_resolves_to_project_root_data_folder_not_core(self):
         # Regression test: DB_PATH used to be computed relative to db.py's own directory,
@@ -740,6 +763,126 @@ class TestMarketProfileCache:
         result = db.fetch_market_profile_cache(conn=conn)
         assert result.empty
         assert "Symbol" in result.columns
+
+    def test_batched_none_description_survives_as_none_not_the_string_nan(self, conn):
+        # Guards the same _sql_literal fix (see TestSqlLiteral) for this table too --
+        # never confirmed to actually hit real data here (every successful row's
+        # Description/Sector/Industry has a fallback that keeps it non-None), but the
+        # underlying pandas behavior (None -> NaN once a batch mixes it with a real
+        # value) applies here exactly the same way it does for fundamentals_cache.
+        batch = pd.DataFrame([
+            self._row(Symbol="AIQ", Description=None),
+            self._row(Symbol="BLK", Description="BlackRock Inc."),
+        ])
+        assert pd.isna(batch.set_index("Symbol").loc["AIQ", "Description"])
+
+        db.save_market_profile_cache(batch.to_dict("records"), conn=conn)
+        result = db.fetch_market_profile_cache(conn=conn).set_index("Symbol")
+        assert pd.isna(result.loc["AIQ", "Description"])
+        assert result.loc["BLK", "Description"] == "BlackRock Inc."
+
+
+class TestFundamentalsCache:
+    def _row(self, **overrides):
+        row = {
+            "Symbol": "MSFT", "Currency": "USD", "Financial Currency": "USD",
+            "Income Statement": {"Total Revenue": {"2026-06-30": 245122.0}},
+            "Balance Sheet": {"Total Assets": {"2026-06-30": 512163.0}},
+            "Cash Flow": {"Free Cash Flow": {"2026-06-30": 74071.0}},
+            "Current Price": 452.0, "Target Mean Price": 486.5, "Number Of Analysts": 42,
+        }
+        row.update(overrides)
+        return row
+
+    def test_save_and_fetch_round_trip(self, conn):
+        db.save_fundamentals_cache([self._row()], conn=conn)
+        result = db.fetch_fundamentals_cache(conn=conn)
+        assert len(result) == 1
+        row = result.iloc[0]
+        assert row["Symbol"] == "MSFT"
+        assert row["Currency"] == "USD"
+        assert row["Financial Currency"] == "USD"
+        assert row["Income Statement"] == {"Total Revenue": {"2026-06-30": 245122.0}}
+        assert row["Balance Sheet"] == {"Total Assets": {"2026-06-30": 512163.0}}
+        assert row["Cash Flow"] == {"Free Cash Flow": {"2026-06-30": 74071.0}}
+        assert row["Current Price"] == 452.0
+        assert row["Target Mean Price"] == 486.5
+        assert row["Number Of Analysts"] == 42
+        assert pd.notna(row["Fetched At"])
+
+    def test_upsert_replaces_rather_than_duplicates(self, conn):
+        db.save_fundamentals_cache([self._row()], conn=conn)
+        db.save_fundamentals_cache([self._row(**{"Current Price": 500.0})], conn=conn)
+        result = db.fetch_fundamentals_cache(conn=conn)
+        assert len(result) == 1
+        assert result.iloc[0]["Current Price"] == 500.0
+
+    def test_currency_mismatch_round_trips(self, conn):
+        # TSM-style ADR: quote currency (USD) differs from the statements' own
+        # reporting currency (TWD) -- both stored verbatim, no normalization.
+        db.save_fundamentals_cache(
+            [self._row(Symbol="TSM", **{"Currency": "USD", "Financial Currency": "TWD"})],
+            conn=conn,
+        )
+        result = db.fetch_fundamentals_cache(conn=conn)
+        row = result.iloc[0]
+        assert row["Currency"] == "USD"
+        assert row["Financial Currency"] == "TWD"
+
+    def test_no_analyst_coverage_stored_and_fetched_as_none_not_a_crash(self, conn):
+        # A real, valid outcome for an ETF -- yfinance returns None for both fields,
+        # not a failure case.
+        db.save_fundamentals_cache(
+            [self._row(**{"Target Mean Price": None, "Number Of Analysts": None})], conn=conn,
+        )
+        result = db.fetch_fundamentals_cache(conn=conn)
+        row = result.iloc[0]
+        assert pd.isna(row["Target Mean Price"])
+        assert pd.isna(row["Number Of Analysts"])
+
+    def test_empty_statement_defaults_to_empty_dict_not_none(self, conn):
+        # A real ETF -- income_stmt/balance_sheet/cashflow are all empty DataFrames.
+        db.save_fundamentals_cache(
+            [self._row(**{"Income Statement": {}, "Balance Sheet": {}, "Cash Flow": {}})], conn=conn,
+        )
+        result = db.fetch_fundamentals_cache(conn=conn)
+        row = result.iloc[0]
+        assert row["Income Statement"] == {}
+        assert row["Balance Sheet"] == {}
+        assert row["Cash Flow"] == {}
+
+    def test_multiple_symbols_in_one_call(self, conn):
+        db.save_fundamentals_cache(
+            [self._row(Symbol="MSFT"), self._row(Symbol="TSM", **{"Current Price": 210.0})],
+            conn=conn,
+        )
+        result = db.fetch_fundamentals_cache(conn=conn)
+        assert set(result["Symbol"]) == {"MSFT", "TSM"}
+
+    def test_fetch_returns_empty_dataframe_when_nothing_cached_yet(self, conn):
+        result = db.fetch_fundamentals_cache(conn=conn)
+        assert result.empty
+        assert "Symbol" in result.columns
+
+    def test_batched_none_financial_currency_survives_as_none_not_the_string_nan(self, conn):
+        # Regression, confirmed real against the dev Turso DB: pd.DataFrame(rows)
+        # from market_data.fetch_fundamentals() silently turns an ETF's genuine
+        # `None` Financial Currency into a float NaN once the SAME batch also
+        # contains a real value (e.g. an equity's "USD") for that column -- exactly
+        # reproduced here via to_dict("records") on a two-row DataFrame, the same
+        # shape the real "missing" live-fetch branch produces.
+        import pandas as pd
+
+        batch = pd.DataFrame([
+            self._row(Symbol="SCHD", **{"Financial Currency": None}),
+            self._row(Symbol="MSFT", **{"Financial Currency": "USD"}),
+        ])
+        assert pd.isna(batch.set_index("Symbol").loc["SCHD", "Financial Currency"])  # the bug's real trigger
+
+        db.save_fundamentals_cache(batch.to_dict("records"), conn=conn)
+        result = db.fetch_fundamentals_cache(conn=conn).set_index("Symbol")
+        assert pd.isna(result.loc["SCHD", "Financial Currency"])
+        assert result.loc["MSFT", "Financial Currency"] == "USD"
 
 
 class TestWebauthnCredentials:

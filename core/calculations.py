@@ -689,6 +689,50 @@ def apply_market_profile_fallback(live_rows: pd.DataFrame, cached_rows: pd.DataF
     return pd.DataFrame(out_rows)
 
 
+def apply_fundamentals_fallback(live_rows: pd.DataFrame, cached_rows: pd.DataFrame) -> pd.DataFrame:
+    """V4.10 -- Company Fundamentals' durable fallback for a failed live yfinance
+    fetch, a direct sibling of apply_market_profile_fallback() above using the same
+    precedent (see that function's own docstring for the incident that motivated it).
+    `live_rows` is market_data.fetch_fundamentals()'s own output; `cached_rows` is
+    db.fetch_fundamentals_cache()'s durable snapshot from the last successful fetch of
+    each symbol.
+
+    A row's live fetch is considered failed when `Current Price` is NaN -- confirmed
+    (see fetch_fundamentals()'s own docstring) to be the one field a genuine success
+    always sets to a real number, even for a symbol with no analyst coverage or no
+    financial statements at all (e.g. an ETF), so it cleanly separates "the fetch
+    itself failed" from "this symbol legitimately has nothing here." Those legitimate
+    zero-value results (`Target Mean Price`/`Number Of Analysts` as `None`, an empty
+    statement dict) are never mistaken for a failure and never trigger a fallback.
+
+    A failed row with a cached counterpart gets every yfinance-derived field replaced
+    from the cache and `Stale=True`; a failed row with nothing ever cached stays blank.
+    A row that succeeded live is returned untouched with `Stale=False` -- this function
+    never prefers stale data over fresh data. Pure and Streamlit/DB-free by design so
+    it's testable without a real fetch or a real database (see tests/test_calculations.py)."""
+    cached_by_symbol = {row["Symbol"]: row for _, row in cached_rows.iterrows()} if not cached_rows.empty else {}
+    fallback_cols = [
+        "Currency", "Financial Currency", "Current Price", "Target Mean Price",
+        "Number Of Analysts", "Income Statement", "Balance Sheet", "Cash Flow",
+    ]
+    out_rows = []
+    for _, live_row in live_rows.iterrows():
+        row = live_row.to_dict()
+        stale = False
+        fetched_at = pd.NaT
+        if pd.isna(row.get("Current Price")):
+            cached_row = cached_by_symbol.get(row["Symbol"])
+            if cached_row is not None:
+                for col in fallback_cols:
+                    row[col] = cached_row[col]
+                stale = True
+                fetched_at = cached_row["Fetched At"]
+        row["Stale"] = stale
+        row["Fetched At"] = fetched_at
+        out_rows.append(row)
+    return pd.DataFrame(out_rows)
+
+
 def describe_market_profile_freshness(
     fetched_at: pd.Series, symbols: pd.Series, tolerance: pd.Timedelta = pd.Timedelta(minutes=5),
 ) -> dict:
