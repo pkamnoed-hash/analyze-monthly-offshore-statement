@@ -332,6 +332,7 @@ pg = st.navigation({
         # and skips the picker).
         st.Page("app_pages/symbol_analysis.py", title="Auto Trendline", url_path="symbol-analysis"),
         st.Page("app_pages/target_allocation.py", title="Target Allocation"),
+        st.Page("app_pages/company_fundamentals.py", title="Company Fundamentals"),
     ],
 })
 pg.run()

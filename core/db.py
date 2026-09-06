@@ -138,6 +138,20 @@ SCHEMA_STATEMENTS = [
     )
     """,
     """
+    CREATE TABLE IF NOT EXISTS fundamentals_cache (
+        symbol              TEXT PRIMARY KEY,
+        currency            TEXT,
+        financial_currency  TEXT,
+        income_json         TEXT,
+        balance_json        TEXT,
+        cashflow_json       TEXT,
+        current_price       REAL,
+        target_mean_price   REAL,
+        number_of_analysts  INTEGER,
+        fetched_at          TEXT NOT NULL
+    )
+    """,
+    """
     CREATE TABLE IF NOT EXISTS webauthn_credentials (
         id            INTEGER PRIMARY KEY AUTOINCREMENT,
         credential_id TEXT NOT NULL UNIQUE,
@@ -233,8 +247,20 @@ def _sql_literal(value):
     save_reference_lines) where multiple heterogeneous statements are batched into one
     executescript() call and '?' parameter binding isn't available. None becomes SQL
     NULL; anything else is stringified and single-quotes are escaped by doubling them,
-    the standard SQL-text escaping rule."""
-    if value is None:
+    the standard SQL-text escaping rule.
+
+    V4.10 fix: also treats a float NaN as NULL, not the literal text "nan" -- caught
+    via `value != value` (true only for NaN, no pandas import needed here) rather than
+    `isinstance(value, float)` first, since a real 0.0 or empty string must still fall
+    through to the normal stringify-and-quote path below. Confirmed real: a batched
+    multi-symbol fetch (pd.DataFrame(list_of_dicts)) silently turns a per-row `None` in
+    a TEXT-like column into a column-wide NaN whenever at least one OTHER row in the
+    same batch has a real string for that column -- a single-symbol fetch never
+    triggers it, which is why this went unnoticed until Company Fundamentals' Financial
+    Currency field (routinely None for any ETF, unlike market_profile_cache's fields,
+    which always have a fallback value for a successful row) started tripping it on a
+    real >1-symbol live fetch."""
+    if value is None or value != value:
         return "NULL"
     return "'" + str(value).replace("'", "''") + "'"
 
@@ -816,6 +842,89 @@ def fetch_market_profile_cache(conn=None):
     df["Ex-Date"] = pd.to_datetime(df["Ex-Date"])
     df["Fetched At"] = pd.to_datetime(df["Fetched At"])
     df["History90D"] = df["History90D"].apply(lambda v: json.loads(v) if isinstance(v, str) else [])
+    return df
+
+
+def save_fundamentals_cache(rows: list[dict], conn=None):
+    """Upserts one row per symbol into fundamentals_cache -- V4.10's durable fallback
+    for market_data.fetch_fundamentals(), the same "don't blank the page on a rate
+    limit" precedent save_market_profile_cache established for Monitor Stocks. `rows`
+    matches fetch_fundamentals()'s own successful-row shape (Symbol/Currency/Financial
+    Currency/Current Price/Target Mean Price/Number Of Analysts/Income Statement/
+    Balance Sheet/Cash Flow) -- only ever called with rows that DID succeed live.
+
+    INSERT OR REPLACE since `symbol` is the table's PRIMARY KEY. Batched into a single
+    executescript() call, same reasoning as save_market_profile_cache. Income
+    Statement/Balance Sheet/Cash Flow are JSON-encoded (each a plain
+    {row_label: {date_str: value}} dict, no native SQLite nested-object type); Target
+    Mean Price/Number Of Analysts are legitimately None for a symbol with no analyst
+    coverage (e.g. an ETF) -- stored as SQL NULL, not treated as a failure."""
+    import json
+
+    import pandas as pd
+
+    def _num(value):
+        return "NULL" if value is None or pd.isna(value) else repr(float(value))
+
+    c, should_close = _with_connection(conn)
+    statements = []
+    for row in rows:
+        statements.append(
+            "INSERT OR REPLACE INTO fundamentals_cache "
+            "(symbol, currency, financial_currency, income_json, balance_json, "
+            "cashflow_json, current_price, target_mean_price, number_of_analysts, "
+            "fetched_at) VALUES ("
+            f"{_sql_literal(row['Symbol'])}, {_sql_literal(row.get('Currency'))}, "
+            f"{_sql_literal(row.get('Financial Currency'))}, "
+            f"{_sql_literal(json.dumps(row.get('Income Statement') or {}))}, "
+            f"{_sql_literal(json.dumps(row.get('Balance Sheet') or {}))}, "
+            f"{_sql_literal(json.dumps(row.get('Cash Flow') or {}))}, "
+            f"{_num(row.get('Current Price'))}, {_num(row.get('Target Mean Price'))}, "
+            f"{_num(row.get('Number Of Analysts'))}, datetime('now'));"
+        )
+    try:
+        c.executescript("\n".join(statements))
+        c.commit()
+    except Exception:
+        c.rollback()
+        raise
+    finally:
+        if should_close:
+            c.close()
+
+
+def fetch_fundamentals_cache(conn=None):
+    """Returns a DataFrame (Symbol, Currency, Financial Currency, Current Price,
+    Target Mean Price, Number Of Analysts, Income Statement, Balance Sheet, Cash
+    Flow, Fetched At) -- V4.10's durable fallback source for Company Fundamentals'
+    DB-first read, mirroring fetch_market_profile_cache exactly. Income
+    Statement/Balance Sheet/Cash Flow are JSON-decoded back into plain nested dicts;
+    Target Mean Price/Number Of Analysts can be real None (no analyst coverage, not a
+    fetch failure); Fetched At is parsed back into a real Timestamp. A symbol never
+    successfully fetched at least once just isn't present here -- same "absence means
+    never captured" convention fetch_market_profile_cache already uses."""
+    import json
+
+    import pandas as pd
+
+    c, should_close = _with_connection(conn)
+    df = _read_sql(
+        c, "SELECT symbol, currency, financial_currency, income_json, balance_json, "
+        "cashflow_json, current_price, target_mean_price, number_of_analysts, "
+        "fetched_at FROM fundamentals_cache",
+    )
+    if should_close:
+        c.close()
+    df = df.rename(columns={
+        "symbol": "Symbol", "currency": "Currency", "financial_currency": "Financial Currency",
+        "income_json": "Income Statement", "balance_json": "Balance Sheet",
+        "cashflow_json": "Cash Flow", "current_price": "Current Price",
+        "target_mean_price": "Target Mean Price", "number_of_analysts": "Number Of Analysts",
+        "fetched_at": "Fetched At",
+    })
+    df["Fetched At"] = pd.to_datetime(df["Fetched At"])
+    for col in ("Income Statement", "Balance Sheet", "Cash Flow"):
+        df[col] = df[col].apply(lambda v: json.loads(v) if isinstance(v, str) else {})
     return df
 
 

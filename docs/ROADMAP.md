@@ -3484,8 +3484,155 @@ produces correct, non-`NaN` prices and weights with zero live fetch
 attempted -- directly demonstrating the fallback holds even if yfinance
 is completely unreachable.
 
+## V4.10: Company Fundamentals
+
+Branch `v4.10-company-fundamentals`, cut from `main` after v4.9.3
+merged in.
+
+### Context
+
+Grew out of an in-chat exploration of what fundamentals `yfinance`
+actually exposes (income statement, balance sheet, cash flow, analyst
+price targets) run against the user's real holdings, followed by an
+HTML mockup the user iterated on and approved. This built that mockup
+into a real page: a new **Company Fundamentals** entry under the
+sidebar's Analysis section, showing one holding's real financial
+statements plus an Analyst Target valuation.
+
+Two design choices were confirmed with the user up front (AskUserQuestion)
+in favor of consistency with the existing app over an exact visual match
+to the mockup: reuse the category-radio + `st.selectbox` symbol picker
+already proven on Auto Trendline, rather than building a new custom
+searchable/sector-grouped component; and use the app's existing 4-way
+All/Others/Dividend/Growth category vocabulary rather than the mockup's
+simplified 2-way Dividend/Growth switch.
+
+### Design decisions
+
+**New DB table** `fundamentals_cache`, one row per symbol, mirroring
+`market_profile_cache`'s shape and precedent (V4.5): `currency`,
+`financial_currency`, `income_json`/`balance_json`/`cashflow_json`
+(each the **entire** statement, not a hand-picked subset -- every row
+`yfinance` returns, JSON-encoded as `{row_label: {date_str: value}}`),
+`current_price`, `target_mean_price`, `number_of_analysts`, `fetched_at`.
+Storing the full statement means the page's "View all line items"
+expander shows genuinely complete real data; the curated top-of-tab
+tables just pick a fixed handful of row labels out of that same dict at
+render time.
+
+**`core/market_data.py::fetch_fundamentals()`**, sibling to
+`fetch_stock_profile()`, same "never abort, blank row on failure"
+convention. Confirmed empirically before writing any of this: `income_stmt`
+has 4 fiscal years of columns, `balance_sheet`/`cashflow` have 5 (each
+statement keeps its own year range); real row labels this page pulls
+by name (`Total Revenue`, `Gross Profit`, `Operating Income`, `Net
+Income`, `Diluted EPS`, `Total Assets`, `Total Debt`, `Cash And Cash
+Equivalents`, `Stockholders Equity`, `Current Assets`, `Current
+Liabilities`, `Operating Cash Flow`, `Capital Expenditure`, `Free Cash
+Flow`, `Cash Dividends Paid` -- the last absent for non-payers, read
+defensively); an ETF (confirmed on SPY) has `targetMeanPrice`/
+`numberOfAnalystOpinions` as `None` (not 0, not missing) and an
+entirely **empty** `income_stmt` -- no statements at all, not just no
+coverage; `currentPrice` stays populated even then, so it's the
+function's own failure signal (`NaN` means the live fetch itself
+failed), the same role `Latest Price` plays in `fetch_stock_profile()`.
+Raw `yfinance` statement values are absolute dollars (confirmed:
+MSFT's latest `Total Revenue` is `~3.3e11`), not pre-scaled -- the page
+divides by `1e6` for display and labels the unit, except `Diluted EPS`
+which is already a per-share dollar figure.
+
+**`core/calculations.py::apply_fundamentals_fallback()`**, a direct
+sibling of `apply_market_profile_fallback()` -- same NaN-`Current
+Price`-means-failed / `Stale` flag / never-prefer-stale-over-fresh
+logic, over this feature's own column set. "No analyst coverage" and
+"no statements" are legitimate zero-value results, never mistaken for
+a failed fetch.
+
+**`core/db.py::save_fundamentals_cache()`/`fetch_fundamentals_cache()`**,
+following `save_market_profile_cache`/`fetch_market_profile_cache`'s
+exact shape (`INSERT OR REPLACE`, batched into one `executescript()`).
+
+**`app_pages/company_fundamentals.py`** (new page): category-radio +
+`st.selectbox` picker (identical shape to Auto Trendline's own Zone 1);
+DB-first read for just the one selected symbol via a page-local
+`_cached_read_fundamentals_from_db`/`_refresh_fundamentals_live` pair
+(mirroring Monitor Stocks' own, but scoped to one symbol at a time
+since this page never needs the whole portfolio); a generic currency
+-mismatch warning (`currency != financial_currency`, confirmed real for
+TSM -- USD quote, TWD statements -- fires for any symbol with the same
+mismatch, not a TSM special case); a Valuation card (Current Price vs.
+Analyst Target mean, the % gap, an Overvalued/Undervalued/Fair value
+badge at the ±2% band used throughout the chat exploration that led
+here, "No analyst coverage" when there's none); a KPI row (Revenue/Net
+Income/Free Cash Flow/Total Debt, each with a YoY delta and a 4-year
+sparkline -- ported from the mockup after it was pointed out as
+missing from the first pass); an Overview tab (key ratios + a
+Plotly Revenue/Net Income combo chart); Income Statement/Balance
+Sheet/Cash Flow tabs (a curated table of known-unit rows, plus a "View
+all line items" expander showing every other row in its native,
+unformatted units -- deliberately not forced into the curated table's
+money/EPS formatting, since the raw leftovers mix dollar amounts,
+per-share figures, and share counts with no metadata telling them
+apart); and an explicit empty state when a symbol (an ETF or fund) has
+no statements at all.
+
+Deliberately excludes every other fair-price method explored in the
+chat that led here (DCF, Graham Number, PEG-based) -- only Analyst
+Target ships, per that discussion's own conclusion that it's the one
+method built from real data with no per-symbol data-quality caveats to
+work around.
+
+### Bugs found and fixed
+
+Two real bugs surfaced while verifying against the full real portfolio
+(55 holdings, not just a few hand-picked symbols) -- both from the same
+root cause: a value that is Python `None` for one symbol but sits in a
+pandas column alongside a real value for another symbol silently
+becomes a float `NaN`, not `None` (confirmed: `pd.DataFrame(list_of_dicts)`
+does this, and so does reading back multiple rows from SQL).
+
+1. **`core/db.py::_sql_literal()`** only treated `None` as SQL `NULL` --
+   a `NaN` fell through to `str(value)` and got stored as the *literal
+   text* `"nan"`. This is a **latent bug in shared infrastructure**:
+   `save_market_profile_cache()` uses the same helper for `Description`/
+   `Sector`/etc., but never actually triggered it in production since
+   Monitor Stocks' fallback fields always resolve to a real value for a
+   successful row. `Financial Currency` (routinely `None` for any ETF)
+   triggers it on nearly every batched fetch. Fixed by also treating
+   `value != value` (true only for `NaN`) as `NULL`; added regression
+   tests for both `fundamentals_cache` and `market_profile_cache`; 24
+   already-corrupted rows in the dev DB were deleted so they recapture
+   cleanly.
+2. **The page's own currency-mismatch check** used plain truthiness
+   (`if row["Financial Currency"]`) -- but `NaN` is *truthy* in Python,
+   so a `NULL` read back from a multi-row query was firing the mismatch
+   banner on 24 of the portfolio's 27 ETFs. Fixed to use `pd.notna()`;
+   the analyst-count line (`int(row["Number Of Analysts"])`) had the
+   same latent crash risk (`int(float("nan"))` raises) and got the same
+   fix.
+
+### Testing and verification
+
+456/456 tests passing. Verified against real `yfinance` data and the
+real dev Turso database throughout (not just injected fakes): a direct
+end-to-end save/round-trip check before building the page's UI, then a
+full sweep of all 55 real current holdings after the page was built,
+exercising every real code path (picker, valuation, ratios, curated/raw
+tables, KPI row) with zero exceptions -- including 29 ETF-shaped
+holdings (empty-statement path), a closed-end fund with no analyst
+coverage, the real TSM currency mismatch, and one options-contract
+position that `yfinance` can't resolve at all (handled the same as any
+other unresolvable symbol -- no crash, just absent from the cache until
+a live fetch succeeds).
+
 ## Deferred / future
 
+- **A "view" link from Monitor Stocks straight into Company
+  Fundamentals** (the way Auto Trendline is reachable via a query
+  param) -- natural follow-up, not built in V4.10 to keep its first
+  version scoped to what was actually designed in the mockup.
+- **Quarterly statements / a period toggle on Company Fundamentals** --
+  annual-only in V4.10, matching the mockup.
 - **Restore from a backup** -- see V2.3's "Considered and explicitly
   deferred" note above.
 - Specific-lot *selection* on sell (FIFO-only today). (Live market-price
