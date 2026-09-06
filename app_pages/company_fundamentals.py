@@ -155,38 +155,19 @@ with st.expander("What does this page do?"):
     )
 
 
-@st.cache_data
-def _cached_read_fundamentals_from_db(symbols: list[str]) -> pd.DataFrame:
-    """V4.10 -- Company Fundamentals' normal read path: DB-first, mirroring Monitor
-    Stocks' own _cached_read_stock_profile_from_db (app_pages/monitor_stocks.py) --
-    never calls yfinance for a symbol already captured before. Normal navigation
-    reads fundamentals_cache directly and only touches yfinance when "Refresh now" is
-    explicitly clicked, or for a symbol never captured before (fetched live exactly
-    once, right here, and saved -- same precedent as Monitor Stocks' own DB-first read).
-
-    No ttl -- the point of caching this at all is to skip a redundant DB read on every
-    rerun within a session, not to expire data on a timer; only .clear() (called by
-    _refresh_fundamentals_live) or a changed `symbols` list busts it."""
-    cached = db.fetch_fundamentals_cache()
-    cached_symbols = set(cached["Symbol"]) if not cached.empty else set()
-    missing = [s for s in symbols if s not in cached_symbols]
-    if missing:
-        live_missing = market_data.fetch_fundamentals(missing)
-        successful = live_missing[live_missing["Current Price"].notna()]
-        if not successful.empty:
-            db.save_fundamentals_cache(successful.to_dict("records"))
-        cached = db.fetch_fundamentals_cache()
-    return cached[cached["Symbol"].isin(symbols)]
 
 
 def _refresh_fundamentals_live(symbols: list[str]) -> int:
     """"Refresh now" button's handler -- the live-fetch-with-fallback logic, mirroring
-    Monitor Stocks' own _refresh_stock_profile_live. calculations.
+    Monitor Stocks' own _refresh_stock_profile_live. Deliberately stays page-local
+    (not promoted to cached_db.py like the DB-first read below it) -- matches this
+    app's own established precedent (V4.9.3 gave rebalance.py its own local mirror
+    of Monitor Stocks' refresh handler rather than sharing one). calculations.
     apply_fundamentals_fallback() replaces any row that fails THIS live attempt with
     the last real values captured in fundamentals_cache, if any. Rows that DID succeed
     live get upserted right after -- deliberately only the successful ones, so a still
     -blocked symbol never overwrites a real captured value with another blank. Busts
-    _cached_read_fundamentals_from_db so the very next read reflects what was just
+    cached_db.fundamentals_summary() so the very next read reflects what was just
     fetched. Returns the count of symbols that failed THIS live attempt."""
     live = market_data.fetch_fundamentals(symbols)
     cached = db.fetch_fundamentals_cache()
@@ -196,7 +177,7 @@ def _refresh_fundamentals_live(symbols: list[str]) -> int:
     if not fresh_rows.empty:
         db.save_fundamentals_cache(fresh_rows.drop(columns=["Stale", "Fetched At"]).to_dict("records"))
 
-    _cached_read_fundamentals_from_db.clear()
+    cached_db.invalidate_fundamentals_summary()
     return int(merged["Stale"].sum())
 
 
@@ -229,7 +210,7 @@ just_refreshed_stale = False
 if st.button("Refresh now", help="Fetch the latest live data from yfinance now (normal page loads read from the database instead)."):
     just_refreshed_stale = bool(_refresh_fundamentals_live([symbol]))
 
-profile = _cached_read_fundamentals_from_db([symbol])
+profile = cached_db.fundamentals_summary([symbol])
 if profile.empty:
     st.warning(f"Couldn't fetch fundamentals for {symbol}.")
     st.stop()
@@ -267,18 +248,14 @@ balance = row["Balance Sheet"]
 # current price and the Overvalued/Undervalued/Fair value labeling (>+2%/<-2%/between).
 # ---------------------------------------------------------------------------------
 st.subheader("Valuation — Analyst Target")
+current_price = row["Current Price"]
 target = row["Target Mean Price"]
-if target is None or pd.isna(target):
+assessment = calculations.valuation_assessment(current_price, target)
+if assessment["verdict"] == "No coverage":
     st.info("No analyst coverage.")
 else:
-    current_price = row["Current Price"]
-    pct = (current_price - target) / target * 100
-    if pct > 2:
-        verdict = "Overvalued"
-    elif pct < -2:
-        verdict = "Undervalued"
-    else:
-        verdict = "Fair value"
+    pct = assessment["pct"]
+    verdict = assessment["verdict"]
     # pd.notna(), not plain truthiness -- int(float("nan")) raises, and a NaN read
     # back from a multi-row query is truthy, so a bare `if row[...]` wouldn't even
     # catch it before the crash.
