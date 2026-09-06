@@ -3625,6 +3625,36 @@ position that `yfinance` can't resolve at all (handled the same as any
 other unresolvable symbol -- no crash, just absent from the cache until
 a live fetch succeeds).
 
+## V4.10.1: Company Fundamentals Readability Polish
+
+Branch `v4.10.1-kpi-sparkline-height`, cut from `main` after v4.10
+merged in. Live-testing tweak round, same shape as V4.4.1/V4.5.2's own
+tweak-round commits -- four rounds of direct user feedback after
+reviewing the shipped V4.10 page, each fixed and re-verified before the
+next:
+
+- KPI row sparklines (`st.bar_chart`) were nearly flat at `height=60` --
+  bumped to `150`.
+- The sparkline x-axis showed meaningless array positions (`0,1,2,3,4`)
+  instead of real dates, because a bare Python list was passed instead
+  of a labeled `pd.Series` -- fixed to index by the real period-end
+  date, then simplified further to year-only per a follow-up request.
+- Added `help=` tooltips to every KPI/ratio/valuation metric (Gross
+  Margin, Debt/Equity, Analyst Target, etc.) explaining what each one
+  means in plain English, plus a "What do these line items mean?"
+  glossary expander under each statement table.
+- Added a "Trend" sparkline column to each statement tab's curated
+  table, right after the line-item label. First attempt used
+  `st.column_config.BarChartColumn` with `None` for a missing data
+  point, which silently fell back to rendering the raw Python list as
+  comma-separated text instead of a chart (confirmed via screenshot,
+  not guessed) -- fixed by using `0.0` instead of `None`, and switched
+  to `LineChartColumn` to match the line-sparkline style the user
+  actually wanted (an earlier bar-style attempt didn't match).
+
+456/456 tests passing (page-level UI change, no new test surface).
+Merged into `main`, tagged `v4.10.1`.
+
 ## Deferred / future
 
 - **A "view" link from Monitor Stocks straight into Company
