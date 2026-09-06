@@ -1,5 +1,26 @@
 # Changelog
 
+## Company Fundamentals (v4.10)
+
+New **Company Fundamentals** page (Analysis section) -- one holding's
+real income statement, balance sheet, and cash flow, plus an Analyst
+Target valuation.
+
+- Pick a holding (same category filter as Auto Trendline) to see its
+  Current Price vs. real sell-side analysts' own average price target,
+  labeled Overvalued/Undervalued/Fair value.
+- Revenue, Net Income, Free Cash Flow, and Total Debt at a glance, each
+  with a year-over-year change and a 4-year trend.
+- Key ratios (Gross Margin, Operating Margin, Return on Equity,
+  Debt/Equity, Current Ratio) and a Revenue/Net Income chart.
+- Full Income Statement, Balance Sheet, and Cash Flow tabs -- the
+  common line items up top, everything else Yahoo Finance reports
+  available in a "View all line items" expander.
+- Flags when a holding's statements are reported in a different
+  currency than its quote (e.g. a foreign ADR like TSM), and when an
+  ETF/fund has no financial statements or analyst coverage to show.
+- No breaking changes. Full test suite: 456/456 passing.
+
 ## Hotfix: Rebalance & Reallocate's Blank Pie Charts (v4.9.3)
 
 Fixes the Summary section on Rebalance & Reallocate (four pie charts)
