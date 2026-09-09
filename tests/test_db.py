@@ -437,6 +437,50 @@ class TestSymbolTypesOpenCategoryMigration:
         rows = dict(c.execute("SELECT symbol, allocation_type FROM symbol_types").fetchall())
         assert rows == {"AAPL": "Growth", "SHV": "Dividend"}
 
+
+class TestFundamentalsCacheColumnMigration:
+    """Simulates the real, already-shipped V4.10 schema (no Company Profile columns)
+    directly via SQL, bypassing init_db()/the module `conn` fixture (which already
+    builds on the new schema) -- proves the migration is safe against a real
+    already-populated table before it ever runs against the live Turso database.
+    See core/db.py's _migrate_fundamentals_cache_columns()."""
+
+    def _old_schema_conn(self):
+        c = sqlite3.connect(":memory:")
+        c.execute(
+            "CREATE TABLE fundamentals_cache ("
+            "symbol TEXT PRIMARY KEY, currency TEXT, financial_currency TEXT, "
+            "income_json TEXT, balance_json TEXT, cashflow_json TEXT, "
+            "current_price REAL, target_mean_price REAL, number_of_analysts INTEGER, "
+            "fetched_at TEXT NOT NULL)"
+        )
+        return c
+
+    def test_migration_preserves_existing_rows_and_adds_new_columns_as_null(self):
+        c = self._old_schema_conn()
+        c.execute(
+            "INSERT INTO fundamentals_cache (symbol, currency, current_price, fetched_at) "
+            "VALUES ('MSFT', 'USD', 452.0, datetime('now'))"
+        )
+        c.commit()
+
+        db.init_db(conn=c)
+
+        row = c.execute(
+            "SELECT symbol, currency, current_price, business_summary, employees "
+            "FROM fundamentals_cache WHERE symbol = 'MSFT'"
+        ).fetchone()
+        assert row[:3] == ("MSFT", "USD", 452.0)
+        assert row[3] is None  # business_summary
+        assert row[4] is None  # employees
+
+    def test_migration_is_idempotent_across_repeated_init_db_calls(self):
+        c = self._old_schema_conn()
+        db.init_db(conn=c)
+        db.init_db(conn=c)  # must not raise "duplicate column name"
+        existing = {row[1] for row in c.execute("PRAGMA table_info(fundamentals_cache)").fetchall()}
+        assert {"business_summary", "industry", "sector", "employees", "country", "city"} <= existing
+
     def test_migration_allows_a_new_category_afterward(self):
         c = self._old_schema_conn()
         c.commit()
@@ -790,6 +834,9 @@ class TestFundamentalsCache:
             "Balance Sheet": {"Total Assets": {"2026-06-30": 512163.0}},
             "Cash Flow": {"Free Cash Flow": {"2026-06-30": 74071.0}},
             "Current Price": 452.0, "Target Mean Price": 486.5, "Number Of Analysts": 42,
+            "Business Summary": "Microsoft Corporation develops and licenses software.",
+            "Industry": "Software - Infrastructure", "Sector": "Technology",
+            "Employees": 228000, "Country": "United States", "City": "Redmond",
         }
         row.update(overrides)
         return row
@@ -808,7 +855,27 @@ class TestFundamentalsCache:
         assert row["Current Price"] == 452.0
         assert row["Target Mean Price"] == 486.5
         assert row["Number Of Analysts"] == 42
+        assert row["Business Summary"] == "Microsoft Corporation develops and licenses software."
+        assert row["Industry"] == "Software - Infrastructure"
+        assert row["Sector"] == "Technology"
+        assert row["Employees"] == 228000
+        assert row["Country"] == "United States"
+        assert row["City"] == "Redmond"
         assert pd.notna(row["Fetched At"])
+
+    def test_no_company_profile_stored_and_fetched_as_none_not_a_crash(self, conn):
+        # A real, valid outcome for some ETFs -- yfinance has no business summary/
+        # industry/employees for them, not a failure case.
+        db.save_fundamentals_cache(
+            [self._row(**{
+                "Business Summary": None, "Industry": None, "Sector": None,
+                "Employees": None, "Country": None, "City": None,
+            })], conn=conn,
+        )
+        result = db.fetch_fundamentals_cache(conn=conn)
+        row = result.iloc[0]
+        assert pd.isna(row["Business Summary"])
+        assert pd.isna(row["Employees"])
 
     def test_upsert_replaces_rather_than_duplicates(self, conn):
         db.save_fundamentals_cache([self._row()], conn=conn)

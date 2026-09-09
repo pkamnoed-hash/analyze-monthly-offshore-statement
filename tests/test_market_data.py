@@ -366,7 +366,10 @@ class TestFetchFundamentals:
         yf_module = FakeYfModule({
             "MSFT": FakeTicker(
                 info={"currentPrice": 452.0, "targetMeanPrice": 486.5, "numberOfAnalystOpinions": 42,
-                      "currency": "USD", "financialCurrency": "USD"},
+                      "currency": "USD", "financialCurrency": "USD",
+                      "longBusinessSummary": "Microsoft Corporation develops and licenses software.",
+                      "industry": "Software - Infrastructure", "sector": "Technology",
+                      "fullTimeEmployees": 228000, "country": "United States", "city": "Redmond"},
                 income_stmt=income, balance_sheet=balance, cashflow=cashflow,
             ),
         })
@@ -383,6 +386,12 @@ class TestFetchFundamentals:
         assert row["Income Statement"]["Total Revenue"]["2026-06-30"] == pytest.approx(245122.0)
         assert row["Balance Sheet"]["Total Assets"]["2026-06-30"] == pytest.approx(512163.0)
         assert row["Cash Flow"]["Free Cash Flow"]["2026-06-30"] == pytest.approx(74071.0)
+        assert row["Business Summary"] == "Microsoft Corporation develops and licenses software."
+        assert row["Industry"] == "Software - Infrastructure"
+        assert row["Sector"] == "Technology"
+        assert row["Employees"] == 228000
+        assert row["Country"] == "United States"
+        assert row["City"] == "Redmond"
 
     def test_currency_mismatch_is_captured_verbatim(self):
         # Real finding: TSM's quote currency (USD, the ADR) differs from its
@@ -421,6 +430,10 @@ class TestFetchFundamentals:
         assert row["Income Statement"] == {}
         assert row["Balance Sheet"] == {}
         assert row["Cash Flow"] == {}
+        # Company Profile fields absent from `info` here -- a real, valid outcome for
+        # some ETFs, not a failure -- .get() returns None rather than raising.
+        assert row["Business Summary"] is None
+        assert row["Employees"] is None
 
     def test_current_price_falls_back_to_regular_market_price(self):
         yf_module = FakeYfModule({
@@ -449,6 +462,18 @@ class TestFetchFundamentals:
         assert result.empty
         assert "Symbol" in result.columns
         assert "Income Statement" in result.columns
+        assert "Business Summary" in result.columns
+        assert "Employees" in result.columns
+
+    def test_failed_fetch_leaves_company_profile_fields_blank_too(self):
+        yf_module = FakeYfModule({"GHOST": FakeTicker(info={"currency": "USD"})})
+
+        result = fetch_fundamentals(["GHOST"], yf_module=yf_module)
+
+        row = result.iloc[0]
+        assert row["Business Summary"] is None
+        assert row["Industry"] is None
+        assert row["Employees"] is None
 
     def test_nan_cells_in_statement_normalize_to_none(self):
         income = _statement({"Research And Development": [float("nan")]}, ["2026-06-30"])

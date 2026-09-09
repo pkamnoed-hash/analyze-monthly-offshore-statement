@@ -1,5 +1,20 @@
 # Changelog
 
+## Free-Text Symbol Search + Company Profile (v4.12)
+
+Two requested additions to Company Fundamentals: look up any stock, and
+see its business profile at a glance.
+
+- **Search any symbol** -- a new free-text box alongside the holdings
+  picker, not limited to your current holdings; any ticker `yfinance`
+  can resolve now works.
+- New **Company Profile** section (business description, Industry,
+  Sector, Employees, Market) shown before the Valuation card -- sourced
+  from data already fetched, no extra load time.
+- Existing cached symbols are backfilled with profile data automatically
+  behind the scenes.
+- No breaking changes. Full test suite: 469/469 passing.
+
 ## Fundamentals on Monitor Stocks (v4.11)
 
 Brings Company Fundamentals' Analyst Target valuation into Monitor
