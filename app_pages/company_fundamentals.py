@@ -182,29 +182,44 @@ def _refresh_fundamentals_live(symbols: list[str]) -> int:
 
 
 # ---------------------------------------------------------------------------------
-# Zone 1: category filter -> symbol picker, same category vocabulary and
-# radio-filter pattern as Auto Trendline / Monitor Stocks (see
-# app_pages/symbol_analysis.py's own Zone 1).
+# Zone 1: category filter -> symbol picker (your current holdings), same category
+# vocabulary and radio-filter pattern as Auto Trendline / Monitor Stocks (see
+# app_pages/symbol_analysis.py's own Zone 1) -- plus a free-text search for any
+# OTHER symbol, added per direct user request ("can I look up a stock I don't
+# hold?"). The free-text box takes priority whenever it has something typed into
+# it. No data-layer change needed for this: cached_db.fundamentals_summary()/
+# market_data.fetch_fundamentals() below already resolve any valid ticker, not
+# just a held one -- this is purely a second input feeding the same `symbol`.
 # ---------------------------------------------------------------------------------
 positions = calculations.compute_current_positions(cached_db.cached_fetch_trades())
 symbol_types = cached_db.cached_fetch_symbol_types()
 
 available = positions.merge(symbol_types, on="Symbol", how="left")
 available["Allocation Type"] = available["Allocation Type"].fillna("Others")
-if available.empty:
-    st.info("No current holdings to look up.")
-    st.stop()
 
-category = st.radio(
-    "Filter by type", ["All", "Others", "Dividend", "Growth"],
-    horizontal=True, label_visibility="collapsed", key="company_fundamentals_category_filter",
-)
-symbol_options = available if category == "All" else available[available["Allocation Type"] == category]
-if symbol_options.empty:
-    st.info(f"No current holdings in the {category} category.")
+holding_symbol = None
+if available.empty:
+    st.info("No current holdings to pick from -- search any symbol below instead.")
+else:
+    category = st.radio(
+        "Filter by type", ["All", "Others", "Dividend", "Growth"],
+        horizontal=True, label_visibility="collapsed", key="company_fundamentals_category_filter",
+    )
+    symbol_options = available if category == "All" else available[available["Allocation Type"] == category]
+    if symbol_options.empty:
+        st.info(f"No current holdings in the {category} category.")
+    else:
+        holding_symbol = st.selectbox("Symbol (your holdings)", sorted(symbol_options["Symbol"].tolist()))
+
+free_symbol = st.text_input(
+    "Or look up any other symbol", placeholder="e.g. AAPL",
+    key="company_fundamentals_free_symbol",
+    help="Not limited to your current holdings -- any ticker yfinance can resolve.",
+).strip().upper()
+
+symbol = free_symbol or holding_symbol
+if not symbol:
     st.stop()
-symbol = st.selectbox("Symbol", sorted(symbol_options["Symbol"].tolist()))
-symbol = symbol.upper()
 
 just_refreshed_stale = False
 if st.button("Refresh now", help="Fetch the latest live data from yfinance now (normal page loads read from the database instead)."):
@@ -224,6 +239,34 @@ if just_refreshed_stale:
 
 st.subheader(symbol)
 st.caption(f"Data last refreshed: {pd.Timestamp(row['Fetched At']).strftime('%d/%m/%Y %H:%M')}")
+
+# ---------------------------------------------------------------------------------
+# Company Profile -- straight from yfinance's own info dict (Business Summary,
+# Industry, Sector, Employees, headquarters location), confirmed field-for-field
+# against a real reference site's own "Company Profile" panel for BP. Skipped
+# entirely, not shown as an empty section, when none of these fields are present
+# (a real, valid outcome for some ETFs/funds).
+# ---------------------------------------------------------------------------------
+has_profile = any(
+    pd.notna(row.get(field)) for field in ("Business Summary", "Industry", "Sector", "Employees", "Country")
+)
+if has_profile:
+    prof_col, meta_col = st.columns([3, 1])
+    with prof_col:
+        st.subheader("Company Profile")
+        if pd.notna(row.get("Business Summary")):
+            st.write(row["Business Summary"])
+    with meta_col:
+        st.write("")  # rough vertical alignment with prof_col's subheader
+        if pd.notna(row.get("Industry")):
+            st.metric("Industry", row["Industry"])
+        if pd.notna(row.get("Sector")):
+            st.metric("Sector", row["Sector"])
+        if pd.notna(row.get("Employees")):
+            st.metric("Employees", f"{int(row['Employees']):,}")
+        market = ", ".join(v for v in (row.get("City"), row.get("Country")) if pd.notna(v))
+        if market:
+            st.metric("Market", market)
 
 # Generic currency/financialCurrency comparison -- fires for ANY holding with the
 # mismatch (confirmed real for TSM: USD quote, TWD statements), not a TSM special case.

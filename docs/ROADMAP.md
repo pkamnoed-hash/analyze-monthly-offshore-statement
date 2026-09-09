@@ -3758,6 +3758,112 @@ exact merge/assessment logic (not just a few hand-picked symbols)
 completed with zero exceptions -- 31 correctly read "No coverage"
 (ETFs plus one thin-coverage closed-end fund).
 
+## V4.12: Free-Text Symbol Search + Company Profile on Company Fundamentals
+
+Branch `v4.12-fundamentals-symbol-search`, cut from `main` after v4.11
+merged in.
+
+### Context
+
+Two related, direct user requests bundled onto one branch. First: after
+being shown ServiceNow's ("NOW") real fundamentals in a chat-session
+preview, the user asked whether Company Fundamentals could look up any
+stock, not just a current holding -- confirmed and approved, explicitly
+requiring a new branch be cut first. Second, once free-text search was
+working: a screenshot of BP's own "Company Profile" panel on a
+reference site (business description + Industry/Sector/Employees/
+Market, e.g. "London, United Kingdom"), asking for the same section on
+Company Fundamentals, positioned before the Valuation card. Both shown
+in a chat-session preview against real `yfinance`/dev-DB data (NOW,
+then BP) before being built into the app.
+
+### Design decisions
+
+**Free-text search added as a second input, not a replacement for the
+holdings picker** (`app_pages/company_fundamentals.py` Zone 1). The
+category-radio + `st.selectbox` picker stays exactly as V4.10 built it,
+now guarded to only render when `available` (current holdings) isn't
+empty; a new `st.text_input("Or look up any other symbol")` sits below
+it unconditionally. `symbol = free_symbol or holding_symbol` -- typing
+into the free-text box always wins, and `st.stop()` only fires if
+neither is set. No data-layer change was needed: `cached_db.
+fundamentals_summary()` / `market_data.fetch_fundamentals()` already
+resolve any ticker `yfinance` can, not just a held one -- V4.10 already
+built this generically, it just wasn't reachable when your holdings
+list was the only path in.
+
+**Company Profile pulled from the same `info` dict fundamentals
+already fetches** -- zero extra API calls. `core/market_data.py`'s
+`fetch_fundamentals()` now also reads `info["longBusinessSummary"]`,
+`info["industry"]`, `info["sector"]`, `info["fullTimeEmployees"]`, and
+`info["country"]`/`info["city"]`, confirmed field-for-field empirically
+against BP's own reference-site panel. Same empty-vs-failure shape as
+every other fundamentals field: blank/`None` for a symbol `yfinance`
+doesn't carry these for (ETFs confirmed to have `Business Summary` but
+not `Industry`/`Sector`/`Employees` -- the same equity-only-concept gap
+`fetch_stock_profile()`'s Sector/Industry ETF fallback already has),
+not treated as a fetch failure.
+
+**`fundamentals_cache` extended with a real schema migration**
+(`core/db.py`), not just new columns on the `CREATE TABLE` statement --
+the table already exists in every deployed database from V4.10, and
+`CREATE TABLE IF NOT EXISTS` is a no-op against it. New
+`_migrate_fundamentals_cache_columns()`, mirroring
+`_migrate_reference_lines_columns()`'s exact `PRAGMA table_info()` +
+guarded `ALTER TABLE ADD COLUMN` pattern, wired into `init_db()`
+alongside the other two migrations. `save_fundamentals_cache()`/
+`fetch_fundamentals_cache()` extended with the six new columns
+(Business Summary/Industry/Sector/Employees/Country/City).
+
+**Company Profile section is skipped entirely, not shown empty**, when
+none of Business Summary/Industry/Sector/Employees/Country are present
+-- a real, valid outcome for some ETFs/funds, matching the page's
+existing currency-mismatch-banner convention of only rendering when
+there's something real to say. Rendered as two columns (`st.columns
+([3, 1])`): the business-summary paragraph on the left, four `st.metric`
+calls on the right (Industry/Sector/Employees/Market -- Market being
+`", ".join(City, Country)`, whichever half is present) -- `st.metric`
+for arbitrary text labels rather than numeric KPIs is already this
+page's own convention (the Valuation card's verdict). Positioned right
+after the symbol header and "Data last refreshed" caption, before the
+currency-mismatch banner, per the reference screenshot's own layout
+(profile above valuation).
+
+**A schema-migration data gap discovered and backfilled during
+verification, not shipped code**: a migration adds `NULL` columns to
+*existing* rows -- it doesn't retroactively re-fetch them. Confirmed
+live (GOOG, fetched fresh during testing, showed the section; EXEL,
+cached back in V4.10, didn't) and explained directly when asked ("why
+I see goog but I can't see Exel?"). Root-caused, then generalized:
+queried the real dev database for every `fundamentals_cache` row
+missing all six profile fields (59 symbols, not just EXEL), and ran a
+one-time backfill -- batched `market_data.fetch_fundamentals()` for all
+59 followed by `db.save_fundamentals_cache()` -- reusing the existing
+fetch/save functions rather than one-off scripts per symbol. 59
+succeeded, 0 failed. The dev server was also restarted (kill-by-port,
+not command-line matching, per this project's own established
+convention) specifically to clear `st.cache_data`'s in-memory,
+process-wide cache, which has no TTL and doesn't invalidate on a
+write from a separate script process -- confirmed the fix by reloading
+and re-checking EXEL. **The same 59-symbol gap exists in the real
+production database** until this backfill is also run there, or each
+symbol is naturally re-visited/refreshed post-deploy.
+
+### Testing and verification
+
+469/469 tests passing (4 new cases: `TestFetchFundamentals`'s
+happy-path/no-coverage/empty-list assertions extended with the profile
+fields, plus a new failed-fetch-leaves-profile-blank test;
+`TestFundamentalsCache`'s round-trip extended, plus a new
+no-profile-stored-as-None test; new `TestFundamentalsCacheColumnMigration`
+class mirroring `TestSymbolTypesOpenCategoryMigration`'s pre-migration
+old-schema-simulation pattern, covering both "preserves existing rows,
+adds new columns as null" and migration idempotency across repeated
+`init_db()` calls). Verified against the real dev Turso database and
+real `yfinance` data throughout, including the free-text search (NOW)
+and Company Profile (BP, then generalized to all 59 previously-cached
+symbols) chat-session previews shown before any code was written.
+
 ## Deferred / future
 
 - **A "view" link from Monitor Stocks straight into Company

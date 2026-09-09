@@ -148,6 +148,12 @@ SCHEMA_STATEMENTS = [
         current_price       REAL,
         target_mean_price   REAL,
         number_of_analysts  INTEGER,
+        business_summary    TEXT,
+        industry            TEXT,
+        sector              TEXT,
+        employees           INTEGER,
+        country             TEXT,
+        city                TEXT,
         fetched_at          TEXT NOT NULL
     )
     """,
@@ -191,6 +197,27 @@ _REFERENCE_LINES_MIGRATION_COLUMNS = {
 def _migrate_reference_lines_columns(c):
     existing = {row[1] for row in c.execute("PRAGMA table_info(reference_lines)").fetchall()}
     for column, statement in _REFERENCE_LINES_MIGRATION_COLUMNS.items():
+        if column not in existing:
+            c.execute(statement)
+
+
+# V4.12 -- fundamentals_cache shipped in V4.10 without the Company Profile fields
+# (business_summary/industry/sector/employees/country/city), added when the page
+# grew a "Company Profile" section. Same "CREATE TABLE IF NOT EXISTS is a no-op
+# against an already-shipped table" gap _migrate_reference_lines_columns exists for.
+_FUNDAMENTALS_CACHE_MIGRATION_COLUMNS = {
+    "business_summary": "ALTER TABLE fundamentals_cache ADD COLUMN business_summary TEXT",
+    "industry": "ALTER TABLE fundamentals_cache ADD COLUMN industry TEXT",
+    "sector": "ALTER TABLE fundamentals_cache ADD COLUMN sector TEXT",
+    "employees": "ALTER TABLE fundamentals_cache ADD COLUMN employees INTEGER",
+    "country": "ALTER TABLE fundamentals_cache ADD COLUMN country TEXT",
+    "city": "ALTER TABLE fundamentals_cache ADD COLUMN city TEXT",
+}
+
+
+def _migrate_fundamentals_cache_columns(c):
+    existing = {row[1] for row in c.execute("PRAGMA table_info(fundamentals_cache)").fetchall()}
+    for column, statement in _FUNDAMENTALS_CACHE_MIGRATION_COLUMNS.items():
         if column not in existing:
             c.execute(statement)
 
@@ -283,6 +310,7 @@ def init_db(conn=None):
         c.execute(statement)
     _migrate_reference_lines_columns(c)
     _migrate_symbol_types_open_category(c)
+    _migrate_fundamentals_cache_columns(c)
     c.commit()
     if should_close:
         c.close()
@@ -851,14 +879,17 @@ def save_fundamentals_cache(rows: list[dict], conn=None):
     limit" precedent save_market_profile_cache established for Monitor Stocks. `rows`
     matches fetch_fundamentals()'s own successful-row shape (Symbol/Currency/Financial
     Currency/Current Price/Target Mean Price/Number Of Analysts/Income Statement/
-    Balance Sheet/Cash Flow) -- only ever called with rows that DID succeed live.
+    Balance Sheet/Cash Flow, plus V4.12's Company Profile fields -- Business
+    Summary/Industry/Sector/Employees/Country/City) -- only ever called with rows
+    that DID succeed live.
 
     INSERT OR REPLACE since `symbol` is the table's PRIMARY KEY. Batched into a single
     executescript() call, same reasoning as save_market_profile_cache. Income
     Statement/Balance Sheet/Cash Flow are JSON-encoded (each a plain
     {row_label: {date_str: value}} dict, no native SQLite nested-object type); Target
-    Mean Price/Number Of Analysts are legitimately None for a symbol with no analyst
-    coverage (e.g. an ETF) -- stored as SQL NULL, not treated as a failure."""
+    Mean Price/Number Of Analysts/the Company Profile fields are legitimately None for
+    a symbol yfinance doesn't have them for (e.g. an ETF) -- stored as SQL NULL, not
+    treated as a failure."""
     import json
 
     import pandas as pd
@@ -873,6 +904,7 @@ def save_fundamentals_cache(rows: list[dict], conn=None):
             "INSERT OR REPLACE INTO fundamentals_cache "
             "(symbol, currency, financial_currency, income_json, balance_json, "
             "cashflow_json, current_price, target_mean_price, number_of_analysts, "
+            "business_summary, industry, sector, employees, country, city, "
             "fetched_at) VALUES ("
             f"{_sql_literal(row['Symbol'])}, {_sql_literal(row.get('Currency'))}, "
             f"{_sql_literal(row.get('Financial Currency'))}, "
@@ -880,7 +912,11 @@ def save_fundamentals_cache(rows: list[dict], conn=None):
             f"{_sql_literal(json.dumps(row.get('Balance Sheet') or {}))}, "
             f"{_sql_literal(json.dumps(row.get('Cash Flow') or {}))}, "
             f"{_num(row.get('Current Price'))}, {_num(row.get('Target Mean Price'))}, "
-            f"{_num(row.get('Number Of Analysts'))}, datetime('now'));"
+            f"{_num(row.get('Number Of Analysts'))}, "
+            f"{_sql_literal(row.get('Business Summary'))}, {_sql_literal(row.get('Industry'))}, "
+            f"{_sql_literal(row.get('Sector'))}, {_num(row.get('Employees'))}, "
+            f"{_sql_literal(row.get('Country'))}, {_sql_literal(row.get('City'))}, "
+            f"datetime('now'));"
         )
     try:
         c.executescript("\n".join(statements))
@@ -896,13 +932,15 @@ def save_fundamentals_cache(rows: list[dict], conn=None):
 def fetch_fundamentals_cache(conn=None):
     """Returns a DataFrame (Symbol, Currency, Financial Currency, Current Price,
     Target Mean Price, Number Of Analysts, Income Statement, Balance Sheet, Cash
-    Flow, Fetched At) -- V4.10's durable fallback source for Company Fundamentals'
-    DB-first read, mirroring fetch_market_profile_cache exactly. Income
-    Statement/Balance Sheet/Cash Flow are JSON-decoded back into plain nested dicts;
-    Target Mean Price/Number Of Analysts can be real None (no analyst coverage, not a
-    fetch failure); Fetched At is parsed back into a real Timestamp. A symbol never
-    successfully fetched at least once just isn't present here -- same "absence means
-    never captured" convention fetch_market_profile_cache already uses."""
+    Flow, Business Summary, Industry, Sector, Employees, Country, City, Fetched At)
+    -- V4.10's durable fallback source for Company Fundamentals' DB-first read,
+    mirroring fetch_market_profile_cache exactly. Income Statement/Balance
+    Sheet/Cash Flow are JSON-decoded back into plain nested dicts; Target Mean
+    Price/Number Of Analysts/the Company Profile fields can be real None (no
+    analyst coverage or no profile data, not a fetch failure); Fetched At is parsed
+    back into a real Timestamp. A symbol never successfully fetched at least once
+    just isn't present here -- same "absence means never captured" convention
+    fetch_market_profile_cache already uses."""
     import json
 
     import pandas as pd
@@ -911,6 +949,7 @@ def fetch_fundamentals_cache(conn=None):
     df = _read_sql(
         c, "SELECT symbol, currency, financial_currency, income_json, balance_json, "
         "cashflow_json, current_price, target_mean_price, number_of_analysts, "
+        "business_summary, industry, sector, employees, country, city, "
         "fetched_at FROM fundamentals_cache",
     )
     if should_close:
@@ -920,6 +959,8 @@ def fetch_fundamentals_cache(conn=None):
         "income_json": "Income Statement", "balance_json": "Balance Sheet",
         "cashflow_json": "Cash Flow", "current_price": "Current Price",
         "target_mean_price": "Target Mean Price", "number_of_analysts": "Number Of Analysts",
+        "business_summary": "Business Summary", "industry": "Industry", "sector": "Sector",
+        "employees": "Employees", "country": "Country", "city": "City",
         "fetched_at": "Fetched At",
     })
     df["Fetched At"] = pd.to_datetime(df["Fetched At"])

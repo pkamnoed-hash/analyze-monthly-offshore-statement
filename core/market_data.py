@@ -268,6 +268,12 @@ _FUNDAMENTALS_EMPTY_COLUMNS = {
     "Income Statement": "object",
     "Balance Sheet": "object",
     "Cash Flow": "object",
+    "Business Summary": "object",
+    "Industry": "object",
+    "Sector": "object",
+    "Employees": "float64",
+    "Country": "object",
+    "City": "object",
 }
 
 
@@ -327,6 +333,15 @@ def fetch_fundamentals(symbols: list[str], *, yf_module=None) -> pd.DataFrame:
     everywhere else. core.calculations.apply_fundamentals_fallback() checks exactly
     this field the same way apply_market_profile_fallback() checks `Latest Price`.
 
+    Also carries a Company Profile trio: `Business Summary` (`info["longBusinessSummary"]`,
+    the paragraph-length description), `Industry`/`Sector`, `Employees`
+    (`info["fullTimeEmployees"]`), and `Country`/`City` (headquarters location) --
+    confirmed empirically for BP p.l.c. against a real reference site's own "Company
+    Profile" panel, matching field-for-field. All read from the SAME `info` dict this
+    function already fetches for the valuation fields above, so this adds zero extra
+    API calls. Blank/`None` for a symbol yfinance doesn't have these for (e.g. some
+    ETFs) -- the page renders that as an absent field, not an error.
+
     `yf_module` can be injected for testing (see tests/test_market_data.py) --
     production callers always omit it and get the real yfinance module."""
     yf_module = yf_module or _yfinance
@@ -344,6 +359,7 @@ def fetch_fundamentals(symbols: list[str], *, yf_module=None) -> pd.DataFrame:
 
             target_mean = info.get("targetMeanPrice")
             num_analysts = info.get("numberOfAnalystOpinions")
+            employees = info.get("fullTimeEmployees")
 
             rows.append({
                 "Symbol": symbol,
@@ -355,6 +371,12 @@ def fetch_fundamentals(symbols: list[str], *, yf_module=None) -> pd.DataFrame:
                 "Income Statement": _statement_to_dict(ticker.income_stmt),
                 "Balance Sheet": _statement_to_dict(ticker.balance_sheet),
                 "Cash Flow": _statement_to_dict(ticker.cashflow),
+                "Business Summary": info.get("longBusinessSummary"),
+                "Industry": info.get("industry"),
+                "Sector": info.get("sector"),
+                "Employees": int(employees) if employees is not None else None,
+                "Country": info.get("country"),
+                "City": info.get("city"),
             })
         except Exception:
             rows.append({
@@ -367,6 +389,12 @@ def fetch_fundamentals(symbols: list[str], *, yf_module=None) -> pd.DataFrame:
                 "Income Statement": {},
                 "Balance Sheet": {},
                 "Cash Flow": {},
+                "Business Summary": None,
+                "Industry": None,
+                "Sector": None,
+                "Employees": None,
+                "Country": None,
+                "City": None,
             })
 
     if not rows:
