@@ -10,7 +10,9 @@ from core.calculations import (
     compute_current_positions,
     compute_fifo_realized_pl,
     compute_holding_period_start,
+    compute_holdings_pl,
     compute_horizontal_sr_zones,
+    compute_investment_gain,
     compute_moving_average,
     compute_realized_pl,
     compute_reference_lines,
@@ -22,6 +24,7 @@ from core.calculations import (
     estimate_sell_realized_pl,
     find_nearest_levels,
     find_swing_points,
+    is_ex_date_this_month,
     nearest_reference_cell,
     resample_ohlc,
     to_heikin_ashi,
@@ -1284,4 +1287,154 @@ class TestDescribeMarketProfileFreshness:
     def test_all_nat_returns_nat_and_no_variance(self):
         result = describe_market_profile_freshness(pd.Series([pd.NaT, pd.NaT]), pd.Series(["AAPL", "BLK"]))
         assert pd.isna(result["newest"])
+        assert pd.isna(result["oldest"])
+        assert result["oldest_symbol"] is None
         assert result["has_variance"] is False
+
+
+class TestIsExDateThisMonth:
+    def test_ex_date_in_the_current_month_is_true(self):
+        today = pd.Timestamp("2026-09-18")
+        assert is_ex_date_this_month(pd.Timestamp("2026-09-03"), today=today) is True
+
+    def test_ex_date_last_day_of_the_current_month_is_still_true(self):
+        today = pd.Timestamp("2026-09-18")
+        assert is_ex_date_this_month(pd.Timestamp("2026-09-30"), today=today) is True
+
+    def test_ex_date_in_a_different_month_is_false(self):
+        today = pd.Timestamp("2026-09-18")
+        assert is_ex_date_this_month(pd.Timestamp("2026-08-31"), today=today) is False
+
+    def test_ex_date_same_month_different_year_is_false(self):
+        today = pd.Timestamp("2026-09-18")
+        assert is_ex_date_this_month(pd.Timestamp("2025-09-18"), today=today) is False
+
+    def test_missing_ex_date_is_false_not_a_crash(self):
+        today = pd.Timestamp("2026-09-18")
+        assert is_ex_date_this_month(pd.NaT, today=today) is False
+        assert is_ex_date_this_month(None, today=today) is False
+
+    def test_defaults_today_to_the_real_current_date_when_omitted(self):
+        real_today = pd.Timestamp.today().normalize()
+        assert is_ex_date_this_month(real_today) is True
+
+
+def make_income(rows):
+    """Build a blended-income-shaped DataFrame (Symbol, Trade Date, Entry Type, Net
+    Amt) -- the shape blended_dividends() returns and compute_investment_gain expects."""
+    columns = ["Symbol", "Trade Date", "Entry Type", "Net Amt"]
+    df = pd.DataFrame(rows)
+    for col in columns:
+        if col not in df.columns:
+            df[col] = None
+    df["Trade Date"] = pd.to_datetime(df["Trade Date"])
+    return df[columns]
+
+
+class TestComputeInvestmentGain:
+    def test_totals_sum_realized_unrealized_dividends_and_interest(self):
+        realized_events = pd.DataFrame({
+            "Trade Date": pd.to_datetime(["2026-06-15", "2026-07-01"]),
+            "Realized P/L": [100.0, 50.0],
+        })
+        income = make_income([
+            {"Symbol": "AAPL", "Trade Date": "2026-06-20", "Entry Type": "Dividend", "Net Amt": 10.0},
+            {"Symbol": None, "Trade Date": "2026-06-25", "Entry Type": "Interest", "Net Amt": 2.0},
+        ])
+        result = compute_investment_gain(
+            realized_events, unrealized=500.0, blended_income=income,
+            start=pd.Timestamp("2026-06-01"), end=pd.Timestamp("2026-07-31"),
+        )
+        assert result["realized"] == pytest.approx(150.0)
+        assert result["unrealized"] == pytest.approx(500.0)
+        assert result["dividends"] == pytest.approx(10.0)
+        assert result["interest"] == pytest.approx(2.0)
+        assert result["total"] == pytest.approx(150.0 + 500.0 + 10.0 + 2.0)
+
+    def test_events_outside_the_date_range_are_excluded(self):
+        realized_events = pd.DataFrame({
+            "Trade Date": pd.to_datetime(["2026-05-31", "2026-06-15"]),
+            "Realized P/L": [999.0, 100.0],
+        })
+        income = make_income([
+            {"Symbol": "AAPL", "Trade Date": "2026-08-01", "Entry Type": "Dividend", "Net Amt": 999.0},
+        ])
+        result = compute_investment_gain(
+            realized_events, unrealized=0.0, blended_income=income,
+            start=pd.Timestamp("2026-06-01"), end=pd.Timestamp("2026-06-30"),
+        )
+        assert result["realized"] == pytest.approx(100.0)
+        assert result["dividends"] == pytest.approx(0.0)
+
+    def test_end_of_period_extends_through_the_full_end_month(self):
+        # end is the 1st of the month (this app's own Duration-filter convention);
+        # the range must still include trade dates later in that same month.
+        realized_events = pd.DataFrame({
+            "Trade Date": pd.to_datetime(["2026-06-28"]),
+            "Realized P/L": [42.0],
+        })
+        result = compute_investment_gain(
+            realized_events, unrealized=0.0, blended_income=make_income([]),
+            start=pd.Timestamp("2026-06-01"), end=pd.Timestamp("2026-06-01"),
+        )
+        assert result["realized"] == pytest.approx(42.0)
+
+    def test_a_dividend_type_row_with_no_symbol_is_excluded(self):
+        # Matches Dashboard's own dividends_by_symbol groupby, which can't group a
+        # null Symbol -- this total must never count a row that breakdown wouldn't.
+        income = make_income([
+            {"Symbol": None, "Trade Date": "2026-06-10", "Entry Type": "Dividend", "Net Amt": 77.0},
+        ])
+        result = compute_investment_gain(
+            pd.DataFrame({"Trade Date": pd.to_datetime([]), "Realized P/L": pd.Series(dtype=float)}),
+            unrealized=0.0, blended_income=income,
+            start=pd.Timestamp("2026-06-01"), end=pd.Timestamp("2026-06-30"),
+        )
+        assert result["dividends"] == pytest.approx(0.0)
+
+    def test_recognizes_both_xlsx_and_db_entry_type_vocabularies(self):
+        income = make_income([
+            {"Symbol": "AAPL", "Trade Date": "2026-06-01", "Entry Type": "Dividends", "Net Amt": 1.0},
+            {"Symbol": "MSFT", "Trade Date": "2026-06-02", "Entry Type": "Div. Adj(NRA Withheld)", "Net Amt": 2.0},
+            {"Symbol": "TSM", "Trade Date": "2026-06-03", "Entry Type": "Dividend", "Net Amt": 4.0},
+            {"Symbol": "VOO", "Trade Date": "2026-06-04", "Entry Type": "Capital Distribution", "Net Amt": 8.0},
+            {"Symbol": None, "Trade Date": "2026-06-05", "Entry Type": "Credit/Margin Interest", "Net Amt": 16.0},
+            {"Symbol": None, "Trade Date": "2026-06-06", "Entry Type": "Interest", "Net Amt": 32.0},
+        ])
+        result = compute_investment_gain(
+            pd.DataFrame({"Trade Date": pd.to_datetime([]), "Realized P/L": pd.Series(dtype=float)}),
+            unrealized=0.0, blended_income=income,
+            start=pd.Timestamp("2026-06-01"), end=pd.Timestamp("2026-06-30"),
+        )
+        assert result["dividends"] == pytest.approx(1.0 + 2.0 + 4.0 + 8.0)
+        assert result["interest"] == pytest.approx(16.0 + 32.0)
+
+
+class TestComputeHoldingsPl:
+    def test_total_pl_is_unrealized_plus_dividends_received(self):
+        result = compute_holdings_pl(
+            unrealized=pd.Series([100.0, -20.0]),
+            dividends_received=pd.Series([5.0, 0.0]),
+            cost_basis=pd.Series([1000.0, 200.0]),
+        )
+        assert result["Total P/L"].tolist() == pytest.approx([105.0, -20.0])
+        assert result["Total P/L %"].tolist() == pytest.approx([10.5, -10.0])
+
+    def test_zero_cost_basis_gives_nan_percent_not_a_divide_by_zero(self):
+        result = compute_holdings_pl(
+            unrealized=pd.Series([50.0]),
+            dividends_received=pd.Series([0.0]),
+            cost_basis=pd.Series([0.0]),
+        )
+        assert result["Total P/L"].iloc[0] == pytest.approx(50.0)
+        assert pd.isna(result["Total P/L %"].iloc[0])
+
+    def test_no_realized_pl_term_by_design(self):
+        # compute_holdings_pl never takes a realized-P/L input at all -- distinguishing
+        # it from compute_investment_gain, which does. This test documents that as a
+        # deliberate design choice (Monitor Stocks only tracks currently-held
+        # positions), not an oversight.
+        result = compute_holdings_pl(
+            unrealized=pd.Series([0.0]), dividends_received=pd.Series([0.0]), cost_basis=pd.Series([100.0]),
+        )
+        assert result["Total P/L"].iloc[0] == pytest.approx(0.0)

@@ -3864,6 +3864,123 @@ real `yfinance` data throughout, including the free-text search (NOW)
 and Company Profile (BP, then generalized to all 59 previously-cached
 symbols) chat-session previews shown before any code was written.
 
+## V4.13: Portfolio Q&A via Hermes/Telegram
+
+Branch `v4.13-hermes-portfolio-mcp`, cut from `main` after v4.12 merged in.
+Not an `app_pages/` change -- new `mcp_server/` folder plus a small
+extraction in `core/calculations.py`.
+
+### Context
+
+The user runs Hermes Agent (a separate CLI-based AI agent framework) as
+four Telegram bots on a personal DigitalOcean VPS, one of them ("Rich")
+themed around Stock & Investment. Direct request: let Rich answer real
+questions about this app's own portfolio data -- holdings count,
+Ex-Date, P/L, support/resistance -- instead of guessing from its own
+training knowledge. Discussed at length before any code: whether this
+needed MCP at all (Hermes already has generic code-execution tools, so
+technically no), landing on MCP anyway specifically so Rich reuses this
+repo's already-tested calculation logic rather than re-deriving
+P/L/Ex-Date/reference-line math itself and risking numbers that quietly
+disagree with what the app shows -- logic with real subtlety already
+debugged multiple times across this project's history (FIFO realized
+P/L, reference-line "passed" timestamps, dividend blending). Confirmed
+via research that Hermes supports MCP servers per-profile (local
+subprocess or remote, each bot has its own `config.yaml`) and that
+`core/db.py`/`core/calculations.py` have zero Streamlit dependency,
+reading Turso credentials from plain `os.environ` -- a standalone
+process can import and call them directly, no duplication.
+
+Also checked (read-only SSH) whether the VPS had RAM headroom for this
+before building: 657MB available of 1.9GB, no swap configured. A
+lighter dependency set than the full Streamlit app (no `streamlit`/
+`plotly`) was chosen specifically because of this.
+
+### Design decisions
+
+**Shared-logic extraction first, discovered mid-build to matter more
+than planned.** Two pieces of logic the MCP tools needed lived only as
+page-local code: the Ex-Date-this-month predicate (inlined in
+`monitor_stocks.py`'s cell-highlight styler) and "Total P/L" (page-level
+arithmetic in `dashboard.py`/`monitor_stocks.py`, not one function).
+Extracted to `core/calculations.py` as `is_ex_date_this_month()`,
+`compute_investment_gain()`, and `compute_holdings_pl()` -- both pages
+switched to calling these instead of their old inline code, verified
+against real dev data to produce byte-identical numbers to the
+pre-refactor version before any MCP code was written. Discovered while
+extracting: Dashboard's "Investment Gain/Loss" and Monitor Stocks' "Total
+P/L" aren't just different *scopes* of the same idea -- Dashboard's
+Unrealized component is the xlsx broker statement's own figure for the
+latest imported month (frozen, can lag real prices by up to ~1 month),
+while Monitor Stocks computes Unrealized live from real-time prices.
+Confirmed with the user (AskUserQuestion): `get_lifetime_pl` matches
+Dashboard exactly, staleness included, rather than inventing a third,
+always-fresh number that could disagree with what Dashboard itself
+shows -- its response text always names the statement date.
+
+**`mcp_server/portfolio_mcp.py`** -- a stdio MCP server (official `mcp`
+Python SDK) living inside this same repo (not a separate repo, not
+copied code), five tools:
+- `get_holdings_count` -- `len(calculations.compute_current_positions(...))`.
+- `get_upcoming_ex_dates` -- held symbols joined against
+  `db.fetch_market_profile_cache()`'s Ex-Date, filtered via the new
+  shared `is_ex_date_this_month()`.
+- `get_holdings_pl` -- live Unrealized (current cached price - cost
+  basis) + actual Dividends Received, via `compute_holdings_pl()`.
+  Discovered mid-build: Monitor Stocks' own "Dividends Received" is
+  ALSO blended with xlsx history (`blended_dividends()`), not a
+  DB-only figure as first assumed -- this tool reads the same xlsx
+  file to match exactly.
+- `get_lifetime_pl` -- all-time Realized + frozen-statement Unrealized
+  + all-time Dividends + Interest, via `compute_investment_gain()`
+  called with the full history range (mirrors Dashboard's own
+  Duration="All").
+- `get_reference_line_status` -- which held symbols have passed their
+  nearest support/resistance line, composing
+  `db.mark_reference_lines_passed()` + `db.fetch_reference_lines()` +
+  `calculations.nearest_reference_cell()` directly (the same pieces
+  `cached_db.reference_line_summary()` composes, just called outside
+  its `st.cache_data` wrapper) -- including the SAME auto-capture path
+  for a symbol never checked before. The only tool that writes
+  (reference-line "passed" timestamps, new captured lines) -- confirmed
+  with the user (AskUserQuestion) to keep the credential read-write
+  rather than strictly read-only, so this stays live instead of
+  possibly stale; the server's own code is the enforcement boundary
+  (never calls `save_trade`/`save_dividend`/`save_symbol_types`), since
+  Turso doesn't appear to support per-table token scoping.
+
+**Deliberately scoped to 5 tools for this first pass**, confirmed with
+the user (AskUserQuestion) after surfacing that the app has real Q&A
+surface these don't cover yet (dividend income, Dashboard's
+growth-vs-principal KPIs, Target Allocation status, Analyst Target
+valuation, Rebalance suggestions, detailed financials) -- ship these
+five, prove the pattern end-to-end with a real Telegram round-trip,
+then extend following the same pattern.
+
+### Testing and verification
+
+483/483 tests passing (`is_ex_date_this_month`/`compute_investment_gain`/
+`compute_holdings_pl` new cases in `tests/test_calculations.py`).
+Every tool additionally verified with a REAL stdio MCP protocol round
+trip (a genuine subprocess spawn + client connection, not just a direct
+function call) against the real dev Turso database: `get_holdings_pl`
+and `get_lifetime_pl` both cross-checked to the exact dollar against
+independent replicas of the pre-refactor page logic; `get_reference_line_status`
+verified to correctly reproduce the app's own already-documented SGOV/SHV
+edge case (zero swing candidates on a near-flat ETF) and safely skip an
+unresolvable options-contract symbol, rather than erroring.
+
+### Considered and explicitly deferred
+
+- **More tools** beyond the 5 shipped -- see "deliberately scoped" above.
+- **Per-table Turso token scoping** -- not a capability this session's
+  research found; the write-access boundary rests on the MCP server's
+  own code, not the database.
+- **Moving the whole Streamlit app onto the same VPS** -- discussed and
+  set aside separately (RAM headroom too tight without adding swap
+  first); unrelated to this MCP work, whose own footprint is much
+  lighter than the full app.
+
 ## Deferred / future
 
 - **A "view" link from Monitor Stocks straight into Company
