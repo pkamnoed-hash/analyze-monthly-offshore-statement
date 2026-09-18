@@ -7,6 +7,7 @@ import streamlit as st
 
 import cached_db
 from core.calculations import blended_dividends, blended_realized_pl
+from core.calculations import compute_investment_gain
 from core.calculations import compute_realized_pl as _compute_realized_pl
 from core.calculations import compute_roi
 from core.market_data import fetch_usd_thb_rate
@@ -236,11 +237,17 @@ dividend_types = ["Dividends", "Div. Adj(NRA Withheld)", "Dividend", "Capital Di
 div_in_range = income_in_range[income_in_range["Entry Type"].isin(dividend_types) & income_in_range["Symbol"].notna()]
 dividends_by_symbol = div_in_range.groupby("Symbol")["Net Amt"].sum()
 
-total_realized = realized_by_symbol.sum()
-total_unrealized = latest_holdings["Unrealized"].sum()
-total_dividends = dividends_by_symbol.sum()
-total_interest = income_in_range[income_in_range["Entry Type"].isin(["Credit/Margin Interest", "Interest"])]["Net Amt"].sum()
-investment_gain = total_realized + total_unrealized + total_dividends + total_interest
+# calculations.compute_investment_gain() (V4.13) -- shared with the Hermes MCP server's
+# get_lifetime_pl tool (called there with start/end spanning full history), so the two
+# can never disagree. realized_by_symbol/dividends_by_symbol above stay as separate
+# groupby computations -- still needed for the By Symbol tab's per-symbol breakdown,
+# unrelated to this aggregate KPI.
+_gain = compute_investment_gain(realized_events, latest_holdings["Unrealized"].sum(), blended_income, start, end)
+total_realized = _gain["realized"]
+total_unrealized = _gain["unrealized"]
+total_dividends = _gain["dividends"]
+total_interest = _gain["interest"]
+investment_gain = _gain["total"]
 
 # --- KPI cards ---
 latest = s.iloc[-1]

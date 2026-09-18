@@ -803,3 +803,96 @@ def describe_market_profile_freshness(
         "newest": newest, "oldest": oldest, "oldest_symbol": oldest_symbol,
         "has_variance": (newest - oldest) > tolerance,
     }
+
+
+def is_ex_date_this_month(ex_date, today: pd.Timestamp | None = None) -> bool:
+    """V4.13 -- the `(v.year, v.month) == (today.year, today.month)` predicate
+    extracted from app_pages/monitor_stocks.py's `_highlight_ex_date_this_month`
+    styler, so the upcoming Hermes MCP server's `get_upcoming_ex_dates` tool can
+    call the exact same check instead of re-deriving it. Ex-Date is always a past
+    date (see fetch_stock_profile()'s own docstring), so "falls in the current
+    calendar month" alone means "already happened this month" -- no separate
+    `>= today` check needed.
+
+    Returns False for a missing ex_date (NaT/None -- a symbol with no dividend
+    history at all, e.g. most growth stocks/some ETFs)."""
+    if pd.isna(ex_date):
+        return False
+    today = today if today is not None else pd.Timestamp.today().normalize()
+    return (ex_date.year, ex_date.month) == (today.year, today.month)
+
+
+def compute_investment_gain(
+    realized_events: pd.DataFrame, unrealized: float, blended_income: pd.DataFrame,
+    start: pd.Timestamp, end: pd.Timestamp,
+) -> dict:
+    """V4.13 -- Dashboard's "Investment Gain/Loss" KPI, extracted from
+    app_pages/dashboard.py's own inline arithmetic so the upcoming Hermes MCP
+    server's `get_lifetime_pl` tool can call the exact same formula (with
+    start/end spanning full history) instead of re-deriving it and risking a
+    number that quietly disagrees with what Dashboard itself shows.
+
+    `realized_events`/`blended_income` are blended_realized_pl()/blended_dividends()
+    output (xlsx history <= cutoff, live DB > cutoff), filtered here to
+    [start, end] inclusive of the full end month. `unrealized` is a plain float
+    the caller supplies -- deliberately NOT computed here: Dashboard sources it
+    from the xlsx Holdings sheet's own Unrealized column for the latest imported
+    statement month (frozen as of that statement date), NOT live prices --
+    genuinely different from Monitor Stocks' live-priced Unrealized (see
+    compute_holdings_pl below). Passing it in keeps this function honest about
+    that -- it doesn't pretend to compute something it doesn't.
+
+    Returns {"total", "realized", "unrealized", "dividends", "interest"} -- all
+    floats. `total = realized + unrealized + dividends + interest`, matching
+    Dashboard's "Investment Gain/Loss" exactly. Dividend/interest Entry Type
+    vocabulary matches blended_dividends()'s own docstring (xlsx and db sides
+    use different labels for the same real-world categories)."""
+    end_of_period = end + pd.offsets.MonthEnd(0)
+    realized_in_range = realized_events[
+        (realized_events["Trade Date"] >= start) & (realized_events["Trade Date"] <= end_of_period)
+    ]
+    total_realized = realized_in_range["Realized P/L"].sum()
+
+    income_in_range = blended_income[
+        (blended_income["Trade Date"] >= start) & (blended_income["Trade Date"] <= end_of_period)
+    ]
+    dividend_types = ["Dividends", "Div. Adj(NRA Withheld)", "Dividend", "Capital Distribution"]
+    interest_types = ["Credit/Margin Interest", "Interest"]
+    # Symbol.notna() matches Dashboard's own dividends_by_symbol groupby exactly (a
+    # null-Symbol row can't be grouped, so it's excluded there too) -- keeping it here
+    # ensures this total never counts a row the per-symbol breakdown wouldn't.
+    total_dividends = income_in_range[
+        income_in_range["Entry Type"].isin(dividend_types) & income_in_range["Symbol"].notna()
+    ]["Net Amt"].sum()
+    total_interest = income_in_range[income_in_range["Entry Type"].isin(interest_types)]["Net Amt"].sum()
+
+    total = total_realized + unrealized + total_dividends + total_interest
+    return {
+        "total": total, "realized": total_realized, "unrealized": unrealized,
+        "dividends": total_dividends, "interest": total_interest,
+    }
+
+
+def compute_holdings_pl(unrealized: pd.Series, dividends_received: pd.Series, cost_basis: pd.Series) -> pd.DataFrame:
+    """V4.13 -- Monitor Stocks' per-symbol "Total P/L"/"Total P/L %" columns,
+    extracted from app_pages/monitor_stocks.py's own inline arithmetic so the
+    upcoming Hermes MCP server's `get_holdings_pl` tool can call the exact same
+    formula instead of re-deriving it. Deliberately different from
+    compute_investment_gain above -- no historical Realized P/L term, so a
+    fully-exited position's locked-in gains don't appear here (Monitor Stocks
+    only ever shows currently-held positions); Unrealized is expected to be
+    LIVE-priced (`Position Value - Cost Basis` from real-time prices), not the
+    frozen statement figure compute_investment_gain takes.
+
+    `unrealized`/`dividends_received`/`cost_basis` are same-index Series (columns
+    of the same `holdings` DataFrame). Total P/L % guards a zero/near-zero Cost
+    Basis (e.g. a free distribution with no purchase cost) by returning NaN
+    instead of dividing by zero, matching this app's existing
+    `.where(cost_basis > 0, ...)` convention elsewhere.
+
+    Returns a DataFrame with columns "Total P/L"/"Total P/L %", same index as
+    the inputs -- callers merge these straight back onto `holdings`, or sum
+    "Total P/L" for a portfolio-wide current-holdings total."""
+    total_pl = unrealized + dividends_received
+    total_pl_pct = (total_pl / cost_basis * 100).where(cost_basis > 0, float("nan"))
+    return pd.DataFrame({"Total P/L": total_pl, "Total P/L %": total_pl_pct})

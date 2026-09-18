@@ -1,5 +1,26 @@
 # Changelog
 
+## Portfolio Q&A via Hermes/Telegram (v4.13)
+
+Ask real questions about your portfolio in Telegram -- a new MCP server
+lets the "Rich" Hermes bot answer from your actual data instead of
+guessing.
+
+- **Five questions Rich can now answer**: how many stocks you hold,
+  which held symbols have an Ex-Date this month, your current-holdings
+  Total P/L (live), your lifetime Total P/L (all-time, matches
+  Dashboard), and which holdings have passed their nearest support or
+  resistance line.
+- Every answer is computed by the SAME tested logic this app already
+  uses (`core/calculations.py`/`core/db.py`) -- Rich's numbers can
+  never quietly disagree with what the app itself shows.
+- Two formulas (Ex-Date-this-month, Total P/L) were extracted into
+  shared functions during this work, so Dashboard and Monitor Stocks
+  now call the exact same code the bot does.
+- Runs as a small standalone process alongside your existing Hermes
+  bots -- no changes to how the web app itself works or looks.
+- No breaking changes. Full test suite: 483/483 passing.
+
 ## Free-Text Symbol Search + Company Profile (v4.12)
 
 Two requested additions to Company Fundamentals: look up any stock, and

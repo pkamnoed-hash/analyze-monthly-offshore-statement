@@ -1,0 +1,18 @@
+# Hermes Agent MCP server for the "Rich" Telegram bot -- see portfolio_mcp.py
+# and docs/ROADMAP.md's V4.13 section for the full design.
+#
+# Deliberately does NOT include streamlit/plotly -- this process runs
+# standalone on the VPS (no Streamlit app), and those are the two heaviest
+# dependencies core/db.py's own callers normally carry. Keeping this list
+# minimal matters on the VPS: see docs/ROADMAP.md V4.13 for the RAM-headroom
+# check this was verified against.
+#
+# pandas/openpyxl/yfinance/libsql versions match the main app's own
+# requirements.txt exactly -- same core/ modules, same tested versions.
+
+mcp[cli]==2.2.0
+python-dotenv==1.0.1
+pandas==3.0.3
+openpyxl==3.1.5
+yfinance==1.5.2
+libsql==0.1.11

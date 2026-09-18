@@ -381,11 +381,14 @@ holdings["Unrealized %"] = (
 # this page only tracks currently-held positions (a fully-exited symbol doesn't appear here
 # at all, same convention compute_current_positions() uses everywhere), so there's no
 # Realized P/L term to add -- just Unrealized + Dividends for whatever's still held today.
+# calculations.compute_holdings_pl() (V4.13) -- shared with the Hermes MCP server's
+# get_holdings_pl tool, so the two can never disagree.
 holdings["Dividends Received"] = holdings["Symbol"].map(_dividends_received_by_symbol()).fillna(0.0)
-holdings["Total P/L"] = holdings["Unrealized"] + holdings["Dividends Received"]
-holdings["Total P/L %"] = (
-    holdings["Total P/L"] / holdings["Cost Basis"] * 100
-).where(holdings["Cost Basis"] > 0, float("nan"))
+_holdings_pl = calculations.compute_holdings_pl(
+    holdings["Unrealized"], holdings["Dividends Received"], holdings["Cost Basis"]
+)
+holdings["Total P/L"] = _holdings_pl["Total P/L"]
+holdings["Total P/L %"] = _holdings_pl["Total P/L %"]
 
 # Holding Period: years since the current position was last built from zero (a symbol
 # fully sold and later rebought resets to the rebuy date -- see
@@ -772,14 +775,13 @@ column_config = {
 }
 
 def _highlight_ex_date_this_month(col: pd.Series) -> list[str]:
-    """Ex-Date is always a past date (see compute above), so "this calendar
-    month" alone means "already happened" -- no separate >= today check
-    needed. Flags it so a monthly/weekly payer's already-passed cycle is
-    visually distinct from an older month's leftover Ex-Date."""
-    today = pd.Timestamp.today().normalize()
+    """Flags an Ex-Date falling in the current calendar month so a monthly/
+    weekly payer's already-passed cycle is visually distinct from an older
+    month's leftover Ex-Date. The "is this month" check itself is
+    calculations.is_ex_date_this_month() (V4.13) -- shared with the Hermes MCP
+    server's get_upcoming_ex_dates tool, so the two can never disagree."""
     return [
-        "background-color: rgba(255, 193, 7, 0.28)" if pd.notna(v) and (v.year, v.month) == (today.year, today.month)
-        else ""
+        "background-color: rgba(255, 193, 7, 0.28)" if calculations.is_ex_date_this_month(v) else ""
         for v in col
     ]
 

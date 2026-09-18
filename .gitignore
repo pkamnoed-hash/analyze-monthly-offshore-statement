@@ -7,3 +7,5 @@ __pycache__/
 labs/
 scripts/full_history_check.json
 data/backups/
+mcp_server/.env
+mcp_server/.venv/
