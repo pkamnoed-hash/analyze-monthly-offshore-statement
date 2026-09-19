@@ -1,5 +1,23 @@
 # Changelog
 
+## Company Fundamentals for Rich (v4.15)
+
+Ask Rich about a company's fundamentals in Telegram, the same numbers as the
+Company Fundamentals page.
+
+- New question Rich can answer: "is KO overvalued?", "what are AAPL's key
+  ratios?" -- the company profile, the Analyst Target verdict (Overvalued /
+  Undervalued / Fair value), latest-year Revenue, Net Income, Free Cash Flow and
+  Total Debt with year-over-year change, and the five key ratios.
+- Works for any ticker, not just your holdings. A ticker looked up for the first
+  time is fetched live and saved; ask for a refresh to update older data.
+- ETFs and funds get their profile and price (they have no financial statements
+  or analyst targets). Companies that report in another currency, such as TSM,
+  say so instead of showing a misleading "$".
+- The ratio formulas moved into shared code, so the page and the bot use the
+  same maths. The page looks and behaves exactly as before.
+- No breaking changes. Full test suite: 577/577 passing.
+
 ## Database Backup Button (v4.14)
 
 Back up your real database whenever you like, with one click.

@@ -12,6 +12,7 @@ from core.calculations import (
     compute_holding_period_start,
     compute_holdings_pl,
     compute_horizontal_sr_zones,
+    compute_key_ratios,
     compute_investment_gain,
     compute_moving_average,
     compute_realized_pl,
@@ -25,10 +26,14 @@ from core.calculations import (
     find_nearest_levels,
     find_swing_points,
     is_ex_date_this_month,
+    latest_statement_value,
     nearest_reference_cell,
     resample_ohlc,
+    safe_divide,
+    statement_series,
     to_heikin_ashi,
     valuation_assessment,
+    yoy_pct,
 )
 
 
@@ -1438,3 +1443,138 @@ class TestComputeHoldingsPl:
             unrealized=pd.Series([0.0]), dividends_received=pd.Series([0.0]), cost_basis=pd.Series([100.0]),
         )
         assert result["Total P/L"].iloc[0] == pytest.approx(0.0)
+
+
+INCOME = {
+    "Total Revenue": {"2023-12-31": 900.0, "2024-12-31": 1000.0},
+    "Gross Profit": {"2023-12-31": 400.0, "2024-12-31": 420.0},
+    "Operating Income": {"2023-12-31": 180.0, "2024-12-31": 200.0},
+    "Net Income": {"2023-12-31": 120.0, "2024-12-31": 150.0},
+}
+BALANCE = {
+    "Stockholders Equity": {"2023-12-31": 600.0, "2024-12-31": 750.0},
+    "Total Debt": {"2023-12-31": 300.0, "2024-12-31": 375.0},
+    "Current Assets": {"2023-12-31": 250.0, "2024-12-31": 300.0},
+    "Current Liabilities": {"2023-12-31": 180.0, "2024-12-31": 200.0},
+}
+
+
+class TestLatestStatementValue:
+    def test_returns_the_value_for_the_most_recent_date(self):
+        assert latest_statement_value(INCOME, "Total Revenue") == 1000.0
+
+    def test_picks_the_latest_date_regardless_of_insertion_order(self):
+        statement = {"Net Income": {"2024-12-31": 150.0, "2022-12-31": 90.0, "2023-12-31": 120.0}}
+        assert latest_statement_value(statement, "Net Income") == 150.0
+
+    def test_absent_label_is_none(self):
+        assert latest_statement_value(INCOME, "Cash Dividends Paid") is None
+
+    def test_empty_statement_is_none_not_an_error(self):
+        assert latest_statement_value({}, "Total Revenue") is None
+
+    def test_a_null_latest_value_is_none(self):
+        assert latest_statement_value({"Net Income": {"2023-12-31": 5.0, "2024-12-31": None}}, "Net Income") is None
+
+
+class TestStatementSeries:
+    def test_dates_and_values_come_back_date_ascending(self):
+        statement = {"Net Income": {"2024-12-31": 150.0, "2022-12-31": 90.0, "2023-12-31": 120.0}}
+        assert statement_series(statement, "Net Income") == (
+            ["2022-12-31", "2023-12-31", "2024-12-31"], [90.0, 120.0, 150.0],
+        )
+
+    def test_absent_label_gives_empty_lists(self):
+        assert statement_series(INCOME, "Free Cash Flow") == ([], [])
+
+    def test_empty_statement_gives_empty_lists(self):
+        assert statement_series({}, "Total Revenue") == ([], [])
+
+
+class TestSafeDivide:
+    def test_plain_division(self):
+        assert safe_divide(150.0, 750.0) == pytest.approx(0.2)
+
+    def test_none_numerator_is_none(self):
+        assert safe_divide(None, 750.0) is None
+
+    def test_none_denominator_is_none(self):
+        assert safe_divide(150.0, None) is None
+
+    def test_zero_denominator_is_none_not_a_zero_division_error(self):
+        assert safe_divide(150.0, 0) is None
+
+    def test_nan_denominator_is_none(self):
+        assert safe_divide(150.0, float("nan")) is None
+
+    def test_negative_values_divide_normally(self):
+        assert safe_divide(-50.0, 200.0) == pytest.approx(-0.25)
+
+
+class TestYoyPct:
+    def test_growth_between_the_last_two_values(self):
+        assert yoy_pct([80.0, 100.0, 110.0]) == pytest.approx(10.0)
+
+    def test_decline_is_negative(self):
+        assert yoy_pct([100.0, 80.0]) == pytest.approx(-20.0)
+
+    def test_fewer_than_two_values_is_none(self):
+        assert yoy_pct([100.0]) is None
+        assert yoy_pct([]) is None
+
+    def test_zero_prior_year_is_none(self):
+        assert yoy_pct([0.0, 100.0]) is None
+
+    def test_negative_prior_year_is_none(self):
+        # e.g. Free Cash Flow swinging from negative to positive -- a plain % is meaningless.
+        assert yoy_pct([-40.0, 25.0]) is None
+
+    def test_missing_latest_or_prior_is_none(self):
+        assert yoy_pct([100.0, None]) is None
+        assert yoy_pct([None, 100.0]) is None
+        assert yoy_pct([100.0, float("nan")]) is None
+
+
+class TestComputeKeyRatios:
+    def test_all_five_ratios_on_the_latest_fiscal_year(self):
+        ratios = compute_key_ratios(INCOME, BALANCE)
+        assert ratios["gross_margin"] == pytest.approx(0.42)       # 420 / 1000
+        assert ratios["operating_margin"] == pytest.approx(0.20)   # 200 / 1000
+        assert ratios["return_on_equity"] == pytest.approx(0.20)   # 150 / 750
+        assert ratios["debt_to_equity"] == pytest.approx(0.50)     # 375 / 750
+        assert ratios["current_ratio"] == pytest.approx(1.5)       # 300 / 200
+
+    def test_uses_the_latest_year_not_an_earlier_one(self):
+        # 2023 would give a 0.4444 gross margin (400 / 900); the latest year gives 0.42.
+        assert compute_key_ratios(INCOME, BALANCE)["gross_margin"] != pytest.approx(400 / 900)
+
+    def test_a_missing_line_item_only_blanks_the_ratios_that_need_it(self):
+        income = {k: v for k, v in INCOME.items() if k != "Gross Profit"}
+        ratios = compute_key_ratios(income, BALANCE)
+        assert ratios["gross_margin"] is None
+        assert ratios["operating_margin"] == pytest.approx(0.20)
+        assert ratios["return_on_equity"] == pytest.approx(0.20)
+
+    def test_a_bank_style_balance_sheet_has_no_current_ratio(self):
+        balance = {k: v for k, v in BALANCE.items() if k not in ("Current Assets", "Current Liabilities")}
+        ratios = compute_key_ratios(INCOME, balance)
+        assert ratios["current_ratio"] is None
+        assert ratios["debt_to_equity"] == pytest.approx(0.50)
+
+    def test_empty_statements_give_all_none_the_etf_case(self):
+        assert compute_key_ratios({}, {}) == {
+            "gross_margin": None, "operating_margin": None, "return_on_equity": None,
+            "debt_to_equity": None, "current_ratio": None,
+        }
+
+    def test_zero_equity_blanks_roe_and_debt_to_equity_without_raising(self):
+        balance = dict(BALANCE, **{"Stockholders Equity": {"2024-12-31": 0.0}})
+        ratios = compute_key_ratios(INCOME, balance)
+        assert ratios["return_on_equity"] is None
+        assert ratios["debt_to_equity"] is None
+
+    def test_zero_revenue_blanks_the_margins_without_raising(self):
+        income = dict(INCOME, **{"Total Revenue": {"2024-12-31": 0.0}})
+        ratios = compute_key_ratios(income, BALANCE)
+        assert ratios["gross_margin"] is None
+        assert ratios["operating_margin"] is None

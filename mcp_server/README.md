@@ -3,7 +3,22 @@
 An MCP server exposing read-only(-in-spirit) portfolio Q&A tools to the
 Hermes Agent "Rich" Telegram bot -- backed directly by this repo's own
 `core/db.py` / `core/calculations.py`, not a copy. Full design in
-`docs/ROADMAP.md`'s V4.13 section.
+`docs/ROADMAP.md`'s V4.13 and V4.15 sections.
+
+## Tools
+
+| Tool | Answers |
+|---|---|
+| `get_holdings_count` | How many symbols are held |
+| `get_upcoming_ex_dates` | Held symbols with an Ex-Date this month |
+| `get_holdings_pl` | Current-holdings P/L (live) |
+| `get_lifetime_pl` | All-time P/L (matches Dashboard) |
+| `get_reference_line_status` | Held symbols that passed their nearest support/resistance line |
+| `get_company_fundamentals(symbol, refresh=false)` | One ticker's profile, Analyst Target verdict, latest-year KPIs and key ratios; any ticker, held or not (V4.15) |
+
+Writes are limited to `reference_lines` (`get_reference_line_status`) and
+`fundamentals_cache` (`get_company_fundamentals`); never trades, dividends or
+symbol types. See `docs/ARCHITECTURE.md` for the write-boundary reasoning.
 
 ## Local testing (before touching the VPS)
 

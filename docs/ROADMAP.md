@@ -4052,6 +4052,100 @@ user to try.
   which already has the prod credential and a Dropbox mount) but not built --
   manual first, per the user.
 
+## V4.15: Company Fundamentals for Rich
+
+Branch `v4.15-mcp-company-fundamentals`, cut from `main` after v4.14 merged in.
+
+### Context
+
+Rich (the Hermes Telegram bot) had five MCP tools from V4.13, none reaching the
+Company Fundamentals page the user likes and wanted to use through the bot ("is KO
+overvalued?", "what are AAPL's key ratios?"). Only the verdict logic
+(`valuation_assessment`) was shared code; the KPI and ratio maths lived inline in
+`app_pages/company_fundamentals.py` -- the same situation P/L was in during V4.13,
+so the same fix: move the maths into `core/calculations.py` so the page and the bot
+call one implementation.
+
+Confirmed with the user (AskUserQuestion): the tool fetches a never-stored ticker
+live and saves it (as the page does), with an optional refresh; and v4.14 was merged
+to `main` first, this branch cut from the updated `main`.
+
+A finding that removed a planned step: the V4.12 notes warned that prod's
+`fundamentals_cache` would need a profile backfill. Reading the local prod backup
+showed prod already has the profile columns and none of its rows lack profile data,
+so no backfill was needed. Also about half of the cached rows are ETFs with no
+financial statements, so ETFs are a first-class case for this tool.
+
+### Design decisions
+
+**Shared maths extracted, page proven unchanged.** `latest_statement_value`,
+`statement_series`, `safe_divide`, `yoy_pct` (moved from the page's private helpers)
+and a new `compute_key_ratios(income, balance)` (gross margin, operating margin,
+return on equity, debt/equity, current ratio, each `None` when an input is missing)
+now live in `core/calculations.py`; the page calls them and its private copies are
+gone. Before touching anything, the real page was driven with Streamlit's `AppTest`
+for seven symbols covering each path (fully populated, currency mismatch, a bank
+with missing ratio inputs, statements without analyst coverage, an ETF) and every
+metric, table, warning and chart fingerprint recorded; recorded twice to prove the
+snapshot is deterministic. After the refactor the same snapshot showed 0 differences
+across 77 fields, and the comparison was shown to catch a deliberately altered
+metric and sparkline. (The first snapshot missed the KPI sparklines because they are
+`vega_lite_chart` elements; caught by counting chart elements against the page,
+fixed and re-recorded before the baseline was used.)
+
+**Text building and the write path live in tested `core/` modules, not the MCP
+file.** `core/fundamentals_summary.py` (`summarize_fundamentals`, `normalize_symbol`)
+turns a stored row into the chat answer using only the shared functions, so it can't
+disagree with the page; `core/fundamentals_capture.py` (`capture_fundamentals`)
+fetches one symbol and saves it. Both are pure enough to unit test with an injected
+connection and a fake yfinance module, which the MCP virtualenv (not part of the
+normal test run) could not offer.
+
+**`get_company_fundamentals(symbol, refresh=False)`** in `mcp_server/portfolio_mcp.py`,
+a thin wrapper: validate the ticker, read the stored row, capture live when absent or
+when `refresh` is set, summarise. The answer states the date of the data. ETFs/funds
+(all statements empty) get profile, price and a plain "no financial statements" line.
+Statement figures are labelled in the statement's own currency when it isn't USD --
+deliberately unlike the page, which prints "$" and relies on a warning banner a chat
+answer doesn't have (`$3,809,054M` for TSM would really be TWD).
+
+**Safety of the new write.** Only a fetch that returned a real Current Price is
+saved -- the same success signal `fetch_fundamentals` already uses -- so an unknown
+symbol, a typo or a Yahoo outage saves nothing and can't blank a good stored row; a
+failed refresh leaves the existing row untouched (unit tested). The ticker is
+validated (`^[A-Z0-9.^=\-]{1,20}$`) before it can become a database key. The write
+boundary is still code, not the database (Turso has no per-table tokens), now
+covering two tables: `reference_lines` and `fundamentals_cache`.
+
+### Testing and verification
+
+577/577 tests (77 new: 27 for the extracted maths, 42 for the summary text, 8 for
+capture). Through a real stdio MCP client against the dev database: every answer for
+the seven symbols was cross-checked value by value (profile, valuation price/target/
+verdict/gap/analyst count, four KPIs with YoY, five ratios, currency and ETF notes)
+against what the real page rendered; input handling checked (case/space trimming,
+SQL-looking and plain-English input rejected without a database call, unknown ticker
+reported). Capture and refresh were checked against real Yahoo Finance: a first lookup
+of a never-stored ticker (CRM) was saved with a price matching a direct Yahoo fetch and
+the next lookup served from storage; `refresh=true` on KO updated the stored row and
+matched Yahoo; an unknown symbol and the options-contract symbol already in the
+portfolio saved nothing. The page was then rendered for both symbols and matched the
+tool. Finally a full dev backup before and after (using the V4.14 script) was diffed
+table by table: 12 of 13 tables identical, and in `fundamentals_cache` only the new
+ticker added and KO updated.
+
+Not yet done at time of writing: deployment to the VPS and a Telegram round trip on
+prod. Yahoo Finance has blocked shared cloud IPs before, so a live lookup from the
+VPS may fail; the tool then says so and saves nothing.
+
+### Considered and explicitly deferred
+
+- **"Which of my holdings look under/overvalued"** -- Monitor Stocks' Fundamentals tab
+  (V4.11) already computes it per holding; the natural next tool.
+- **ETF-specific facts** (expense ratio, holdings) -- ETFs get profile and price only,
+  and about half of the cached symbols are ETFs, so this is the likeliest follow-up.
+- Statement tables and multi-year history, and comparing two tickers.
+
 ## Deferred / future
 
 - **A "view" link from Monitor Stocks straight into Company
