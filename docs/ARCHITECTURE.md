@@ -174,6 +174,12 @@ the bot's conversation history.
 | `get_lifetime_pl` | All-time P/L | `calculations.compute_investment_gain` over full history, same as Dashboard's Investment Gain/Loss with Duration = All. Its Unrealized is the xlsx statement's own figure for the latest imported month (frozen, not live), and the answer names that month |
 | `get_reference_line_status` | Which held symbols have passed their nearest support/resistance line | Same pieces `cached_db.reference_line_summary()` composes, called directly. Writes reference-line data (see below) |
 | `get_company_fundamentals(symbol, refresh)` | Fundamentals for one ticker, held or not: profile, Analyst Target verdict (Overvalued / Undervalued / Fair value), latest-year Revenue / Net Income / Free Cash Flow / Total Debt with YoY, and the five key ratios | The same stored `fundamentals_cache` row and shared functions as the Company Fundamentals page (`valuation_assessment`, `statement_series`, `yoy_pct`, `compute_key_ratios`), worded by `core/fundamentals_summary.py`. A ticker never looked up is fetched live and saved by `core/fundamentals_capture.py`; `refresh=true` re-fetches. ETFs/funds get profile and price only. Statement figures carry their own currency (e.g. TWD for TSM). Writes only `fundamentals_cache` |
+| `get_holdings_health` | (V4.16) The Health rating of every current holding at once: grouped Weak / Mixed / Healthy with the reason for each Weak and Mixed one, healthy holdings that still carry a red measure, the date range of the stored data, and separate lines for ETFs/funds, too-little-data and held symbols not stored yet | `core/health.py` (`assess_health`, `health_reasons`) over the stored `fundamentals_cache` rows for the holdings from `compute_current_positions`, worded by `summarize_holdings_health` in `core/fundamentals_summary.py`. **Read-only**: no live fetch, no write. The same verdict as Monitor Stocks' Health column and Company Fundamentals' Summary of Health |
+
+`get_company_fundamentals` also ends with the health block for the ticker
+(`core/health.py` via `describe_health`: verdict, each group with its measures and
+lights, what to watch, the rule profile used), so "is KO healthy?" gets the same
+verdict the page shows. ETFs/funds have no statements and get no health block.
 
 ### Design decisions
 
@@ -194,8 +200,10 @@ the bot's conversation history.
   The fundamentals write only ever saves a fetch that returned a real price, so
   an unknown symbol or a Yahoo outage saves nothing and can't blank a good
   stored row. A ticker typed into Telegram is validated (letters, digits and
-  `. ^ = -`, up to 20 characters) before it can become a database key. New tools
-  must never call `save_trade`, `save_dividend` or `save_symbol_types`.
+  `. ^ = -`, up to 20 characters) before it can become a database key.
+  `get_holdings_health` and the health block are read-only (stored rows in, text
+  out; no fetch). New tools must never call `save_trade`, `save_dividend` or
+  `save_symbol_types`.
 - **Prod on the VPS, dev locally.** The VPS `mcp_server/.env` points at the
   prod database; the local `mcp_server/.env` points at dev so local testing
   can't write to prod.
@@ -293,10 +301,31 @@ paths checked against a direct Yahoo Finance fetch, and a before/after diff of
 every table confirming that only `fundamentals_cache` changed. It has not yet
 been asked through Telegram on prod.
 
+`get_holdings_health` and the health block (V4.16) were verified through a real
+stdio MCP client against dev: the holdings answer matched what the real Monitor
+Stocks page rendered in its Health column (same members in every group, same ETF
+and not-stored lists) and an independent recomputation; the per-company block
+matched the real Company Fundamentals page measure by measure for 13 symbols; and a
+full before/after backup diff showed all 13 tables identical, i.e. nothing written.
+
+**Verify Rich from its log, not from how a reply reads.** A reply can imitate a
+tool's output. Rich's `state.db` (`messages.tool_calls`) records each call -- MCP
+calls appear as `tool_call` with `mcp__portfolio__<tool name>` -- so "did Rich use the
+tool?" is answerable exactly. On 19 Sep 2026 a first "health of <stock>" question was
+answered with a script Rich wrote itself (`write_file`, then `terminal` running
+yfinance) and no portfolio tool call, with figures that differed from the app's
+(trailing-period Yahoo figures vs the app's annual statements). The VPS was still on
+V4.15 and Rich's `SOUL.md` didn't mention health, but it shows the failure mode to
+watch for: an unrouted question gets improvised numbers.
+
 ### Known limitations
 
 - Rich doesn't always reach for a tool on the first try; it may need a nudge
-  ("look again") or a stronger `SOUL.md`.
+  ("look again") or a stronger `SOUL.md`. It can also skip the tools and write its
+  own Yahoo Finance script for a company question (seen 19 Sep 2026), producing
+  numbers that disagree with the app; `SOUL.md` should say which questions go to
+  which tool and forbid ad-hoc scripts for them. Which model Rich runs on
+  (`model.default` in its `config.yaml`) changes how reliably it routes.
 - Hermes rejects multiple local tool calls in one batch
   (`Local tools require one entry per tool_call`); Rich retries on its own,
   but multi-tool questions can show repeated attempts.

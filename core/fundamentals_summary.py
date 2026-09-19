@@ -8,13 +8,17 @@ bot can relay. Every number comes from the same shared functions the page calls
 compute_key_ratios), so the bot and the page can't disagree. Pure and Streamlit/DB-free
 by design, like the rest of core/, so it's unit testable (tests/test_fundamentals_summary.py)
 without the MCP package or a database.
+
+V4.16 adds the Summary of Health (core/health.py) to that answer, and
+summarize_holdings_health(): the same verdict for every current holding at once, for the
+get_holdings_health tool.
 """
 
 import re
 
 import pandas as pd
 
-from core import calculations
+from core import calculations, health
 
 _SUMMARY_CHARS = 300
 _TICKER_RE = re.compile(r"^[A-Z0-9.^=\-]{1,20}$")
@@ -158,4 +162,91 @@ def summarize_fundamentals(row) -> str:
         f"return on equity {_pct(ratios['return_on_equity'])}, debt/equity {_multiple(ratios['debt_to_equity'])}, "
         f"current ratio {_multiple(ratios['current_ratio'])}."
     )
+    result = health.assess_health(
+        statements["income"], statements["balance"], statements["cashflow"], row.get("Sector"), row.get("Industry")
+    )
+    if result is not None:
+        lines.append(health.describe_health(result))
+    return "\n".join(lines)
+
+
+def summarize_holdings_health(symbols, cache: pd.DataFrame) -> str:
+    """V4.16 -- the health verdict of every current holding, for get_holdings_health.
+
+    `symbols` are the currently-held symbols; `cache` is db.fetch_fundamentals_cache() (may
+    be empty). Read-only over what is already stored -- nothing is fetched. Groups the
+    holdings Weak / Mixed / Healthy with the reasons for each Weak and Mixed one (the same
+    text the pages show), lists any that couldn't be rated, and names held symbols that
+    have no stored statements: funds (real and common) and symbols never looked up. The
+    date range of the stored data is stated because statements can be weeks old."""
+    symbols = sorted(set(symbols))
+    if not symbols:
+        return "No current holdings."
+
+    stored = {} if cache is None or cache.empty else {r["Symbol"]: r for _, r in cache.iterrows()}
+    by_light = {health.RED: [], health.YELLOW: [], health.GREEN: []}
+    not_rated, no_statements, not_stored, fetched = [], [], [], []
+    for symbol in symbols:
+        row = stored.get(symbol)
+        if row is None:
+            not_stored.append(symbol)
+            continue
+        result = health.assess_health(
+            _as_dict(row.get("Income Statement")), _as_dict(row.get("Balance Sheet")), _as_dict(row.get("Cash Flow")),
+            row.get("Sector"), row.get("Industry"),
+        )
+        if result is None:
+            no_statements.append(symbol)
+            continue
+        if _present(row.get("Fetched At")):
+            fetched.append(pd.Timestamp(row["Fetched At"]))
+        if result["overall"] is None:
+            not_rated.append(symbol)
+        else:
+            by_light[result["overall"]].append((symbol, result))
+
+    def tag(symbol, result):
+        return symbol + (" (partial)" if result["partial"] else "")
+
+    with_statements = sum(len(v) for v in by_light.values()) + len(not_rated)
+    lines = [
+        f"Health of your {len(symbols)} current holdings -- a rule-of-thumb read of each company's stored annual "
+        "statements, not investment advice."
+    ]
+    if with_statements:
+        dates = f" (stored {min(fetched):%d/%m/%Y} to {max(fetched):%d/%m/%Y})" if fetched else ""
+        lines.append(
+            f"{with_statements} have statements{dates}; rated on profit & cash flow, debt & risk and growth "
+            "against sector-aware thresholds."
+        )
+    for light in (health.RED, health.YELLOW):
+        entries = by_light[light]
+        if not entries:
+            lines.append(f"{health.LABELS[light]}: none.")
+            continue
+        lines.append(f"{health.LABELS[light]} ({len(entries)}):")
+        for symbol, result in entries:
+            reasons = health.health_reasons(result)
+            lines.append(f"- {tag(symbol, result)}: "
+                         + ("; ".join(reasons) if reasons else "no single red measure, several middling readings"))
+    healthy = by_light[health.GREEN]
+    lines.append(
+        f"{health.LABELS[health.GREEN]} ({len(healthy)}): " + (", ".join(tag(s, r) for s, r in healthy) or "none") + "."
+    )
+    watch = [(s, health.health_reasons(r)) for s, r in healthy if health.health_reasons(r)]
+    if watch:
+        lines.append("Healthy but with a red measure: " + "; ".join(f"{s} ({'; '.join(rs)})" for s, rs in watch) + ".")
+    if any(r["partial"] for entries in by_light.values() for _, r in entries):
+        lines.append("(partial) = bank/lender/fund-shaped statements, rated on return on equity and growth only.")
+    if not_rated:
+        lines.append(f"Not rated, too little data ({len(not_rated)}): {', '.join(not_rated)}.")
+    if no_statements:
+        lines.append(
+            f"No financial statements, so not rated -- ETFs/funds ({len(no_statements)}): {', '.join(no_statements)}."
+        )
+    if not_stored:
+        lines.append(
+            f"Not stored yet, so not rated ({len(not_stored)}): {', '.join(not_stored)} "
+            "(get_company_fundamentals looks a symbol up and saves it)."
+        )
     return "\n".join(lines)

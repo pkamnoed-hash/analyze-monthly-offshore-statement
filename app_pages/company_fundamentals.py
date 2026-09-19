@@ -3,7 +3,18 @@ import plotly.graph_objects as go
 import streamlit as st
 
 import cached_db
-from core import calculations, db, market_data
+from core import calculations, db, health, market_data
+
+# Tooltip for the Summary of Health subheader -- the rules in one paragraph (the full
+# threshold table is in core/health.py and docs/ROADMAP.md, V4.16).
+HEALTH_HELP = (
+    "Each measure is a green, yellow or red light against thresholds that depend on the company's "
+    "sector (a supermarket's margins aren't a software company's, and a utility's debt isn't a "
+    "retailer's). A group's light is the average of its measures and the overall verdict is the "
+    "average of the three groups. A red group, or a company that is losing money or burning cash, "
+    "is held at Mixed at best; both together make it Weak. With fewer than "
+    f"{health.MIN_MEASURES} measures it is not rated."
+)
 
 
 # Curated rows per statement -- confirmed real yfinance row labels (see
@@ -254,6 +265,51 @@ if pd.notna(row["Currency"]) and pd.notna(row["Financial Currency"]) and row["Cu
 
 income = row["Income Statement"]
 balance = row["Balance Sheet"]
+cashflow = row["Cash Flow"]
+
+# ---------------------------------------------------------------------------------
+# Summary of Health (V4.16) -- a rule-of-thumb read of the stored annual statements,
+# from core/health.py (shared with Monitor Stocks' Health column and the Hermes MCP
+# server, so all three show the same verdict). Nothing here is fetched or saved. An
+# ETF/fund has no statements, so assess_health() returns None and the section is
+# simply absent (the "no financial statements" note below covers that case).
+# ---------------------------------------------------------------------------------
+health_result = health.assess_health(income, balance, cashflow, row.get("Sector"), row.get("Industry"))
+if health_result is not None:
+    st.subheader("Summary of Health", help=HEALTH_HELP)
+    if health_result["overall"] is None:
+        n_measures = health_result["n_measures"]
+        st.info(
+            f"Not enough data to rate -- only {n_measures} usable measure{'s' if n_measures != 1 else ''} "
+            f"in the stored statements (at least {health.MIN_MEASURES} needed)."
+        )
+    else:
+        st.markdown(f"**Overall: {health.format_health_cell(health_result)}**")
+
+    for col, group in zip(st.columns(3), health.GROUPS):
+        group_result = health_result["groups"][group]
+        with col:
+            st.markdown(f"**{health.DOTS.get(group_result['light'], '⚪')} {group}**")
+            if group_result["measures"]:
+                st.markdown("  \n".join(
+                    f"{health.DOTS[m['light']]} {m['name']}: {m['value']}" for m in group_result["measures"]
+                ))
+            else:
+                st.caption("Not rated for this kind of statement.")
+
+    reasons = health.health_reasons(health_result)
+    if reasons:
+        st.markdown("**Watch:** " + "; ".join(reasons))
+    elif health_result["overall"] == health.YELLOW:
+        st.markdown("No single red measure -- the verdict reflects several middling readings.")
+
+    caption = (
+        "A rule-of-thumb read of the latest stored annual statements "
+        f"({health.PROFILE_DESCRIPTIONS[health_result['profile']]}), not investment advice."
+    )
+    if health_result["partial"]:
+        caption += " These statements look like a bank, lender or fund, so it is rated on return on equity and growth only."
+    st.caption(caption)
 
 # ---------------------------------------------------------------------------------
 # Valuation card -- Analyst Target is real yfinance data (targetMeanPrice, an
@@ -289,8 +345,6 @@ else:
         verdict, f"{analysts} analyst{'s' if analysts != 1 else ''}",
         help="Overvalued if Current Price is >2% above the target, Undervalued if >2% below, Fair value in between.",
     )
-
-cashflow = row["Cash Flow"]
 
 # Confirmed real (see fetch_fundamentals's own docstring): an ETF's income_stmt/
 # balance_sheet/cashflow are all genuinely empty DataFrames, not a fetch failure --
