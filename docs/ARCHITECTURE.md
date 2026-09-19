@@ -112,3 +112,189 @@ during V2 research and deliberately not touched.
 See `docs/DATA_MODEL.md` for the schema these flows write to, and
 `docs/METHODOLOGY.md` for how the Dashboard/Reconciliation calculations
 themselves work.
+
+## Hermes / Telegram integration (V4.13)
+
+A separate system, [Hermes Agent](https://hermes-agent.nousresearch.com),
+runs four Telegram bots on a personal DigitalOcean VPS. One of them, "Rich"
+(Stock & Investment), answers portfolio questions by calling a small MCP
+server, `mcp_server/portfolio_mcp.py`, that lives in **this repo** and reads
+the same Turso database as the Streamlit app. The MCP server imports
+`core/db.py` / `core/calculations.py` directly -- no Streamlit, no copied
+logic -- so the bot's numbers come from the same code the pages use and can't
+quietly drift from what the app shows.
+
+### Components
+
+```mermaid
+flowchart LR
+    User["You<br/>(Telegram)"] <--> TG["Telegram Bot API"]
+    TG <--> Rich["Rich<br/>Hermes Agent gateway<br/>(systemd service on the VPS)"]
+    Rich <-->|"stdio (MCP)"| MCP["mcp_server/portfolio_mcp.py<br/>(child process of the gateway)"]
+    MCP --> Core["core/db.py<br/>core/calculations.py<br/>core/market_data.py"]
+    MCP --> XLSX[("Offshore_Statements_*.xlsx<br/>(from the repo checkout)")]
+    Core --> DB[("Turso (prod)")]
+    Core -.->|"price history, reference-line<br/>auto-capture only"| YF["yfinance"]
+    Env["mcp_server/.env<br/>(VPS only, gitignored)"] -.-> MCP
+```
+
+### One question, end to end
+
+```mermaid
+sequenceDiagram
+    actor U as You
+    participant TG as Telegram
+    participant R as Rich on VPS
+    participant M as portfolio_mcp.py
+    participant DB as Turso prod
+
+    U->>TG: how many stocks do I hold?
+    TG->>R: message
+    R->>R: LLM picks get_holdings_count
+    R->>M: tool call over stdio
+    M->>DB: fetch_trades()
+    DB-->>M: trades
+    M->>M: compute_current_positions()
+    M-->>R: "You currently hold N different symbols."
+    R->>TG: answer (Thai)
+    TG->>U: answer
+```
+
+Inside Hermes the tools appear as `mcp__portfolio__<tool name>` (e.g.
+`mcp__portfolio__get_holdings_count`), which is what shows up in logs and in
+the bot's conversation history.
+
+### Tools
+
+| Tool | Answers | Source of the number |
+|---|---|---|
+| `get_holdings_count` | How many symbols are held | Open positions from `compute_current_positions` (FIFO); fully sold symbols don't count |
+| `get_upcoming_ex_dates` | Which held symbols have an Ex-Date this month | `market_profile_cache` Ex-Date via `calculations.is_ex_date_this_month`. yfinance only reports *past* Ex-Dates, so this means "already went ex-dividend this month", not a forward schedule |
+| `get_holdings_pl` | Current-holdings P/L | `calculations.compute_holdings_pl`: live Unrealized (latest cached price minus cost basis) + Dividends Received. Same as Monitor Stocks' Total P/L; excludes gains from fully sold positions |
+| `get_lifetime_pl` | All-time P/L | `calculations.compute_investment_gain` over full history, same as Dashboard's Investment Gain/Loss with Duration = All. Its Unrealized is the xlsx statement's own figure for the latest imported month (frozen, not live), and the answer names that month |
+| `get_reference_line_status` | Which held symbols have passed their nearest support/resistance line | Same pieces `cached_db.reference_line_summary()` composes, called directly. The only tool that writes (see below) |
+
+### Design decisions
+
+- **Same repo, imported not copied.** A fix to `core/` reaches the bot on the
+  VPS's next `git pull` plus a gateway restart.
+- **Shared formulas live in `core/calculations.py`.** `is_ex_date_this_month`,
+  `compute_investment_gain` and `compute_holdings_pl` were extracted from the
+  page code so the Streamlit pages and the MCP tools call one implementation.
+- **Two P/L numbers on purpose.** Dashboard's Unrealized is frozen at the last
+  imported statement; Monitor Stocks' is live. Each tool matches the page it
+  mirrors rather than inventing a third figure.
+- **Write boundary is code, not the database.** The Turso credential is
+  read-write and Turso has no per-table tokens, so `portfolio_mcp.py` only
+  calls read functions plus two derived-data writes in
+  `get_reference_line_status` (setting `passed_at`, auto-capturing lines for a
+  never-checked symbol). New tools must never call `save_trade`,
+  `save_dividend` or `save_symbol_types`.
+- **Prod on the VPS, dev locally.** The VPS `mcp_server/.env` points at the
+  prod database; the local `mcp_server/.env` points at dev so local testing
+  can't write to prod.
+- **stdio subprocess, not a remote server.** Hermes spawns the script from
+  the `rich` profile's `config.yaml`; nothing extra to host or authenticate.
+- **Lightweight dependencies.** `mcp_server/requirements.txt` omits Streamlit
+  and Plotly because the VPS has ~2GB RAM and no swap.
+
+### Deployment on the VPS
+
+| What | Where |
+|---|---|
+| MCP server code | `/root/repos/analyze-monthly-offshore-statement/mcp_server/portfolio_mcp.py` |
+| Python venv | `.../mcp_server/.venv` |
+| Prod credentials | `.../mcp_server/.env` (`chmod 600`, gitignored) |
+| Rich's config | `/root/.hermes/profiles/rich/config.yaml` |
+| Rich's persona | `/root/.hermes/profiles/rich/SOUL.md` |
+| Conversation history | `/root/.hermes/profiles/rich/state.db`, table `messages` |
+
+`config.yaml` entry:
+
+```yaml
+mcp_servers:
+  portfolio:
+    command: "/root/repos/analyze-monthly-offshore-statement/mcp_server/.venv/bin/python"
+    args:
+      - "/root/repos/analyze-monthly-offshore-statement/mcp_server/portfolio_mcp.py"
+```
+
+Updating after a change to the MCP server or `core/`:
+
+```bash
+ssh -i <key> root@<vps-host>
+cd /root/repos/analyze-monthly-offshore-statement && git pull origin main
+hermes -p rich gateway restart
+systemctl status hermes-gateway-rich --no-pager   # portfolio_mcp.py should appear as a child process
+journalctl -u hermes-gateway-rich -f              # live logs
+```
+
+`mcp_server/README.md` has the local-testing and first-time deployment steps.
+
+### How it was built
+
+```mermaid
+flowchart TD
+    subgraph P["Prepare"]
+        A["Discuss: can Rich answer from the portfolio?<br/>is MCP needed?"]
+        B["Check before building<br/>Hermes supports MCP<br/>core/ has no Streamlit dependency<br/>VPS RAM headroom"]
+        C["Decide<br/>two P/L variants<br/>write only reference lines<br/>5 tools first<br/>prod database"]
+        A --> B --> C
+    end
+
+    subgraph D["Develop (branch v4.13)"]
+        E["Extract shared logic to<br/>core/calculations.py"]
+        F["Confirm existing numbers unchanged<br/>tests + old vs new on the dev DB"]
+        G["Build mcp_server/ one tool at a time"]
+        E --> F --> G
+    end
+
+    subgraph T["Each tool verified with a real stdio MCP client"]
+        T1["get_holdings_count"] --> T2["get_upcoming_ex_dates<br/>get_holdings_pl"] --> T3["get_lifetime_pl"] --> T4["get_reference_line_status"]
+    end
+
+    subgraph S["Ship"]
+        H["Docs: ROADMAP / CHANGELOG / VERSION_CONTROL"] --> I["Merge to main, tag v4.13, push"]
+    end
+
+    subgraph V["Deploy to the VPS"]
+        J["git clone / pull<br/>venv + pip install"] --> K["Prod .env (scp, chmod 600)<br/>check prod connection"]
+        K --> L["Back up, then edit<br/>config.yaml + SOUL.md"]
+        L --> M["Restart gateway<br/>MCP child process appears"]
+    end
+
+    C --> E
+    G --> T1
+    T4 --> H
+    I --> J
+    M --> N["Real Telegram round trip<br/>re-check numbers independently"]
+```
+
+### Verification
+
+Every tool was exercised through a real stdio MCP client (a genuine
+subprocess, not a direct function call) against the dev database, and the
+two P/L tools were cross-checked against independent replicas of the
+pre-refactor page logic. After deployment, a Telegram round trip on prod
+(holdings count, Ex-Date list, current-holdings P/L) matched an independent
+re-computation exactly. `get_lifetime_pl` and `get_reference_line_status`
+have been verified on dev but not yet asked through Telegram on prod.
+
+### Known limitations
+
+- Rich doesn't always reach for a tool on the first try; it may need a nudge
+  ("look again") or a stronger `SOUL.md`.
+- Hermes rejects multiple local tool calls in one batch
+  (`Local tools require one entry per tool_call`); Rich retries on its own,
+  but multi-tool questions can show repeated attempts.
+- The VPS has ~2GB RAM and no swap; check `free -h` before adding processes.
+- Not covered yet: dividend income, Dashboard growth-vs-principal KPIs,
+  Target Allocation status, Analyst Target valuation, Rebalance suggestions,
+  detailed financials.
+
+### Adding a tool
+
+Put the formula in `core/calculations.py` (with tests) and have the Streamlit
+page call it, then wrap it as a new `@mcp.tool()` in
+`mcp_server/portfolio_mcp.py`. That way the page and the bot share one
+implementation. See `docs/ROADMAP.md` (V4.13) for the full design history.

@@ -1,5 +1,22 @@
 # Changelog
 
+## Database Backup Button (v4.14)
+
+Back up your real database whenever you like, with one click.
+
+- New **DB Back up** section in the Dashboard's sidebar: click **Backup DB**,
+  then **Download backup** -- you get one file holding every table, saved to
+  your PC's Downloads folder. Works on the deployed app too.
+- The same backup is available from the terminal with
+  `scripts/backup_turso.py`, saving into `data/backups/`.
+- The file name says which database it came from (`bk-turso-dev-...` or
+  `bk-turso-prod-...`).
+- The old **System Backup** page is hidden: it backed up a local file the app
+  stopped using when the data moved to Turso, so it never protected your real
+  data.
+- Read-only -- nothing in the database changes. No breaking changes. Full
+  test suite: 500/500 passing.
+
 ## Portfolio Q&A via Hermes/Telegram (v4.13)
 
 Ask real questions about your portfolio in Telegram -- a new MCP server

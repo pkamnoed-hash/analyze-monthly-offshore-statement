@@ -9,6 +9,7 @@ import cached_db
 from core.calculations import blended_dividends, blended_realized_pl
 from core.calculations import compute_investment_gain
 from core.calculations import compute_realized_pl as _compute_realized_pl
+from core.backup import backup_turso_database_bytes
 from core.calculations import compute_roi
 from core.market_data import fetch_usd_thb_rate
 
@@ -186,6 +187,26 @@ thb_rate = st.sidebar.number_input(
          "for the small THB reference shown under each dollar figure below -- it's a single rough rate "
          "applied uniformly, not a historically accurate one for older months.",
 )
+
+# V4.14 -- two steps on purpose: building the file takes a few seconds and its name carries the
+# exact time of the backup, so it's built on click and only then offered for download (a single
+# deferred download button would stamp the name when the page rendered, not when clicked).
+# Downloaded to the user's own PC rather than saved on the server -- the deployed app's disk is
+# ephemeral. Read-only against the database.
+st.sidebar.header("DB Back up")
+if st.sidebar.button(
+    "Backup DB",
+    help="Copy every table of the database into one file you can download. Read-only -- nothing in the database changes.",
+):
+    with st.spinner("Backing up the database..."):
+        st.session_state["db_backup"] = backup_turso_database_bytes(env_label=st.secrets.get("APP_ENV", "prod"))
+if "db_backup" in st.session_state:
+    _backup_filename, _backup_data, _backup_counts = st.session_state["db_backup"]
+    st.sidebar.caption(f"Backup ready: {len(_backup_counts)} tables, {sum(_backup_counts.values()):,} rows.")
+    st.sidebar.download_button(
+        "Download backup", _backup_data, file_name=_backup_filename,
+        mime="application/octet-stream", on_click="ignore",
+    )
 
 
 def thb(usd):
