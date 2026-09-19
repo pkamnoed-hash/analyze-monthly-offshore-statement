@@ -6,35 +6,6 @@ import cached_db
 from core import calculations, db, market_data
 
 
-def _latest_value(statement: dict, label: str) -> float | None:
-    """Most recent value for one row label in a statement dict (see
-    market_data._statement_to_dict), or None when the label is absent -- e.g. "Cash
-    Dividends Paid" for a non-payer, or any label at all when the whole statement is
-    empty (a real, confirmed outcome for an ETF, not a fetch failure). Dates are
-    "YYYY-MM-DD" strings, so lexicographic max is also chronological max."""
-    series = statement.get(label)
-    if not series:
-        return None
-    return series[max(series.keys())]
-
-
-def _series(statement: dict, label: str) -> tuple[list[str], list[float]]:
-    """Full date-ascending (label, value) series for one row -- used by the
-    Revenue/Net Income chart, which needs every year, not just the latest."""
-    values = statement.get(label) or {}
-    dates = sorted(values.keys())
-    return dates, [values[d] for d in dates]
-
-
-def _safe_div(numerator, denominator):
-    """None propagates (a missing line item, e.g. no Stockholders Equity captured)
-    rather than raising -- callers render "N/A" for a None result instead of crashing
-    the whole page over one absent ratio input."""
-    if numerator is None or denominator in (None, 0) or pd.isna(denominator):
-        return None
-    return numerator / denominator
-
-
 # Curated rows per statement -- confirmed real yfinance row labels (see
 # core/market_data.fetch_fundamentals's own docstring for the empirical check). Each
 # tagged "money" (raw dollars, displayed in millions) or "eps" (already a per-share
@@ -329,19 +300,6 @@ if not income and not balance and not cashflow:
     st.stop()
 
 
-def _yoy_pct(values: list) -> float | None:
-    """Latest-vs-prior-year % change, or None ("n/m", rendered as no delta at all)
-    when there's no prior year or the prior year was zero/negative -- a plain %
-    change is meaningless there (e.g. TSM's Free Cash Flow swinging from negative to
-    positive in the chat mockup this page is based on)."""
-    if len(values) < 2:
-        return None
-    latest, prior = values[-1], values[-2]
-    if latest is None or pd.isna(latest) or prior is None or pd.isna(prior) or prior <= 0:
-        return None
-    return (latest - prior) / prior * 100
-
-
 def _kpi_card(col, label: str, dates: list, values: list, delta_color: str, help_text: str):
     """One KPI card: latest value (in millions), its YoY delta, and a sparkline
     across every year available -- the mockup's own "Revenue/Net Income/FCF/Total
@@ -352,7 +310,7 @@ def _kpi_card(col, label: str, dates: list, values: list, delta_color: str, help
     with col:
         latest = values[-1] if values else None
         value_text = f"${latest / 1e6:,.0f}M" if latest is not None and not pd.isna(latest) else "N/A"
-        pct = _yoy_pct(values)
+        pct = calculations.yoy_pct(values)
         st.metric(
             label, value_text,
             delta=f"{pct:+.1f}% YoY" if pct is not None else None,
@@ -372,13 +330,13 @@ def _kpi_card(col, label: str, dates: list, values: list, delta_color: str, help
 
 
 kcol1, kcol2, kcol3, kcol4 = st.columns(4)
-_kpi_card(kcol1, "Revenue (latest FY)", *_series(income, "Total Revenue"), "normal",
+_kpi_card(kcol1, "Revenue (latest FY)", *calculations.statement_series(income, "Total Revenue"), "normal",
           "Total sales in the most recent fiscal year, before any costs are subtracted.")
-_kpi_card(kcol2, "Net Income (latest FY)", *_series(income, "Net Income"), "normal",
+_kpi_card(kcol2, "Net Income (latest FY)", *calculations.statement_series(income, "Net Income"), "normal",
           "Bottom-line profit in the most recent fiscal year, after every expense, interest, and tax.")
-_kpi_card(kcol3, "Free Cash Flow (latest FY)", *_series(cashflow, "Free Cash Flow"), "normal",
+_kpi_card(kcol3, "Free Cash Flow (latest FY)", *calculations.statement_series(cashflow, "Free Cash Flow"), "normal",
           "Cash left over after operating and capital expenses in the most recent fiscal year.")
-_kpi_card(kcol4, "Total Debt (latest FY)", *_series(balance, "Total Debt"), "inverse",
+_kpi_card(kcol4, "Total Debt (latest FY)", *calculations.statement_series(balance, "Total Debt"), "inverse",
           "All interest-bearing borrowing outstanding at the most recent fiscal year-end.")
 
 tab_overview, tab_income, tab_balance, tab_cashflow = st.tabs(
@@ -386,16 +344,14 @@ tab_overview, tab_income, tab_balance, tab_cashflow = st.tabs(
 )
 
 with tab_overview:
-    # _safe_div returns None (rendered "N/A") rather than raising when a line item is
-    # missing -- e.g. a company with no captured Stockholders Equity this year.
+    # calculations.compute_key_ratios() (V4.15) -- shared with the Hermes MCP server's
+    # get_company_fundamentals tool. A ratio is None (rendered "N/A") rather than an
+    # error when a line item is missing -- e.g. a company with no captured Stockholders
+    # Equity this year.
     st.subheader("Key ratios")
-    revenue = _latest_value(income, "Total Revenue")
-    gross_margin = _safe_div(_latest_value(income, "Gross Profit"), revenue)
-    op_margin = _safe_div(_latest_value(income, "Operating Income"), revenue)
-    equity = _latest_value(balance, "Stockholders Equity")
-    roe = _safe_div(_latest_value(income, "Net Income"), equity)
-    debt_equity = _safe_div(_latest_value(balance, "Total Debt"), equity)
-    current_ratio = _safe_div(_latest_value(balance, "Current Assets"), _latest_value(balance, "Current Liabilities"))
+    ratios = calculations.compute_key_ratios(income, balance)
+    gross_margin, op_margin = ratios["gross_margin"], ratios["operating_margin"]
+    roe, debt_equity, current_ratio = ratios["return_on_equity"], ratios["debt_to_equity"], ratios["current_ratio"]
 
     rcol1, rcol2, rcol3, rcol4, rcol5 = st.columns(5)
     rcol1.metric(
@@ -426,8 +382,8 @@ with tab_overview:
     # tables' own unit below. Plotly's graph_objects (not express) for the mixed
     # bar+line trace -- this app already depends on Plotly via Monitor Stocks'
     # plotly.express usage.
-    rev_dates, rev_values = _series(income, "Total Revenue")
-    _, ni_values = _series(income, "Net Income")
+    rev_dates, rev_values = calculations.statement_series(income, "Total Revenue")
+    _, ni_values = calculations.statement_series(income, "Net Income")
     if rev_dates:
         fig = go.Figure()
         fig.add_bar(x=rev_dates, y=[v / 1e6 if v is not None else None for v in rev_values], name="Revenue")

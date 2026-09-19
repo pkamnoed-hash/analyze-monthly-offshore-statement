@@ -172,7 +172,8 @@ the bot's conversation history.
 | `get_upcoming_ex_dates` | Which held symbols have an Ex-Date this month | `market_profile_cache` Ex-Date via `calculations.is_ex_date_this_month`. yfinance only reports *past* Ex-Dates, so this means "already went ex-dividend this month", not a forward schedule |
 | `get_holdings_pl` | Current-holdings P/L | `calculations.compute_holdings_pl`: live Unrealized (latest cached price minus cost basis) + Dividends Received. Same as Monitor Stocks' Total P/L; excludes gains from fully sold positions |
 | `get_lifetime_pl` | All-time P/L | `calculations.compute_investment_gain` over full history, same as Dashboard's Investment Gain/Loss with Duration = All. Its Unrealized is the xlsx statement's own figure for the latest imported month (frozen, not live), and the answer names that month |
-| `get_reference_line_status` | Which held symbols have passed their nearest support/resistance line | Same pieces `cached_db.reference_line_summary()` composes, called directly. The only tool that writes (see below) |
+| `get_reference_line_status` | Which held symbols have passed their nearest support/resistance line | Same pieces `cached_db.reference_line_summary()` composes, called directly. Writes reference-line data (see below) |
+| `get_company_fundamentals(symbol, refresh)` | Fundamentals for one ticker, held or not: profile, Analyst Target verdict (Overvalued / Undervalued / Fair value), latest-year Revenue / Net Income / Free Cash Flow / Total Debt with YoY, and the five key ratios | The same stored `fundamentals_cache` row and shared functions as the Company Fundamentals page (`valuation_assessment`, `statement_series`, `yoy_pct`, `compute_key_ratios`), worded by `core/fundamentals_summary.py`. A ticker never looked up is fetched live and saved by `core/fundamentals_capture.py`; `refresh=true` re-fetches. ETFs/funds get profile and price only. Statement figures carry their own currency (e.g. TWD for TSM). Writes only `fundamentals_cache` |
 
 ### Design decisions
 
@@ -186,10 +187,15 @@ the bot's conversation history.
   mirrors rather than inventing a third figure.
 - **Write boundary is code, not the database.** The Turso credential is
   read-write and Turso has no per-table tokens, so `portfolio_mcp.py` only
-  calls read functions plus two derived-data writes in
-  `get_reference_line_status` (setting `passed_at`, auto-capturing lines for a
-  never-checked symbol). New tools must never call `save_trade`,
-  `save_dividend` or `save_symbol_types`.
+  calls read functions plus derived-data writes to two tables:
+  `reference_lines` in `get_reference_line_status` (setting `passed_at`,
+  auto-capturing lines for a never-checked symbol) and `fundamentals_cache` in
+  `get_company_fundamentals` (first lookup of a ticker, or `refresh=true`).
+  The fundamentals write only ever saves a fetch that returned a real price, so
+  an unknown symbol or a Yahoo outage saves nothing and can't blank a good
+  stored row. A ticker typed into Telegram is validated (letters, digits and
+  `. ^ = -`, up to 20 characters) before it can become a database key. New tools
+  must never call `save_trade`, `save_dividend` or `save_symbol_types`.
 - **Prod on the VPS, dev locally.** The VPS `mcp_server/.env` points at the
   prod database; the local `mcp_server/.env` points at dev so local testing
   can't write to prod.
@@ -280,6 +286,13 @@ pre-refactor page logic. After deployment, a Telegram round trip on prod
 re-computation exactly. `get_lifetime_pl` and `get_reference_line_status`
 have been verified on dev but not yet asked through Telegram on prod.
 
+`get_company_fundamentals` (V4.15) was verified on dev through a real MCP
+client, with every value cross-checked against what the real Company
+Fundamentals page rendered for the same symbol, its first-lookup and refresh
+paths checked against a direct Yahoo Finance fetch, and a before/after diff of
+every table confirming that only `fundamentals_cache` changed. It has not yet
+been asked through Telegram on prod.
+
 ### Known limitations
 
 - Rich doesn't always reach for a tool on the first try; it may need a nudge
@@ -288,9 +301,14 @@ have been verified on dev but not yet asked through Telegram on prod.
   (`Local tools require one entry per tool_call`); Rich retries on its own,
   but multi-tool questions can show repeated attempts.
 - The VPS has ~2GB RAM and no swap; check `free -h` before adding processes.
+- A live lookup or refresh depends on Yahoo Finance, which has blocked shared
+  cloud IPs before. From the VPS it can fail; it then says so and saves
+  nothing, and stored data keeps being served.
 - Not covered yet: dividend income, Dashboard growth-vs-principal KPIs,
-  Target Allocation status, Analyst Target valuation, Rebalance suggestions,
-  detailed financials.
+  Target Allocation status, a portfolio-wide "which of my holdings look
+  under/overvalued" view (Monitor Stocks' Fundamentals tab has it),
+  Rebalance suggestions, full statement tables, and ETF-specific facts such as
+  expense ratio and holdings (ETFs get only a profile and price).
 
 ### Adding a tool
 

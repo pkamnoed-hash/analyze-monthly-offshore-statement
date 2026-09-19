@@ -896,3 +896,80 @@ def compute_holdings_pl(unrealized: pd.Series, dividends_received: pd.Series, co
     total_pl = unrealized + dividends_received
     total_pl_pct = (total_pl / cost_basis * 100).where(cost_basis > 0, float("nan"))
     return pd.DataFrame({"Total P/L": total_pl, "Total P/L %": total_pl_pct})
+
+
+def latest_statement_value(statement: dict, label: str) -> float | None:
+    """V4.15 (moved from app_pages/company_fundamentals.py's private `_latest_value`,
+    so the Hermes MCP server's get_company_fundamentals tool can call the same code) --
+    most recent value for one row label in a statement dict (see
+    market_data._statement_to_dict: {row_label: {"YYYY-MM-DD": value}}), or None when
+    the label is absent -- e.g. "Cash Dividends Paid" for a non-payer, or any label at
+    all when the whole statement is empty (a real, confirmed outcome for an ETF, not a
+    fetch failure). Dates are ISO strings, so lexicographic max is also chronological
+    max."""
+    series = statement.get(label)
+    if not series:
+        return None
+    return series[max(series.keys())]
+
+
+def statement_series(statement: dict, label: str) -> tuple[list[str], list[float]]:
+    """V4.15 (moved from the page's private `_series`) -- full date-ascending
+    (dates, values) series for one statement row, for the KPI sparklines and the
+    Revenue/Net Income chart, which need every year, not just the latest. ([], [])
+    when the label is absent."""
+    values = statement.get(label) or {}
+    dates = sorted(values.keys())
+    return dates, [values[d] for d in dates]
+
+
+def safe_divide(numerator, denominator):
+    """V4.15 (moved from the page's private `_safe_div`) -- None propagates (a missing
+    line item, e.g. no Stockholders Equity captured) rather than raising, so a caller
+    can render "N/A" for one absent ratio instead of failing the whole answer. A zero
+    or NaN denominator is also None, never a ZeroDivisionError/inf."""
+    if numerator is None or denominator in (None, 0) or pd.isna(denominator):
+        return None
+    return numerator / denominator
+
+
+def yoy_pct(values: list) -> float | None:
+    """V4.15 (moved from the page's private `_yoy_pct`) -- latest-vs-prior-year %
+    change over a date-ascending list, or None ("n/m") when there's no prior year or
+    the prior year was zero/negative -- a plain % change is meaningless there (e.g.
+    TSM's Free Cash Flow swinging from negative to positive)."""
+    if len(values) < 2:
+        return None
+    latest, prior = values[-1], values[-2]
+    if latest is None or pd.isna(latest) or prior is None or pd.isna(prior) or prior <= 0:
+        return None
+    return (latest - prior) / prior * 100
+
+
+def compute_key_ratios(income: dict, balance: dict) -> dict:
+    """V4.15 -- the five "Key ratios" Company Fundamentals shows, extracted from that
+    page's inline arithmetic so the page and the Hermes MCP server's
+    get_company_fundamentals tool share one implementation. All on the latest fiscal
+    year in `income`/`balance` (statement dicts, see latest_statement_value):
+
+    - gross_margin: Gross Profit / Total Revenue
+    - operating_margin: Operating Income / Total Revenue
+    - return_on_equity: Net Income / Stockholders Equity
+    - debt_to_equity: Total Debt / Stockholders Equity
+    - current_ratio: Current Assets / Current Liabilities
+
+    Returned as plain fractions/multiples (0.42, not 42%) -- callers format them. Any
+    ratio whose inputs are missing (an ETF's empty statements; a bank with no Gross
+    Profit or Current Assets line) is None, never an error."""
+    revenue = latest_statement_value(income, "Total Revenue")
+    equity = latest_statement_value(balance, "Stockholders Equity")
+    return {
+        "gross_margin": safe_divide(latest_statement_value(income, "Gross Profit"), revenue),
+        "operating_margin": safe_divide(latest_statement_value(income, "Operating Income"), revenue),
+        "return_on_equity": safe_divide(latest_statement_value(income, "Net Income"), equity),
+        "debt_to_equity": safe_divide(latest_statement_value(balance, "Total Debt"), equity),
+        "current_ratio": safe_divide(
+            latest_statement_value(balance, "Current Assets"),
+            latest_statement_value(balance, "Current Liabilities"),
+        ),
+    }

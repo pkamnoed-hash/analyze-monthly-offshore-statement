@@ -37,6 +37,8 @@ import pandas as pd  # noqa: E402
 from mcp.server import MCPServer  # noqa: E402
 
 from core import calculations, db, market_data  # noqa: E402
+from core.fundamentals_capture import capture_fundamentals  # noqa: E402
+from core.fundamentals_summary import normalize_symbol, summarize_fundamentals  # noqa: E402
 
 mcp = MCPServer("Portfolio")
 
@@ -273,6 +275,43 @@ def get_reference_line_status() -> str:
     if not passed:
         return f"No currently-held symbol has passed its nearest support/resistance line right now ({len(symbols)} symbols checked)."
     return "; ".join(passed) + "."
+
+
+@mcp.tool()
+def get_company_fundamentals(symbol: str, refresh: bool = False) -> str:
+    """Fundamentals for ONE stock, as shown on the web app's Company Fundamentals
+    page: business profile, the Analyst Target valuation (Overvalued / Undervalued /
+    Fair value), latest-fiscal-year Revenue, Net Income, Free Cash Flow and Total Debt
+    with year-over-year change, and the key ratios (gross margin, operating margin,
+    return on equity, debt/equity, current ratio). Use it for questions like "is KO
+    overvalued?" or "what are AAPL's key ratios?". `symbol` is a ticker such as KO and
+    does not have to be a holding -- a ticker never looked up before is fetched live
+    from Yahoo Finance and saved. ETFs and funds have no financial statements or
+    analyst coverage, so only their profile comes back. The answer states the date of
+    the data. Stored data can be days or weeks old: pass refresh=true when the user
+    wants current numbers, which re-fetches live from Yahoo Finance and saves it.
+    Writes only to the fundamentals cache, never to trades or dividends."""
+    ticker = normalize_symbol(symbol)
+    if ticker is None:
+        return f"{symbol!r} doesn't look like a ticker symbol (expected letters and digits, e.g. KO or BRK.B)."
+
+    cached = db.fetch_fundamentals_cache()
+    match = cached[cached["Symbol"] == ticker]
+    note = ""
+    if match.empty or refresh:
+        if capture_fundamentals(ticker):
+            note = "Refreshed live just now." if not match.empty else "Not stored before -- looked up live just now and saved."
+            cached = db.fetch_fundamentals_cache()
+            match = cached[cached["Symbol"] == ticker]
+        elif match.empty:
+            return (
+                f"Couldn't fetch fundamentals for {ticker} from Yahoo Finance (unknown symbol, or a temporary "
+                "Yahoo problem). Nothing was saved."
+            )
+        else:
+            note = "A live refresh failed just now (likely a temporary Yahoo Finance problem), so this is the last stored data."
+    text = summarize_fundamentals(match.iloc[0])
+    return f"{note}\n{text}" if note else text
 
 
 if __name__ == "__main__":
