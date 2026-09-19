@@ -1,5 +1,38 @@
 # Changelog
 
+## Company Health Summary (v4.16)
+
+A plain "is this company healthy?" read for every stock, in three places.
+
+- **Summary of Health** on Company Fundamentals, just above the Valuation
+  section: an overall **Healthy / Mixed / Weak** verdict, three groups (Profit &
+  cash flow, Debt & risk, Growth) with every measure shown as a green / yellow /
+  red light next to its value, and a "Watch" line naming what is holding the
+  verdict back. Hover the "?" for the rules.
+- **Fits the company.** The thresholds depend on its sector -- a supermarket's
+  thin margins or a utility's heavy debt aren't judged like a software company's
+  -- and cover all eleven sectors, including ones you don't hold yet. Banks,
+  lenders and fund-like statements are rated on the measures that make sense for
+  them and marked "(partial)". ETFs and funds have no financial statements, so
+  they show no health section.
+- **Health column** on Monitor Stocks' Highlight tab, next to Fundamental
+  Assessment -- the same verdict as the Company Fundamentals page, for every
+  holding at once.
+- Monitor Stocks: **Target Status, Rebalance Action and Trade $ are now hidden**
+  on the Highlight and Overall tabs. Nothing was deleted -- Analysis -> Target
+  Allocation still shows them, and they can be brought back with a one-line
+  change.
+- Rich (Telegram) can answer "is KO healthy?" -- the health rating now comes
+  with `get_company_fundamentals` -- and "which of my stocks look weak?" through
+  a new read-only `get_holdings_health` question that lists your holdings as
+  Weak / Mixed / Healthy with the reasons.
+- It is a rule of thumb on annual figures, not investment advice, and the page
+  says so. The rules were cross-checked against two published scores (Piotroski
+  F-score, Altman Z-score): they agree with those at least as well as those
+  agree with each other, and every big disagreement had an explanation.
+- Percent measures show one decimal, like the Key ratios beside them.
+- No breaking changes. Full test suite: 794/794 passing.
+
 ## Company Fundamentals for Rich (v4.15)
 
 Ask Rich about a company's fundamentals in Telegram, the same numbers as the

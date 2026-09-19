@@ -4138,6 +4138,10 @@ Not yet done at time of writing: deployment to the VPS and a Telegram round trip
 prod. Yahoo Finance has blocked shared cloud IPs before, so a live lookup from the
 VPS may fail; the tool then says so and saves nothing.
 
+Later note (19 Sep 2026): it was deployed to the VPS, but Rich's log shows no call to
+`get_company_fundamentals` since, so the Telegram check on prod is still open -- see the
+"Rich answered without the tool" finding under V4.16.
+
 ### Considered and explicitly deferred
 
 - **"Which of my holdings look under/overvalued"** -- Monitor Stocks' Fundamentals tab
@@ -4145,6 +4149,330 @@ VPS may fail; the tool then says so and saves nothing.
 - **ETF-specific facts** (expense ratio, holdings) -- ETFs get profile and price only,
   and about half of the cached symbols are ETFs, so this is the likeliest follow-up.
 - Statement tables and multi-year history, and comparing two tickers.
+
+## V4.16: Company Health Summary
+
+Branch `v4.16-fundamentals-health`, cut from `main` after v4.15 merged in.
+**Status: built and verified on dev (Steps 0-6, 794/794 tests passing); merge, VPS
+deployment and the Telegram check on prod (Step 7) are pending the user's go-ahead.**
+This section holds the plan, the evidence and each step's outcome.
+
+### Context
+
+The user wants a plain "is this company healthy?" read built from the statements the
+app already stores, in three places:
+
+1. A **Summary of Health** section on Company Fundamentals, above
+   "Valuation -- Analyst Target".
+2. A **Health** column on Monitor Stocks' Highlight tab, right after
+   Fundamental Assessment, with Target Status, Rebalance Action and Trade $ hidden.
+3. Rich (the Hermes Telegram bot) able to use it through MCP.
+
+The user wrote "Healthy"; the app wording is **Health** (a noun, like the neighbouring
+column names), with the verdict labels Healthy / Mixed / Weak.
+
+The rules were designed and stress-tested in chat first, using scratch scripts outside
+the repo (nothing written to any database). Result on 50 companies (held stocks,
+companies from sectors not held, and hand-picked stress cases): 28 Healthy, 12 Mixed,
+10 Weak; all six stress cases expected to look weak were rated Weak; making every
+threshold 15% stricter changed the verdict of 7 of the 50, and 15% more lenient only 2.
+Self-assessed at 7.5/10: the shape is sound, but the thresholds are judgment calls,
+which is why a cross-check against published scores is a build step (Step 2).
+
+### Decisions confirmed with the user
+
+1. **Rich's scope**: per-stock health inside the existing `get_company_fundamentals`,
+   plus a new portfolio-wide `get_holdings_health` ("which of my stocks look weak?").
+2. **Hidden columns**: Target Status, Rebalance Action and Trade $ are hidden
+   **everywhere on Monitor Stocks** (Highlight and Overall tabs). The Target Allocation
+   page keeps them.
+3. **Validation**: cross-check the rules against the Piotroski F-score and Altman
+   Z-score as a build step (scratch analysis, not shipped).
+
+### The rules
+
+Three groups, each a set of measures. A measure is green, yellow or red against a
+threshold pair (green at / yellow at; otherwise red). Every input comes from the shared
+maths already in `core/calculations.py` (`compute_key_ratios`, `statement_series`,
+`latest_statement_value`, `safe_divide`, `yoy_pct`), so the page and the bot can't
+disagree.
+
+| Group | Measure | default | low_margin | cyclical | leveraged |
+|---|---|---|---|---|---|
+| Profit & cash flow | Gross margin | 40% / 20% | 30% / 15% | 25% / 10% | 40% / 20% |
+| | Operating margin | 15% / 5% | 10% / 4% | 10% / 3% | 15% / 5% |
+| | Return on equity | 15% / 8% | 15% / 8% | 12% / 6% | 6% / 2.5% |
+| | Free cash flow margin | 10% / 0% | 5% / 0% | 8% / 0% | not rated |
+| Debt & risk | Debt / equity (lower is better) | 1.0 / 2.0 | 1.0 / 2.0 | 1.0 / 2.0 | 2.0 / 4.0 |
+| | Current ratio | 1.2 / 0.7 | 1.0 / 0.6 | 1.2 / 0.7 | not rated |
+| | Debt / operating cash flow, years (lower is better) | 2.5 / 5.0 | 2.5 / 5.0 | 2.5 / 5.0 | 5.0 / 8.0 |
+| Growth | Revenue, 3-year annual growth | +5% / -2% | same | same | same |
+| | Net income, year over year | +5% / -2% | same | same | same |
+| | Earnings consistency (stored years, normally 4) | see below | same | same | same |
+
+- **Which profile**: an industry containing Hardware, Distribution, Grocery, Discount
+  Stores or Auto Manufacturers is always `low_margin`. Otherwise by sector: Technology,
+  Healthcare, Communication Services, Financial Services -> `default`; Consumer
+  Defensive, Consumer Cyclical -> `low_margin`; Industrials, Energy, Basic Materials ->
+  `cyclical`; Utilities, Real Estate -> `leveraged`. A missing or new sector name falls
+  back to `default`, so every one of Yahoo Finance's 11 sectors is covered, including
+  ones the user doesn't hold yet.
+- **Special cases**: net income going from a loss to a profit is yellow ("turned
+  profitable" -- can't tell a one-off from a recovery); still negative is red. Revenue
+  growth is skipped when the first or last year isn't positive. Earnings consistency
+  needs at least 3 years: no loss year is green, exactly one loss year with the latest
+  year profitable is yellow, otherwise red. Debt of zero is green ("no debt"); debt with
+  no positive operating cash flow is red. Negative equity is a red debt flag and ROE is
+  skipped (it would be meaningless).
+- **Bank, lender and fund-shaped statements** (no Gross Profit and no Current Assets)
+  don't fit margin and liquidity ratios, so they are rated on ROE and growth only and
+  labelled "partial".
+- **Combining**: a group's light is the mean of its measures (green 2, yellow 1, red 0;
+  at least 1.5 is green, at least 0.75 yellow, else red). The overall light is the mean
+  of the group means with the same cut-offs, then two caps: any red group holds the
+  overall at Mixed, and the hard flags **losing money** (latest net income below zero)
+  and **burning cash** (latest free cash flow below zero) cap at Mixed on their own and
+  force Weak together. Fewer than 3 measures in total means **Not rated**.
+
+### Design
+
+**`core/health.py`** (new, pure: no Streamlit, no database, unit tested), a cleaned port
+of the scratch reference. `assess_health(income, balance, cashflow, sector, industry)`
+returns the overall light (or `None` for Not rated), each group's light with its
+measures (name, shown value, light), the flags, the red measures, whether it is partial,
+the measure count and the profile used. `format_health_cell(result)` gives the table
+text (`🟢 Healthy` / `🟡 Mixed` / `🔴 Weak` / `—`, plus ` (partial)`), and
+`describe_health(result)` the multi-line text Rich reads. All thresholds live in one
+constants block.
+
+**Company Fundamentals**: the section sits above the Valuation subheader: one verdict
+line, three group columns each with its light and its measures (value plus light), one
+"why" line naming the red measures and flags, a caption saying it is a rule of thumb and
+not advice, and a help tooltip listing the rules. Hidden for ETFs/funds (no statements).
+`cashflow = row["Cash Flow"]` currently is read after the Valuation block, so it moves
+up. No new fetch: it uses the row the page already loads.
+
+**Monitor Stocks**: `holdings["Health"]` is built from the `fundamentals` rows the page
+already loads (`cached_db.fundamentals_summary`), so there is no extra fetch. It gets a
+`column_config` entry with help text and sits in `TAB_COLUMNS["Highlight"]` right after
+"Fundamental Assessment". The three hidden columns are removed from `TAB_COLUMNS` for
+Highlight and Overall only; the target-status merge and their `column_config` entries
+stay, so showing them again is a one-line change (the same reversible pattern as the
+hidden System Backup page). Cost of leaving them computed is negligible.
+
+**MCP** (`mcp_server/portfolio_mcp.py`, `core/fundamentals_summary.py`):
+- `summarize_fundamentals` appends the health block, so `get_company_fundamentals`
+  answers "is KO healthy?" with the same verdict the page shows.
+- New read-only `get_holdings_health()`: current holdings joined to the stored
+  `fundamentals_cache`; the answer groups Weak / Mixed / Healthy, gives the reason for
+  each Weak and Mixed, counts ETFs (no statements), and names held symbols not yet
+  stored. No writes, no live fetch, so no new failure mode from Yahoo blocking the VPS.
+- Rich's `SOUL.md` tool list gets the new tool at deploy time.
+
+### Implementation steps
+
+Built one step at a time; each is verified (`py_compile` and the full `pytest -q`) and
+checked in on before the next starts. "You" is the user.
+
+| Step | What | UI-testable? | Your part |
+|---|---|---|---|
+| 0 | Cut `v4.16-fundamentals-health` from `main` | No | -- |
+| 1 | `core/health.py` + `tests/test_health.py`: every band boundary, every sector and the unknown fallback, industry overrides, bank-shaped, negative equity, flags and caps, group averaging, fewer than 3 measures, cell formatting. Parity check: same verdicts as the scratch reference over the same 50 companies | No | Read the summary |
+| 2 | **Validation** (scratch, not shipped): compute Piotroski F-score and Altman Z'' from the same statements; report rank agreement with the health score and the biggest disagreements with reasons. Adjust a threshold only for a systematic, explained disagreement; re-run Step 1's tests and parity | No | Decide on any proposed threshold change |
+| 3 | Company Fundamentals section. First record the `AppTest` snapshot baseline (same tooling as V4.15), add the section, re-snapshot: only the new section may differ | Yes | Open the page for KO, BMY, VLY and an ETF: section present on the first three, absent on the ETF, Valuation below it unchanged |
+| 4 | Monitor Stocks: snapshot the Highlight and Overall tables, add Health, hide the three columns, diff: every remaining column identical; Health equals the Company Fundamentals verdict for every held symbol | Yes | Open Highlight: Health beside Fundamental Assessment, the three columns gone; same on Overall |
+| 5 | MCP: extend the summary, add `get_holdings_health`; verify through a real stdio MCP client against dev (values cross-checked against the page and the health module), and a before/after diff of every table showing the new tool writes nothing | No | Read the summary |
+| 6 | Docs: finalise this section; VERSION_CONTROL, CHANGELOG, ARCHITECTURE tool table, `mcp_server/README.md`; also correct the V4.15 note that says the Telegram check is pending, once the user reports it | No | Review |
+| 7 | On the user's go-ahead: merge to `main`, tag `v4.16`, push; then on the VPS `git pull`, back up and update Rich's `SOUL.md`, restart Rich, confirm; then a Telegram test on prod | Telegram | Ask Rich "is KO healthy?" and "which of my stocks look weak?" |
+
+Nothing is committed, merged, pushed or deployed without the user asking for it.
+Steps 0-6 are done (outcomes below); Step 7 is pending.
+
+### Step outcomes
+
+**Step 1 -- `core/health.py` (done).** 197 new tests (774 passing in total). The port was
+checked against the chat-approved reference over the same 50 companies (30 held, 12 from
+sectors not held, 8 stress cases): 0 mismatches on verdict, profile, partial flag,
+measure count, flags, every group light and every measure's shown value and light
+(28 Healthy / 12 Mixed / 10 Weak); the comparison was shown to catch a deliberate
+threshold change (2 companies flagged). Three small refinements beyond the design:
+`assess_health` returns `None` for "no statements" (ETF/fund, cell "—") but a dict with
+`overall = None` for "too few measures" (cell "⚪ Not rated"), so an unrated stock doesn't
+look like an ETF; a `health_reasons()` helper feeds the page's "why" line and Rich's
+Weak/Mixed list; earnings consistency counts the stored years (normally 4).
+
+**Step 2 -- cross-check against published scores (done; no threshold changed).** Scratch
+analysis outside the repo on the same 50 companies' stored statements: the Piotroski
+F-score (9 signals; year-end total assets stand in for the textbook's beginning-of-year
+assets because only 4-5 years are stored; bank-shaped statements score on the 7 signals
+they have) and the Altman Z'' score (non-manufacturing variant, no constant; safe above
+2.6, distress below 1.1; not applied to the 5 bank/fund-shaped statements, per Altman's
+own exclusion of financials).
+
+| Rank agreement (Spearman) | health score | health verdict |
+|---|---|---|
+| vs Piotroski (n=50) | +0.33 | +0.36 |
+| vs Altman Z'' (n=43) | +0.51 | +0.42 |
+| Piotroski vs Altman (baseline) | +0.23 | |
+
+The two published scores agree with each other less (+0.23) than either agrees with the
+health score, so they can't adjudicate individual thresholds; they are a sanity check on
+direction, and on that the health score passes. Against Piotroski's *level* signals
+(ROA > 0, operating cash flow > 0, cash flow > net income) the health score correlates at
++0.45, against its *change* signals (margin up, liquidity up, leverage down, no dilution,
+turnover up) at +0.08 -- Piotroski rewards improvement, health rates the current level.
+
+Eight of the 50 verdicts sit at opposite ends from a published score. All fall into
+explained families rather than a rule error:
+
+- **Altman rewards cash and punishes structural leverage.** Cash-rich loss-makers (a
+  biotech, a launch-stage rocket company) are Weak on health (losing money) but "safe"
+  on Z'', whose working-capital term is inflated by cash raised. Regulated utilities
+  (NEE, DUK) and REITs are "distress/grey" on Z'' because thin working capital and heavy
+  debt are structural there, which is what the `leveraged` profile exists for.
+- **Piotroski rewards improvement.** Stable large caps (an asset manager, a pharma
+  giant, a bank) score low because margins, liquidity or share count didn't improve;
+  net income running above operating cash flow in the latest year, after wide swings
+  between years, made the pharma giant fail "cash flow > net income"; a bank's operating
+  cash flow includes loan flows, so "cash flow > 0" means little.
+- **A loss-maker with a strong balance sheet (INTC)** is Weak on health (losing money
+  and burning cash) but mid on Piotroski and safe on Z''.
+
+Mean rank gap (health minus published, in percentiles) by profile: default +0.02,
+cyclical -0.07, low_margin -0.06, leveraged +0.35 (3 companies, the Altman blind spot
+above). By sector only Energy stands out at -0.26 (3 companies): their 3-year growth
+window starts at the 2022 oil-price peak, so revenue and profit growth read red while
+profit, debt and cash flow are fine, and the red group holds them at Mixed.
+
+What-if variants (each re-run through both scores; verdict flips versus today):
+
+| Variant | Agreement with published scores | Verdict flips |
+|---|---|---|
+| Net-income growth red only below -10% / -5% (today -2%) | no gain | 1 / 0 |
+| Bank-shaped ROE bands 12% / 6% (today 15% / 8%) | slightly worse | 1 |
+| Drop debt / operating cash flow | slightly worse | 0 |
+| Looser growth bands for `cyclical` only | no gain | 1 (an oil producer, Mixed to Healthy) |
+| All margin / return / debt thresholds 15% more lenient | mixed | 1 |
+| All margin / return / debt thresholds 15% stricter | higher | 6 (NEE, DUK, a REIT, JPM, COST, an oil major) |
+
+The stricter variant is the only one that raises agreement, but three of its six flips
+(NEE, DUK, the REIT) are the leveraged names Z'' is known to misjudge, and NEE and DUK sit
+at 1.75x debt/equity against a green edge that moves from 2.0x to 1.74x -- borderline
+names being borderline, not evidence that the thresholds are wrong. **Outcome: no
+threshold changed.** Recorded watch items rather than changes: cyclicals' growth measured
+from a cycle peak (Energy), cash-rich loss-makers rated on a loss without a cash-runway
+measure (cash / annual burn -- deferred), and structurally thin-margin names such as COST
+(already a known limit).
+
+**Step 3 -- Summary of Health on Company Fundamentals (done).** The real page was driven
+with Streamlit's `AppTest` (dev database) for 12 symbols covering every rule profile, a
+bank-shaped and a fund-shaped statement, loss-making companies and an ETF, and everything
+it rendered was recorded before the edit (recorded twice: identical across 132 fields).
+After the edit: 99 fields identical, 0 unexpected differences, and the only additions are
+the new subheader, markdown and caption; metrics, tables, charts, tabs and warnings are
+untouched for every symbol, and an ETF shows no section. The rendered text (verdict,
+group headings, every measure line, the Watch line, the caption) matched the health module
+for the same stored row in 244 checks, the section sits directly above the Valuation
+subheader, and the "not rated" branch was exercised with a forced result. One change came
+out of reviewing the output: percent measures show one decimal, like Key ratios on the
+same page (a return on equity of 7.7% had displayed as a red "8%" beside a yellow-at-8%
+threshold, which read as a contradiction); verdicts are unaffected and parity with the
+reference still holds.
+
+**Step 4 -- Health column on Monitor Stocks (done).** Every tab of the real page (8 tabs,
+two "Filter by type" settings) was recorded before the edit and after: Highlight went from
+15 to 13 columns (Health inserted after Fundamental Assessment; Target Status, Rebalance
+Action and Trade $ removed), Overall from 37 to 34 (the three removed), and every column
+present both times has identical values and identical column config; the six other tabs
+and all page metrics are identical (521 checks, 0 problems). The Health column equals an
+independent recomputation from the stored rows for every symbol, and equals what the real
+Company Fundamentals page rendered for every held symbol with statements (plus a sample
+of funds, shown as a dash on both). The hidden columns are still computed and still
+configured, so showing them again is a one-line change.
+
+**Step 5 -- MCP (done).** `summarize_fundamentals` now appends the health block (verdict,
+each group with its measures, what to watch, the rule profile used) after the key ratios;
+an ETF/fund still stops at "no financial statements". New `summarize_holdings_health()` in
+`core/fundamentals_summary.py` (tested, pure, like the rest of the text building) and a thin
+read-only `get_holdings_health` tool over it: holdings grouped Weak / Mixed / Healthy with
+the reasons for each Weak and Mixed one (the same text the pages show), a line for healthy
+holdings that still carry a red measure, the date range of the stored data, and separate
+lines for ETFs/funds, too-little-data and held symbols not stored yet. It reads stored
+rows only -- no live fetch, so no new failure mode when Yahoo blocks the server -- and
+writes nothing. 20 new tests (794 passing). Verified through a real stdio MCP client
+against the dev database: the tool list shows the new tool with no arguments and the six
+older ones intact; the `get_holdings_health` answer matched what the real Monitor Stocks
+page rendered in its Health column (same members in every group, same ETF and not-stored
+lists) and an independent recomputation (reasons, stored-date range, counts); the health
+block in `get_company_fundamentals` matched the real Company Fundamentals page measure by
+measure (verdict, group lights, every value and light, the Watch line) for 13 symbols and
+is absent for an ETF; input validation and the other tools are unchanged. A full dev
+backup before and after, diffed table by table: all 13 tables identical, i.e. the new
+tool and block write nothing.
+
+### Rich answered without the tool (finding after Step 5)
+
+While Step 6 was being written the user asked Rich, on Telegram, to check the "health"
+of a held stock. Rich's `state.db` shows what it did: `write_file` (a small yfinance
+script into its workspace), then `terminal` running that script with the MCP server's
+Python, then its own written analysis -- no `mcp__portfolio__...` call at all. Its
+figures were Yahoo's trailing-period ones and differed from the app's annual-statement
+figures (an operating margin flagged as a watch item at 7.6% where the app's tool reads
+18.5%, green); the overall conclusion happened to agree. The file was written without
+the confirmation Rich's `SOUL.md` requires.
+
+Why it is expected and what it changes: the VPS was still on V4.15 (the repo at the v4.15
+merge, no health code) and Rich's routing text names valuation, key ratios, revenue,
+profit, debt and business profile but not "health", so it improvised. Two consequences
+for Step 7: (1) Rich's `SOUL.md` must name health explicitly, say which question goes to
+which tool, forbid ad-hoc scripts for these questions and repeat the ask-before-creating-
+files rule (suggested wording in `mcp_server/README.md`); (2) the Telegram check is
+verified from Rich's log -- a `mcp__portfolio__get_company_fundamentals` /
+`get_holdings_health` call must appear -- and by the reply containing the tool's own
+"Health: ..." and "Rules used: ..." lines, not by the reply merely sounding right. The
+same log also showed the V4.15 tool has not been called yet, and that Rich's model is now
+`deepseek-v4-pro` rather than the Gemini model it started on, which affects how reliably
+it routes to tools.
+
+### Deployment plan (Step 7, on the user's go-ahead)
+
+1. Commit on the branch, merge to `main` with `--no-ff`, tag `v4.16`, push.
+2. On the VPS: `git pull` in the repo; no new dependency (`core/health.py` needs only
+   pandas, already in the MCP virtualenv); no database change or backfill (health reads
+   the `fundamentals_cache` rows prod already holds).
+3. Back up Rich's `SOUL.md` and `config.yaml`, update `SOUL.md` per the finding above,
+   restart Rich (`hermes -p rich gateway restart`), confirm the MCP child process is up
+   and lists the new tool.
+4. Telegram test: "is KO healthy?", "which of my stocks look weak?", and an ETF question;
+   then read Rich's log to confirm the tool calls and compare the answers with the app.
+
+### Verification plan
+
+- After every code step: `py_compile` and the full `pytest -q` (577 passing on `main`).
+- Regression: the `AppTest` before/after snapshots in Steps 3 and 4 -- the existing
+  content must be identical, only the new section or column may differ.
+- Logic: parity with the scratch reference (Step 1) and the Piotroski/Altman
+  cross-check (Step 2).
+- MCP: real stdio round trips, cross-check against the page, and a table-by-table diff
+  of a dev backup before and after to prove the new tool is read-only.
+- Final: the user's Telegram questions on prod, verified from Rich's log.
+
+Results: everything above except the final item is done -- see the step outcomes. The
+final item is Step 7.
+
+### Known limits and considered but deferred
+
+- Thresholds are rules of thumb on annual data; sector and industry are coarse
+  (hardware makers, funds, financing arms inside industrial groups; share buybacks
+  distort debt/equity, partly offset by the debt / operating cash flow measure). The
+  page caption says so. The validation step narrows this but doesn't remove it.
+- A Health column on Monitor Stocks' Fundamentals tab (cheap follow-up), a
+  per-industry threshold table, ETF-specific health (expense ratio, holdings), and a
+  trend of health over time.
+- The v4.15 and v4.16 Telegram round trips on prod are still to be done; Rich improvised
+  the one health question it has been asked (see the finding above).
+- Health is not yet a column on Monitor Stocks' Fundamentals tab, and Rich has no
+  "health of a category" question.
 
 ## Deferred / future
 

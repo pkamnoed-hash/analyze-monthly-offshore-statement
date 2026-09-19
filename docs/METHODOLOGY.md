@@ -404,6 +404,65 @@ are blank for most ETFs; `fundFamily`/`category`/`beta3Year` fill in as
 fallbacks only when the equity-specific field is blank, so equities are
 never affected.
 
+## Company health (Company Fundamentals, Monitor Stocks, Rich) -- V4.16
+
+A rule-of-thumb "is this company financially healthy?" read from the annual
+statements already stored in `fundamentals_cache` -- nothing is fetched to compute
+it. One pure module, `core/health.py` (`assess_health`), is the single
+implementation: Company Fundamentals' **Summary of Health**, Monitor Stocks'
+**Health** column (Highlight tab) and Rich's `get_company_fundamentals` /
+`get_holdings_health` tools all call it, so they cannot disagree. It is a judgment-
+call rule of thumb on annual figures, not investment advice. `docs/ROADMAP.md`'s
+V4.16 section has the full threshold table and the validation evidence.
+
+**Measures**, in three groups. Each is a green / yellow / red light against a
+threshold pair:
+
+- *Profit & cash flow*: gross margin, operating margin, return on equity, free cash
+  flow margin (latest fiscal year).
+- *Debt & risk*: debt / equity, current ratio, total debt / operating cash flow (in
+  years). Debt of zero is green ("no debt"); debt with no positive operating cash
+  flow is red; negative or zero equity is a red debt flag and skips return on equity.
+- *Growth*: revenue growth (annual rate over up to the last 3 years), net income
+  growth (latest year vs prior; a loss turning into a profit is yellow, "turned
+  profitable", still negative is red), and earnings consistency (how many stored
+  years were profitable; needs at least 3).
+
+**Thresholds depend on a sector profile**: `default` (Technology, Healthcare,
+Communication Services, Financial Services, and any missing or new sector name),
+`low_margin` (Consumer Defensive / Cyclical, and any industry containing Hardware,
+Distribution, Grocery, Discount Stores or Auto Manufacturers), `cyclical`
+(Industrials, Energy, Basic Materials) and `leveraged` (Utilities, Real Estate:
+looser debt bands, and no current-ratio or free-cash-flow-margin test). All eleven
+Yahoo Finance sectors are covered. The exact numbers are the constants at the top of
+`core/health.py`.
+
+**Bank, lender and fund-shaped statements** (no Gross Profit and no Current Assets)
+don't fit margin and liquidity ratios, so they are rated on return on equity and
+growth only and marked "partial".
+
+**Combining**: a group's light is the mean of its measures (green 2, yellow 1, red
+0; at least 1.5 is green, at least 0.75 yellow, else red). The overall verdict is the
+mean of the group means with the same cut-offs -- **Healthy / Mixed / Weak** -- then:
+any red group holds it at Mixed at best; the hard flags **losing money** (latest net
+income below zero) and **burning cash** (latest free cash flow below zero, where the
+profile rates cash flow) each hold it at Mixed at best, and together force Weak.
+Fewer than 3 rated measures means **Not rated**; no statements at all (an ETF or
+fund) shows as "—" / no section.
+
+**Where it shows**: Monitor Stocks' Health column takes the same stored rows the
+page already loads for its Fundamentals tab. The Target Status, Rebalance Action and
+Trade $ columns are hidden on Highlight and Overall (still computed, still
+configured -- adding them back to `TAB_COLUMNS` shows them again; Analysis -> Target
+Allocation is unchanged).
+
+**Known limits**: annual data only (a company's latest quarter can differ); the
+thresholds are judgment calls, cross-checked against the Piotroski F-score and Altman
+Z'' as a sanity check, not derived from them; cyclicals' 3-year growth can start at a
+cycle peak; cash-rich loss-makers are rated on the loss without a cash-runway
+measure; structurally thin-margin businesses (a warehouse retailer) read low on
+margins; a bank-shaped statement is rated on fewer measures.
+
 ## System Backup (Tools page)
 
 Manual, on-demand backups only -- see `docs/ROADMAP.md`'s V2.3 section for

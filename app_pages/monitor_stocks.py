@@ -5,7 +5,7 @@ import plotly.express as px
 import streamlit as st
 
 import cached_db
-from core import calculations, db, market_data, target_allocation
+from core import calculations, db, health, market_data, target_allocation
 
 # Matches Dashboard's own "Dividends"/"Avg. Monthly Dividend" KPIs (app_pages/dashboard.py),
 # which are net of the 15% Thai (NRA) withholding tax -- there, that's already baked into
@@ -346,6 +346,19 @@ holdings["Analyst Target %"] = [a["pct"] for a in assessed]
 holdings["Assessment"] = [a["verdict"] for a in assessed]
 holdings["Fundamental Assessment"] = holdings.apply(_fundamental_assessment_text, axis=1)
 
+# V4.16 -- Health: core/health.py's rule-of-thumb verdict from the same stored
+# `fundamentals` rows just read above (statements, Sector, Industry -- no extra fetch), the
+# same function and inputs Company Fundamentals' Summary of Health uses, so the two can
+# never disagree about a symbol. "—" for an ETF/fund (no statements) or a symbol never
+# captured at all.
+health_by_symbol = {
+    r["Symbol"]: health.format_health_cell(health.assess_health(
+        r["Income Statement"], r["Balance Sheet"], r["Cash Flow"], r["Sector"], r["Industry"],
+    ))
+    for _, r in fundamentals.iterrows()
+}
+holdings["Health"] = holdings["Symbol"].map(health_by_symbol).fillna("—")
+
 holdings["Position Value"] = holdings["Quantity"] * holdings["Latest Price"]
 total_value = holdings["Position Value"].sum()
 holdings["Weight %"] = (holdings["Position Value"] / total_value * 100) if total_value else 0.0
@@ -631,9 +644,15 @@ TAB_COLUMNS = {
     # explains. Action is included for the same reason every other data-rich tab has it --
     # an attention-worthy row with no way to jump to that symbol's own chart would be a
     # real usability gap.
+    #
+    # V4.16 -- "Health" sits right after "Fundamental Assessment"; "Target Status", "Rebalance
+    # Action" and "Trade $" are hidden here and on Overall (the user's request). They are
+    # deliberately still computed above and still in column_config below, so showing them
+    # again is a one-line change -- add them back to these lists (same reversible pattern
+    # as the hidden System Backup page). Analysis -> Target Allocation itself is unchanged.
     "Highlight": ["Symbol", "History90D", "Ex-Date", "Expected Div Per Month", "Total P/L",
-                  "Total P/L %", "Dividend Yield %", "Fundamental Assessment", "Nearest Resistance (R %)",
-                  "Nearest Support (S %)", "Passed R/S", "Target Status", "Rebalance Action", "Trade $", "Action"],
+                  "Total P/L %", "Dividend Yield %", "Fundamental Assessment", "Health",
+                  "Nearest Resistance (R %)", "Nearest Support (S %)", "Passed R/S", "Action"],
     # V4.11 -- Analyst Target valuation (real sell-side analyst price targets,
     # aggregated by yfinance -- not something this app calculates itself), same
     # verdict logic (core/calculations.valuation_assessment) Company Fundamentals'
@@ -646,8 +665,7 @@ TAB_COLUMNS = {
                 "Holding Period (Years)", "Total P/L %/yr", "Dividend Yield %", "Dividend Frequency",
                 "Ex-Date", "Expected Div Per Year", "Expected Div Per Month", "Beta",
                 "Div Return Contribution %", "Analyst Target", "Analyst Target %", "Assessment",
-                "Nearest Resistance (R %)", "Nearest Support (S %)", "Passed R/S",
-                "Target Status", "Rebalance Action", "Trade $", "Action"],
+                "Nearest Resistance (R %)", "Nearest Support (S %)", "Passed R/S", "Action"],
     "Position": ["Symbol", "History90D", "Quantity", "Avg Cost", "Latest Price", "Cost Basis", "Position Value"],
     "Performance": ["Symbol", "History90D", "Unrealized", "Unrealized %", "Dividends Received", "Total P/L",
                      "Total P/L %", "Holding Period (Years)", "Total P/L %/yr"],
@@ -771,6 +789,15 @@ column_config = {
         help="Assessment + Analyst Target % + Analyst Target combined into one cell, e.g. "
              "\"Undervalued (-11.3%, $423.00)\" -- see the Fundamentals tab for these as "
              "separate, sortable columns.",
+    ),
+    "Health": st.column_config.TextColumn(
+        "Health",
+        help="A rule-of-thumb read of the company's latest stored annual statements -- profit & cash "
+             "flow, debt & risk and growth, judged against thresholds that fit its sector: 🟢 Healthy, "
+             "🟡 Mixed or 🔴 Weak. \"(partial)\" = bank/lender/fund-shaped statements, rated on return "
+             "on equity and growth only. \"Not rated\" = too little data. \"—\" = no financial "
+             "statements (ETFs and funds). Not investment advice; Company Fundamentals -> Summary of "
+             "Health shows the full breakdown.",
     ),
 }
 

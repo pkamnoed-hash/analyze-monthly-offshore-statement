@@ -38,7 +38,9 @@ from mcp.server import MCPServer  # noqa: E402
 
 from core import calculations, db, market_data  # noqa: E402
 from core.fundamentals_capture import capture_fundamentals  # noqa: E402
-from core.fundamentals_summary import normalize_symbol, summarize_fundamentals  # noqa: E402
+from core.fundamentals_summary import (  # noqa: E402
+    normalize_symbol, summarize_fundamentals, summarize_holdings_health,
+)
 
 mcp = MCPServer("Portfolio")
 
@@ -282,9 +284,10 @@ def get_company_fundamentals(symbol: str, refresh: bool = False) -> str:
     """Fundamentals for ONE stock, as shown on the web app's Company Fundamentals
     page: business profile, the Analyst Target valuation (Overvalued / Undervalued /
     Fair value), latest-fiscal-year Revenue, Net Income, Free Cash Flow and Total Debt
-    with year-over-year change, and the key ratios (gross margin, operating margin,
-    return on equity, debt/equity, current ratio). Use it for questions like "is KO
-    overvalued?" or "what are AAPL's key ratios?". `symbol` is a ticker such as KO and
+    with year-over-year change, the key ratios (gross margin, operating margin,
+    return on equity, debt/equity, current ratio), and the Health rating (Healthy /
+    Mixed / Weak, with each measure and what to watch). Use it for questions like "is KO
+    overvalued?", "what are AAPL's key ratios?" or "is KO healthy?". `symbol` is a ticker such as KO and
     does not have to be a holding -- a ticker never looked up before is fetched live
     from Yahoo Finance and saved. ETFs and funds have no financial statements or
     analyst coverage, so only their profile comes back. The answer states the date of
@@ -312,6 +315,23 @@ def get_company_fundamentals(symbol: str, refresh: bool = False) -> str:
             note = "A live refresh failed just now (likely a temporary Yahoo Finance problem), so this is the last stored data."
     text = summarize_fundamentals(match.iloc[0])
     return f"{note}\n{text}" if note else text
+
+
+@mcp.tool()
+def get_holdings_health() -> str:
+    """The Health rating of every stock currently held, at once -- what the web
+    app's Monitor Stocks "Health" column shows. Groups the holdings Weak / Mixed /
+    Healthy (a rule-of-thumb read of each company's annual statements: profit & cash
+    flow, debt & risk, growth), gives the reason for every Weak and Mixed one, and
+    names ETFs/funds (no statements, so not rated) and any held symbol not stored
+    yet. Use it for "which of my stocks look weak?" or "how healthy is my portfolio?".
+    For the full breakdown of one company use get_company_fundamentals. Read-only:
+    it uses only data already stored (which can be weeks old -- the answer says the
+    date range), fetches nothing live and writes nothing."""
+    positions = calculations.compute_current_positions(db.fetch_trades())
+    if positions.empty:
+        return "No current holdings."
+    return summarize_holdings_health(positions["Symbol"].tolist(), db.fetch_fundamentals_cache())
 
 
 if __name__ == "__main__":
