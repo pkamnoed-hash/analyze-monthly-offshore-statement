@@ -321,7 +321,8 @@ pg = st.navigation({
     "Tools": [
         st.Page("app_pages/reconciliation.py", title="Reconciliation"),
         st.Page("app_pages/allocation_type.py", title="Allocation Type"),
-        st.Page("app_pages/backup.py", title="System Backup"),
+        # System Backup is hidden: it backs up the frozen pre-Turso data/portfolio.db, which
+        # the app no longer reads. Use scripts/backup_turso.py (docs/BACKUP_AND_TESTING.md).
         st.Page("app_pages/rebalance.py", title="Rebalance & Reallocate"),
     ],
     "Analysis": [

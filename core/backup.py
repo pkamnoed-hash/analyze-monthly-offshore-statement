@@ -16,6 +16,7 @@ import os
 import re
 import shutil
 import sqlite3
+import tempfile
 from datetime import datetime
 
 import pandas as pd
@@ -147,6 +148,122 @@ def backup_statement_file(
     shutil.copy2(source_path, dest_path)
     _record_note(backup_dir, filename, note)
     return filename
+
+
+def _quote_ident(name: str) -> str:
+    return '"' + name.replace('"', '""') + '"'
+
+
+def export_database_to_sqlite(source_conn, dest_path: str) -> dict[str, int]:
+    """V4.14 -- full copy of a live database (in practice Turso, via core/db.py's
+    get_connection()) into a standalone local SQLite file. This replaces
+    backup_database() as the way to protect real data: that function backs up
+    data/portfolio.db, a frozen pre-Turso snapshot the running app no longer reads.
+
+    Recreates every table from its own CREATE statement, copies every row, then
+    recreates indexes/views/triggers AFTER the data load (a trigger created first
+    would fire on the copied rows). SQLite-internal tables (sqlite_*) are skipped.
+    The result is set to WAL journal mode -- Turso's "Upload SQLite File" restore
+    path requires it (see docs/BACKUP_AND_TESTING.md).
+
+    Read-only against the source: only SELECT/PRAGMA statements are issued. Raises
+    FileExistsError rather than overwriting an existing file, and deletes a
+    half-written file if anything fails, so a broken file can't be mistaken for a
+    real backup. Returns {table name: rows copied}."""
+    if os.path.exists(dest_path):
+        raise FileExistsError(f"{dest_path!r} already exists -- refusing to overwrite a backup.")
+
+    tables = [
+        (name, sql) for name, sql in source_conn.execute(
+            "SELECT name, sql FROM sqlite_master WHERE type = 'table' AND sql IS NOT NULL ORDER BY name"
+        ).fetchall()
+        if not name.startswith("sqlite_")
+    ]
+    extras = [
+        sql for (sql,) in source_conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type IN ('index', 'view', 'trigger') AND sql IS NOT NULL "
+            "ORDER BY CASE type WHEN 'index' THEN 0 WHEN 'view' THEN 1 ELSE 2 END, name"
+        ).fetchall()
+    ]
+
+    counts: dict[str, int] = {}
+    dest = sqlite3.connect(dest_path)
+    try:
+        for name, create_sql in tables:
+            dest.execute(create_sql)
+            column_count = len(source_conn.execute(f"PRAGMA table_info({_quote_ident(name)})").fetchall())
+            rows = source_conn.execute(f"SELECT * FROM {_quote_ident(name)}").fetchall()
+            placeholders = ", ".join("?" for _ in range(column_count))
+            dest.executemany(f"INSERT INTO {_quote_ident(name)} VALUES ({placeholders})", rows)
+            counts[name] = len(rows)
+        for extra_sql in extras:
+            dest.execute(extra_sql)
+        dest.commit()
+
+        for name, expected in counts.items():
+            actual = dest.execute(f"SELECT COUNT(*) FROM {_quote_ident(name)}").fetchone()[0]
+            if actual != expected:
+                raise RuntimeError(f"Table {name!r}: copied {expected} rows but the backup file holds {actual}.")
+        dest.execute("PRAGMA journal_mode=WAL")
+    except BaseException:
+        dest.close()
+        os.remove(dest_path)
+        raise
+    dest.close()
+    return counts
+
+
+def backup_turso_database(
+    source_conn,
+    backup_dir: str = DEFAULT_BACKUP_DIR,
+    *,
+    env_label: str,
+    timestamp: datetime | None = None,
+    version: str | None = None,
+) -> tuple[str, dict[str, int]]:
+    """Names the file bk-turso-<env>-<version>-<ddmmyy>-<hhmm>.db (env_label is
+    'prod' or 'dev', so a dev copy can never be mistaken for real data) and runs
+    export_database_to_sqlite() into backup_dir. Deliberately a different prefix
+    from backup_database()'s bk-portfolio-*, so list_backups() and the (now
+    hidden) System Backup page never pick these up. Returns (filename, counts)."""
+    env_label = re.sub(r"[^A-Za-z0-9]+", "", str(env_label)) or "unknown"
+    timestamp = timestamp or datetime.now()
+    version = version if version is not None else current_app_version()
+    os.makedirs(backup_dir, exist_ok=True)
+    filename = f"bk-turso-{env_label}-{version}-{timestamp.strftime('%d%m%y-%H%M')}.db"
+    counts = export_database_to_sqlite(source_conn, os.path.join(backup_dir, filename))
+    return filename, counts
+
+
+def backup_turso_database_bytes(
+    source_conn=None,
+    *,
+    env_label: str,
+    timestamp: datetime | None = None,
+    version: str | None = None,
+) -> tuple[str, bytes, dict[str, int]]:
+    """In-memory variant of backup_turso_database() for the Dashboard's "Backup DB"
+    button: builds the same file in a temp directory that is deleted straight away
+    and returns (filename, file bytes, counts) for st.download_button. Nothing is
+    left on the server's disk -- which matters on Streamlit Community Cloud, whose
+    disk is ephemeral, so a saved file there would simply vanish. `source_conn`
+    defaults to a fresh Turso connection (closed afterwards); pass one in to test."""
+    should_close = source_conn is None
+    if should_close:
+        from core import db
+
+        source_conn = db.get_connection()
+    try:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            filename, counts = backup_turso_database(
+                source_conn, tmp_dir, env_label=env_label, timestamp=timestamp, version=version,
+            )
+            with open(os.path.join(tmp_dir, filename), "rb") as f:
+                data = f.read()
+    finally:
+        if should_close:
+            source_conn.close()
+    return filename, data, counts
 
 
 def delete_backup(backup_dir: str, filename: str) -> None:

@@ -19,11 +19,43 @@ Turso dashboard, the database's "..." menu (or its Overview page) has an
 a real local `.db` snapshot. Doing this occasionally (e.g. monthly) gives
 you a personal archive beyond what PITR covers.
 
-**Caveat**: the app's own **System Backup** page
-(`app_pages/backup.py`) still backs up the old local `data/portfolio.db`
-file -- which the running app no longer reads, per the v3 migration. It
-doesn't protect real data anymore; Turso's PITR and manual export (above)
-are the actual safety net now.
+**Local backup script (V4.14)**: `scripts/backup_turso.py` copies every
+table of the live Turso database into a local SQLite file under
+`data/backups/` (gitignored), named
+`bk-turso-<env>-<version>-<ddmmyy>-<hhmm>.db`. It only issues SELECTs -- it
+never writes to Turso. Run from the project folder:
+
+```
+.venv_dashboard\Scripts\python.exe scripts\backup_turso.py
+    # whatever .streamlit/secrets.toml points at (dev, normally)
+.venv_dashboard\Scripts\python.exe scripts\backup_turso.py --secrets .streamlit\secrets.prod.toml.bak
+    # the real prod database
+```
+
+It prints which database host it's backing up (check it before trusting the
+`dev`/`prod` label in the filename), then the row count per table. Each file
+was verified against the live database: `PRAGMA integrity_check` is `ok`,
+every table's row count matches, and `trades`/`dividends` are row-for-row
+identical. The file is in WAL mode, which Turso's "Upload SQLite File"
+restore requires (see Rollback). It holds real data, including the app login
+hash -- keep it private.
+
+**Backup DB button (V4.14)**: on the Dashboard, in the sidebar's **Display**
+section, below the USD -> THB rate. Click **Backup DB** (a few seconds), then
+**Download backup** -- the same file the script makes, saved to your browser's
+Downloads folder. It backs up whichever database the app is connected to: the
+sidebar badge (DEV / PROD) tells you which, and the file name says it too
+(`bk-turso-dev-...` / `bk-turso-prod-...`). Nothing is stored on the server, so
+it works on the deployed app as well, where a file saved on the server would
+vanish. Read-only, like the script.
+
+**System Backup page (hidden as of V4.14)**: the app's own **System Backup**
+page (`app_pages/backup.py`) backs up the old local `data/portfolio.db`
+file -- which the running app no longer reads, per the v3 migration -- so it
+never protected real data. It is removed from the sidebar (its file and
+`core/backup.py`'s helpers are still in the repo; re-adding it is one
+`st.Page(...)` line in `dashboard_app.py`). Turso's PITR, the manual export
+and the script above are the actual safety net.
 
 ## Rollback
 

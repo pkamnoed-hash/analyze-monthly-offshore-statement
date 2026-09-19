@@ -3981,6 +3981,77 @@ unresolvable options-contract symbol, rather than erroring.
   first); unrelated to this MCP work, whose own footprint is much
   lighter than the full app.
 
+## V4.14: Turso Database Backup (Dashboard Button + Script)
+
+Branch `v4.14-turso-backup`, cut from `main` after v4.13 merged in.
+
+### Context
+
+Started as a question -- which sidebar pages can be skipped for now -- and
+turned up a real gap. The System Backup page (V2.3) backs up
+`data/portfolio.db`, a frozen pre-Turso snapshot the running app stopped
+reading in V3, so it never protected the real data; `docs/BACKUP_AND_TESTING.md`
+already carried that caveat. The real safety net was Turso's automatic 24-hour
+point-in-time recovery plus a manual "Export Database" from the Turso dashboard.
+The user asked for a manual backup first (script), then for a button inside the
+app so it can be done whenever wanted, and for the System Backup page to be
+hidden.
+
+### Design decisions
+
+**`core/backup.py::export_database_to_sqlite(source_conn, dest_path)`** copies a
+live database into a standalone local SQLite file: recreates every table from its
+own CREATE statement, copies every row, then recreates indexes/views/triggers
+*after* the data load (a trigger created first would fire on the copied rows).
+SQLite-internal tables are skipped. Sets WAL mode, because Turso's "Upload SQLite
+File" restore path requires it. Read-only against the source (SELECT/PRAGMA
+only). Verifies per-table row counts, refuses to overwrite an existing file, and
+deletes a half-written file on any failure so a broken file can't be mistaken for
+a backup. Takes an injected connection, the same convention as `core/db.py`.
+
+**Naming**: `bk-turso-<env>-<version>-<ddmmyy>-<hhmm>.db`, `<env>` from `APP_ENV`
+and stripped to alphanumerics, so a dev copy can never be mistaken for real data.
+Deliberately a different prefix from the old `bk-portfolio-*`, so
+`list_backups()` and the hidden page never pick these up.
+
+**Two entry points, one function.** `scripts/backup_turso.py` (manual, saves to
+`data/backups/`, `--secrets <toml>` selects which database -- the saved
+`.streamlit/secrets.prod.toml.bak` for prod; prints the host it is backing up so
+the label is checkable). And a **Backup DB** button in the Dashboard sidebar's
+new "DB Back up" section, via `backup_turso_database_bytes()`, which builds the
+file in a temp directory and returns bytes for `st.download_button`. The button
+downloads to the user's PC rather than saving on the server, because the
+deployed app's disk is ephemeral -- a file saved there would vanish. It is a
+deliberate two-step (Backup DB, then Download backup): the file name carries the
+time of the backup, and a single deferred download button would stamp the name
+when the page rendered instead of when it was clicked; the first step also shows
+the table and row counts as feedback.
+
+**System Backup page hidden, not deleted**: one `st.Page` line removed from
+`dashboard_app.py`; `app_pages/backup.py` and the old helpers stay, so re-adding
+is one line.
+
+### Testing and verification
+
+500/500 tests (17 new in `tests/test_backup.py`: row-for-row copy, indexes/views,
+trigger ordering, AUTOINCREMENT continuation, WAL mode, refuse-overwrite,
+cleanup on failure, bytes helper, env-label sanitising). Verified against the
+real databases, not just fakes: the script's output for both dev and prod passes
+`PRAGMA integrity_check`, every table's row count matches the live database, and
+`trades`/`dividends` are row-for-row identical to live. The button was exercised
+by driving the real Dashboard page with Streamlit's `AppTest`: it renders with no
+errors, builds nothing until clicked, and after a click the stored bytes are an
+intact database matching live. The browser download step itself was left for the
+user to try.
+
+### Considered and explicitly deferred
+
+- **Restore**: not built and not tested end to end. Turso's "Upload SQLite File"
+  is the documented path and these files are in the format it requires.
+- **Scheduling**: offered (Windows Task Scheduler on the PC, or cron on the VPS,
+  which already has the prod credential and a Dropbox mount) but not built --
+  manual first, per the user.
+
 ## Deferred / future
 
 - **A "view" link from Monitor Stocks straight into Company
