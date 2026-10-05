@@ -973,3 +973,55 @@ def compute_key_ratios(income: dict, balance: dict) -> dict:
             latest_statement_value(balance, "Current Liabilities"),
         ),
     }
+
+
+def preview_trade_position(trades: pd.DataFrame, symbol: str, side: str, quantity: float,
+                           price: float, market_price) -> dict:
+    """V4.17 -- position before and after a trade being entered on Record Trade, shown
+    before Save. Pure: nothing is written. Uses the same FIFO lot book as the current
+    position: a buy adds a lot at `price`; a sell removes the oldest lots first, so the
+    remaining average cost can move. Commission is ignored (not known until saved).
+
+    Returns {"before": pos, "after": pos}, each pos = {"shares", "avg_cost", "cost_basis",
+    "market_value", "pl", "pl_pct"}. avg_cost/pl/pl_pct are None when there are no shares
+    left, or market_price is missing. Raises ValueError for a sell larger than the
+    position (a sale can't be simulated against lots that don't exist)."""
+    if side not in ("Buy", "Sell"):
+        raise ValueError(f"side must be 'Buy' or 'Sell', got {side!r}")
+    if quantity <= 0 or price <= 0:
+        raise ValueError("quantity and price must be positive")
+
+    _, lots = _run_fifo(trades)
+    before_book = [[q, c] for q, c in lots.get(symbol, [])]
+    book = [list(lot) for lot in before_book]
+    held = sum(q for q, _ in book)
+
+    if side == "Buy":
+        book.append([quantity, price])
+    else:
+        if quantity > held + 1e-9:
+            raise ValueError(f"cannot sell {quantity:g} of {symbol}: only {held:g} held")
+        remaining = quantity
+        while remaining > 1e-9 and book:
+            take = min(book[0][0], remaining)
+            book[0][0] -= take
+            remaining -= take
+            if book[0][0] <= 1e-9:
+                book.pop(0)
+
+    def summarise(lot_book):
+        shares = sum(q for q, _ in lot_book)
+        if shares <= 1e-9:
+            return {"shares": 0.0, "avg_cost": None, "cost_basis": 0.0,
+                    "market_value": None, "pl": None, "pl_pct": None}
+        cost = sum(q * c for q, c in lot_book)
+        avg = cost / shares
+        if market_price is None or pd.isna(market_price):
+            return {"shares": shares, "avg_cost": avg, "cost_basis": cost,
+                    "market_value": None, "pl": None, "pl_pct": None}
+        value = shares * market_price
+        pl = value - cost
+        return {"shares": shares, "avg_cost": avg, "cost_basis": cost,
+                "market_value": value, "pl": pl, "pl_pct": pl / cost * 100}
+
+    return {"before": summarise(before_book), "after": summarise(book)}
