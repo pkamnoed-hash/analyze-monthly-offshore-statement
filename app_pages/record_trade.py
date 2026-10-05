@@ -23,33 +23,39 @@ def render_trade_form(symbol, side, quantity, price, trade_date, prefill=None, f
     call this function. Returns the collected field dict on a valid
     submit, else None."""
     prefill = prefill or {}
-    with st.form(form_key, clear_on_submit=True):
-        col1, col2 = st.columns(2)
-        with col1:
-            order_type = st.text_input("Order Type (optional)", value=prefill.get("order_type", "") or "")
-            order_id = st.text_input("Order ID (optional)", value=prefill.get("order_id", "") or "")
-        with col2:
-            # value=None (blank) when there's no prefill, same reasoning as
-            # Quantity/Executed Price above -- but a real (even zero) prefilled value
-            # from a parsed slip still shows pre-filled, since that's meant to be
-            # reviewed/confirmed, not retyped.
-            commission_fee = st.number_input(
-                "Commission Fee", min_value=0.0, value=prefill.get("commission_fee") or None,
-                placeholder="0.0000", format="%.4f",
-            ) or 0.0
-            vat = st.number_input(
-                "VAT", min_value=0.0, value=prefill.get("vat") or None, placeholder="0.0000", format="%.4f",
-            ) or 0.0
-            reserved_fee = st.number_input(
-                "Reserved Fee (SEC+TAF, sell only)", min_value=0.0,
-                value=prefill.get("reserved_fee") or None, placeholder="0.0000", format="%.4f",
-            ) or 0.0
-            fee_rebate = st.number_input(
-                "Fee Rebate (coupon, sell only)", min_value=0.0,
-                value=prefill.get("fee_rebate") or None, placeholder="0.0000", format="%.4f",
-            ) or 0.0
+    # Order details and fees are collapsed by default -- most trades don't need them. The
+    # section opens by itself when a parsed slip already filled in a fee, so nothing it
+    # read is hidden. border=False keeps the Save button outside a boxed frame; it must
+    # still sit inside the form for Streamlit to submit it.
+    has_prefilled_fee = any(prefill.get(k) for k in ("commission_fee", "vat", "reserved_fee", "fee_rebate"))
+    with st.form(form_key, clear_on_submit=True, border=False):
+        with st.expander("Order details & fees (optional)", expanded=has_prefilled_fee):
+            col1, col2 = st.columns(2)
+            with col1:
+                order_type = st.text_input("Order Type (optional)", value=prefill.get("order_type", "") or "")
+                order_id = st.text_input("Order ID (optional)", value=prefill.get("order_id", "") or "")
+            with col2:
+                # value=None (blank) when there's no prefill, same reasoning as
+                # Quantity/Executed Price above -- but a real (even zero) prefilled value
+                # from a parsed slip still shows pre-filled, since that's meant to be
+                # reviewed/confirmed, not retyped.
+                commission_fee = st.number_input(
+                    "Commission Fee", min_value=0.0, value=prefill.get("commission_fee") or None,
+                    placeholder="0.0000", format="%.4f",
+                ) or 0.0
+                vat = st.number_input(
+                    "VAT", min_value=0.0, value=prefill.get("vat") or None, placeholder="0.0000", format="%.4f",
+                ) or 0.0
+                reserved_fee = st.number_input(
+                    "Reserved Fee (SEC+TAF, sell only)", min_value=0.0,
+                    value=prefill.get("reserved_fee") or None, placeholder="0.0000", format="%.4f",
+                ) or 0.0
+                fee_rebate = st.number_input(
+                    "Fee Rebate (coupon, sell only)", min_value=0.0,
+                    value=prefill.get("fee_rebate") or None, placeholder="0.0000", format="%.4f",
+                ) or 0.0
 
-        st.caption(f"Net commission to be recorded: ${db.compute_net_commission(commission_fee, vat, reserved_fee, fee_rebate):,.4f}")
+            st.caption(f"Net commission to be recorded: ${db.compute_net_commission(commission_fee, vat, reserved_fee, fee_rebate):,.4f}")
         submitted = st.form_submit_button("Save Trade")
 
     if not submitted:
@@ -332,7 +338,41 @@ if symbol:
     positions = calculations.compute_current_positions(db_trades)
     match = positions[positions["Symbol"] == symbol]
     current_qty = match.iloc[0]["Quantity"] if not match.empty else 0.0
-    if not match.empty:
+    # V4.17 -- once quantity and price are both entered, show the position now next to the
+    # position if this trade is saved, so it can be weighed before Save. Nothing is written.
+    market_match = all_profile.loc[all_profile["Symbol"] == symbol, "Latest Price"]
+    market_price = market_match.iloc[0] if not market_match.empty else None
+    preview = None
+    if symbol and quantity > 0 and price > 0:
+        try:
+            preview = calculations.preview_trade_position(db_trades, symbol, side, quantity, price, market_price)
+        except ValueError:
+            preview = None  # an oversell is already explained by the warning below
+
+    if preview is not None:
+        def _position_lines(pos):
+            if pos["shares"] <= 1e-9:
+                return "No shares left after this trade."
+            avg = f"\\${pos['avg_cost']:,.4f}/share" if pos["avg_cost"] is not None else "—"
+            value_pl = (
+                f"\\${pos['pl']:+,.2f} ({pos['pl_pct']:+.2f}%)" if pos["pl"] is not None else "— (no cached price)"
+            )
+            return (
+                f"**Shares:** {pos['shares']:,.5f}  \n"
+                f"**Avg cost:** {avg}  \n"
+                f"**Cost basis:** \\${pos['cost_basis']:,.2f}  \n"
+                f"**P/L at cached price:** {value_pl}"
+            )
+
+        left, right = st.columns(2)
+        with left:
+            st.markdown("**Current position**")
+            st.markdown(_position_lines(preview["before"]) if preview["before"]["shares"] > 1e-9
+                        else f"No current position in {symbol}.")
+        with right:
+            st.markdown(f"**After this {side.lower()} (not saved yet)**")
+            st.markdown(_position_lines(preview["after"]))
+    elif not match.empty:
         pos = match.iloc[0]
         # \$ escapes -- two bare $ in one markdown string pair up as Streamlit's inline-math
         # delimiter, mangling everything between them into a broken math-mode span.
