@@ -4474,6 +4474,62 @@ final item is Step 7.
 - Health is not yet a column on Monitor Stocks' Fundamentals tab, and Rich has no
   "health of a category" question.
 
+## V4.17: Record Trade before/after preview, and V4.17.1: Rebalance save refresh
+
+Branches `v4.17-trade-preview` and `v4.17.1-rebalance-save-refresh`, both cut from
+`main` and merged with `--no-ff`. Not tagged yet.
+
+### V4.17 -- position preview on Record Trade
+
+**Context.** Before saving a trade the user wanted to see what the position becomes
+(shares, average cost, cost basis, P/L) for a buy or sell, to weigh the decision.
+
+**Design.** `preview_trade_position(trades, symbol, side, quantity, price, market_price)`
+in `core/calculations.py` is pure and writes nothing. It reuses the FIFO lot book the
+current position already uses: a buy adds a lot at the entered price; a sell removes
+the oldest lots first, so the remaining average cost can move. It raises `ValueError`
+for a sell larger than the holding. Commission is ignored, since it is only known on
+save. The market price is the cached Latest Price that Monitor Stocks already shows.
+The page shows the two columns only once quantity and price are both filled in, and
+falls back to the old one-line position when a sell would be an oversell.
+
+**Verification.** 13 unit tests (`tests/test_trade_preview.py`) for the math, including
+the fixture matching the screenshot's cost basis (4.36127 shares, 567.53), a sell that
+stops partway into a lot, selling everything, and bad inputs. The real page was driven
+on dev for a buy, a sell and an oversell. A second change on the same branch collapsed
+the order and fee fields by default (opening them when a parsed slip filled a fee) and
+moved Save Trade out of the bordered box, with `st.form(border=False)`.
+
+**Known limit.** A symbol not already held has no cached price, so its P/L shows as
+unavailable. Planned follow-up if wanted: a price lookup for new symbols.
+
+### V4.17.1 -- Rebalance & Reallocate summary refresh, buy progress
+
+**Problem.** After Save changes, the saved row appeared in the table, but % allocated,
+% remaining and Invest $ kept the pre-save numbers. Cause: the summary and the Invest $
+column were drawn from the snapshot before the save ran in the same run, and the
+follow-up rerun was fragment-only and did not redraw them. Reproduced on dev with the
+real page (the database and the snapshot were already correct; only the display lagged).
+
+**Fix.** Save, Amount change and Reset now call a full `st.rerun()` after refreshing the
+snapshot. The "Saved N row(s)" confirmation is kept in session state and shown after the
+rerun, since a rerun would otherwise drop it. Trade-off: a full rerun can reset the
+page's scroll position after a save.
+
+**Buy progress.** A line under Div Contrib % / New Contrib %: "bought X of Y symbols ·
+$A of $B planned". Y counts rows with % Reinvest above 0; X counts those ticked
+Bought?. $A is their Invest $, and $B is the Invest $ of every planned row. Bought? only
+records a reminder, not a trade. Read from the same snapshot as the summary.
+
+**Verification.** Dev only, with the real page: a saved % appeared in the summary in the
+same run, the confirmation showed, and the progress counts matched the saved plan. The
+dev plan rows used for testing were cleared afterwards. Browser check on prod is still
+the user's to do.
+
+**Test-harness lesson.** A test that writes plan rows for symbols that have no row yet
+silently does nothing (the page only creates a row when a symbol is edited). Check the
+saved rows before reading any page result.
+
 ## Deferred / future
 
 - **A "view" link from Monitor Stocks straight into Company
