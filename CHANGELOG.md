@@ -1,5 +1,25 @@
 # Changelog
 
+## Rebalance save refresh and buy progress (v4.17.1)
+
+- Rebalance & Reallocate: after **Save changes**, the % allocated, % remaining and
+  Invest $ figures now update at once. Before, they kept showing the previous numbers
+  until the next click, even though the save had been stored.
+- New **Buy progress** line under the Div Contrib % / New Contrib % row: how many of
+  the planned symbols are ticked Bought?, and how much of the planned amount that is.
+- Bought? is still only a reminder; nothing is recorded as a trade.
+- No breaking changes. Full test suite: 807/807 passing.
+
+## Record Trade preview and collapsed fees (v4.17)
+
+- Record Trade shows your position now next to the position after this trade, once
+  quantity and price are entered, before Save. Covers buys and sells, with shares,
+  average cost, cost basis and P/L at the cached price. Nothing is saved from the
+  preview.
+- Order details and fees are collapsed by default, and open by themselves after a
+  slip upload that filled in a fee. Save Trade sits below the section.
+- No breaking changes. Full test suite: 807/807 passing.
+
 ## Company Health Summary (v4.16)
 
 A plain "is this company healthy?" read for every stock, in three places.
