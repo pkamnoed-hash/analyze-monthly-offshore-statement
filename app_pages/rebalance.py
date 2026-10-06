@@ -196,6 +196,7 @@ DISPLAY_COLS = [
     "Bought?",
 ]
 SNAPSHOT_KEY = "rebalance_snapshot"
+FLASH_KEY = "rebalance_flash"
 
 # Focused slices of DISPLAY_COLS. Weight/Dividend Impact/Performance are read-only, for
 # scanning. Analyze is the sole editable tab (% Reinvest/Bought?) -- see Section 3 below.
@@ -260,6 +261,13 @@ def _rebalance_body(holdings: pd.DataFrame, refreshed_at: datetime):
     def _bought(symbol):
         return plan["items"].get(symbol, {}).get("bought", False)
 
+    # A save or reset reruns the whole page so the summary and Invest $ column pick up the
+    # new state in one go (a fragment-only rerun left them showing the pre-save numbers).
+    # The confirmation is carried across that rerun here, since st.success would be lost.
+    flash = st.session_state.pop(FLASH_KEY, None)
+    if flash:
+        st.success(flash)
+
     snapshot = st.session_state.get(SNAPSHOT_KEY)
     if (
         snapshot is None
@@ -323,7 +331,7 @@ def _rebalance_body(holdings: pd.DataFrame, refreshed_at: datetime):
         db.update_rebalance_plan_amount(plan["id"], amount)
         plan["amount"] = amount
         _refresh_snapshot(holdings, plan, refreshed_at)
-        st.rerun(scope="fragment")
+        st.rerun()
 
     # % allocated/remaining, from the same frozen snapshot as everything else below --
     # reflects your last Save, not what's mid-typing in the form further down (forms
@@ -380,6 +388,22 @@ def _rebalance_body(holdings: pd.DataFrame, refreshed_at: datetime):
         "New Contrib %", f"{new_blended_yield:.2f}%",
         help="Blended yield after this allocation -- shows whether it raises or lowers "
              "your basket's overall yield, not just where the money is going.",
+    )
+
+    # Buy progress -- planned rows are those with a % Reinvest above 0; "bought" counts the
+    # rows ticked Bought?. Bought? is only a reminder and records no trade, so this shows
+    # what has been ticked, not what Record Trade has saved. Read from the same snapshot as
+    # the rest of this section, so it updates with the summary on Save.
+    grid = snapshot["grid_source"]
+    planned = grid[grid["% Reinvest"] > 0]
+    invest_by_symbol = snapshot["allocated"].set_index("Symbol")["Invest $"]
+    planned_symbols = planned["Symbol"].tolist()
+    bought_symbols = planned.loc[planned["Bought?"].astype(bool), "Symbol"].tolist()
+    planned_dollars = float(invest_by_symbol.reindex(planned_symbols).sum())
+    bought_dollars = float(invest_by_symbol.reindex(bought_symbols).sum())
+    st.markdown(
+        f"**Buy progress:** bought {len(bought_symbols)} of {len(planned_symbols)} symbols  ·  "
+        f"\\${bought_dollars:,.2f} of \\${planned_dollars:,.2f} planned"
     )
 
     st.divider()
@@ -578,18 +602,18 @@ def _rebalance_body(holdings: pd.DataFrame, refreshed_at: datetime):
                 # the page has something to show on the next render.
                 db.start_rebalance_plan(holdings["Symbol"].tolist())
                 plan = db.get_active_rebalance_plan()
-                st.success("All rows bought -- plan complete! Started a fresh one.")
+                st.session_state[FLASH_KEY] = "All rows bought -- plan complete! Started a fresh one."
             else:
-                st.success(f"Saved {changed} row(s).")
+                st.session_state[FLASH_KEY] = f"Saved {changed} row(s)."
             _refresh_snapshot(holdings, plan, refreshed_at)
-        st.rerun(scope="fragment")
+        st.rerun()
 
     if st.button("Reset plan", help="Abandons this plan (amount, %s, and bought ticks) without requiring every row to be bought first."):
         db.reset_rebalance_plan(plan["id"])
         db.start_rebalance_plan(holdings["Symbol"].tolist())
         plan = db.get_active_rebalance_plan()
         _refresh_snapshot(holdings, plan, refreshed_at)
-        st.rerun(scope="fragment")
+        st.rerun()
 
 
 _rebalance_body(holdings, last_refreshed)
