@@ -4604,12 +4604,32 @@ ever logged into the app, which turned out to be very different between dev and 
 and holdings-continuity audits above. Real Dashboard/Reconciliation/Monitor Stocks
 pages driven on dev before and after the dev-side trades/dividends fix.
 
-### Deferred
+### Prod catch-up (V4.18.1)
 
-- **Prod's trades/dividends catch-up** (clearing the now-covered manual rows, July
-  2026 and earlier within this statement, and re-running the seed script): same fix as
-  dev, not yet applied. Intentionally deferred rather than rushed into this release;
-  the user will trigger it explicitly.
+Done as a separate, explicit step, exactly as planned above: `scripts/
+prod_q3_catchup.py`, run by the user directly (not Claude -- a bulk delete against the
+production database is blocked by this environment's own safety controls, by design;
+Claude verified and completed everything else around it).
+
+- Refuses to run against anything but prod; takes its own fresh backup first; prints
+  exactly which rows it will delete and keep and requires a typed `YES`; deletes only
+  the manual trades/dividends dated on or before Sept 30 (October activity untouched);
+  re-seeds from the workbook; verifies positions against the statement itself.
+- **Found and fixed during testing**: the first version reused one database connection
+  across the whole run, including across the confirmation prompt; the connection went
+  stale partway through re-seeding dividends on a dry run against dev, leaving dev's
+  dividends table briefly empty. Fixed by giving each step (backup, delete, each bulk
+  insert, final read) its own fresh connection, then re-tested end to end until it ran
+  clean with no errors before being handed over.
+- **Run on prod**: completed successfully. Verified independently afterward (not just
+  by trusting the script's own printed summary): trades 1,032 (1,022 re-seeded +
+  the 10 real October trades, untouched), dividends 1,012 (1,005 + 7 October,
+  untouched); every one of 58 symbols held as of Sept 30 matches the statement's
+  Holdings sheet exactly; the real Reconciliation page shows nothing needing review
+  and no gaps; Dashboard's Portfolio Value matches the statement total exactly; a
+  table-by-table diff of a backup taken immediately before the run against one taken
+  immediately after showed only `trades` and `dividends` changed -- all 12 other
+  tables byte-for-byte identical.
 
 ## Deferred / future
 
