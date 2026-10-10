@@ -144,7 +144,7 @@ still useful as a labeled reference point (`V1-record-trade-and-view`,
 `main` has V1, V2, V2.1, V2.2, V2.3, V2.4, V3, V3.1, V4, V4.1.1, V4.1,
 V4.1.2, V4.2, V4.3, V4.3.1, V4.4, V4.4.1, V4.5, V4.5.1, V4.5.2, V4.6,
 V4.6.1, V4.7, V4.8, V4.9, V4.9.3, V4.10, V4.10.1, V4.11, V4.12, V4.13, V4.14, V4.15, and
-**V4.16** through **V4.18** merged in (807/807 passing on `main`; tagged `v4.16`, `v4.17`, `v4.17.1`; V4.18 is a data-only release and not tagged). V4.3 overhauls Rebalance &
+**V4.16** through **V4.18.1** merged in (807/807 passing on `main`; tagged `v4.16` through `v4.18.1`). V4.3 overhauls Rebalance &
 Reallocate (5-tab split, Analyze as the sole editable tab, Total P/L,
 Beta, THB calculator, Summary KPI redesign), adds a Monitor Stocks
 Monthly Dividend chart (validated against a real broker statement
