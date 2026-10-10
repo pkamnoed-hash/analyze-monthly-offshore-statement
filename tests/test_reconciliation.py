@@ -468,9 +468,9 @@ class TestUnmatchedXlsxIncome:
 class TestLoadXlsxForReconciliation:
     def test_loads_real_workbook_and_computes_expected_cutoff(self):
         cutoff, transactions, income = load_xlsx_for_reconciliation(
-            "data/Offshore_Statements_2023-01_to_2026-06.xlsx"
+            "data/Offshore_Statements_2023-01_to_2026-09.xlsx"
         )
-        assert cutoff == pd.Timestamp("2026-06-30")
+        assert cutoff == pd.Timestamp("2026-09-30")
         assert len(transactions) > 0
         assert len(income) > 0
         assert pd.api.types.is_datetime64_any_dtype(transactions["Trade Date"])
@@ -481,20 +481,20 @@ class TestLoadXlsxForReconciliation:
         # be ~100% -- this is the same data seeded into SQLite via
         # scripts/seed_from_xlsx.py, so it's a self-consistency check on the
         # matcher, not a claim about live SQLite data (that's Step 5's job).
-        _, transactions, _ = load_xlsx_for_reconciliation("data/Offshore_Statements_2023-01_to_2026-06.xlsx")
+        _, transactions, _ = load_xlsx_for_reconciliation("data/Offshore_Statements_2023-01_to_2026-09.xlsx")
         tx = transactions[transactions["Symbol"].notna()].reset_index(drop=True)
         sqlite_like = tx.rename(columns={}).copy()
         sqlite_like["id"] = range(len(sqlite_like))
         result = match_trades(sqlite_like[["id", "Trade Date", "Symbol", "Quantity", "Price"]], transactions)
-        assert len(result) == 902
-        assert result["matched"].sum() == 902
+        assert len(result) == 1022
+        assert result["matched"].sum() == 1022
 
     def test_real_data_dividend_match_rate_is_near_complete(self):
         # Same self-consistency idea as the trades check above, mirroring
         # scripts/seed_from_xlsx.py::build_dividend_rows()'s own grouping
-        # logic: 878 grouped dividend rows + 17 interest rows = 895 total,
-        # the plan's predicted figure.
-        _, _, income = load_xlsx_for_reconciliation("data/Offshore_Statements_2023-01_to_2026-06.xlsx")
+        # logic: 988 grouped dividend rows + 17 interest rows = 1005 total, re-counted
+        # against the workbook each time a new statement is merged in (V4.18).
+        _, _, income = load_xlsx_for_reconciliation("data/Offshore_Statements_2023-01_to_2026-09.xlsx")
 
         div = income[income["Entry Type"].isin(["Dividends", "Div. Adj(NRA Withheld)"]) & income["Symbol"].notna()]
         grouped = div.groupby(["Trade Date", "Symbol"], as_index=False)["Net Amt"].sum()
@@ -512,5 +512,5 @@ class TestLoadXlsxForReconciliation:
         ], ignore_index=True)
 
         result = match_dividends(sqlite_like, income)
-        assert len(result) == 895
-        assert result["matched"].sum() == 895
+        assert len(result) == 1005
+        assert result["matched"].sum() == 1005

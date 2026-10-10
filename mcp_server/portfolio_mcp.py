@@ -48,7 +48,7 @@ mcp = MCPServer("Portfolio")
 # (calculations.blended_dividends) -- "Dividends Received" is ACTUAL dividends
 # paid out, a different, backward-looking figure from the "Expected Div/Yr"
 # projection Monitor Stocks also shows.
-DATA_FILE = os.path.join(ROOT, "data", "Offshore_Statements_2023-01_to_2026-06.xlsx")
+DATA_FILE = os.path.join(ROOT, "data", "Offshore_Statements_2023-01_to_2026-09.xlsx")
 DIVIDEND_ENTRY_TYPES = ["Dividends", "Div. Adj(NRA Withheld)", "Dividend", "Capital Distribution"]
 
 

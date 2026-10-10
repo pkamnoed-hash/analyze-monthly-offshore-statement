@@ -1,5 +1,16 @@
 # Changelog
 
+## Q3 2026 statement import (v4.18)
+
+- Imported the official July, August and September 2026 broker statements. The app's
+  reference workbook now covers January 2023 through September 2026.
+- All three statements reconciled cleanly: every cash, transaction, dividend and
+  holdings check matched to the cent, and each month's beginning balance matched the
+  prior month's ending exactly.
+- Code-only change: no page looks or behaves differently. The local dev database was
+  re-seeded to match; production was left untouched and will be caught up separately.
+- No breaking changes. Full test suite: 807/807 passing.
+
 ## Rebalance save refresh and buy progress (v4.17.1)
 
 - Rebalance & Reallocate: after **Save changes**, the % allocated, % remaining and

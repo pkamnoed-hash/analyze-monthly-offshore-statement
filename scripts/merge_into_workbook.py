@@ -1,5 +1,5 @@
-"""Append the extracted May/June 2026 statement data onto the existing workbook,
-matching its established per-column conventions exactly (e.g. Holdings.Quantity
+"""Append the extracted July/August/September 2026 statement data onto the existing
+workbook, matching its established per-column conventions exactly (e.g. Holdings.Quantity
 uses the literal string "$--" for blank cells rather than NaN, unlike every
 other numeric column in that sheet), and extend the Validation sheet with the
 same 5 reconciliation checks already computed for the existing months.
@@ -9,11 +9,12 @@ import pandas as pd
 
 from extract_statement import extract_statement
 
-SRC = r"c:\Users\ADMIN\OneDrive\Desktop\Claude\VS Code\analyze monthly offshore statement\data\Offshore_Statements_2023-01_to_2026-04.xlsx"
-DST = r"c:\Users\ADMIN\OneDrive\Desktop\Claude\VS Code\analyze monthly offshore statement\data\Offshore_Statements_2023-01_to_2026-06.xlsx"
+SRC = r"C:\Users\ADMIN\OneDrive\Desktop\Claude\VS Code\analyze monthly offshore statement\data\Offshore_Statements_2023-01_to_2026-06.xlsx"
+DST = r"C:\Users\ADMIN\OneDrive\Desktop\Claude\VS Code\analyze monthly offshore statement\data\Offshore_Statements_2023-01_to_2026-09.xlsx"
 PDFS = [
-    r"c:\Users\ADMIN\OneDrive\Desktop\Claude\VS Code\analyze monthly offshore statement\reports\account_statement_947159514_20260531.pdf",
-    r"c:\Users\ADMIN\OneDrive\Desktop\Claude\VS Code\analyze monthly offshore statement\reports\account_statement_947159514_20260630.pdf",
+    r"C:\Users\ADMIN\OneDrive\Desktop\Claude\VS Code\analyze monthly offshore statement\reports\2026\account_statement_947159514_20260731.pdf",
+    r"C:\Users\ADMIN\OneDrive\Desktop\Claude\VS Code\analyze monthly offshore statement\reports\2026\account_statement_947159514_20260831.pdf",
+    r"C:\Users\ADMIN\OneDrive\Desktop\Claude\VS Code\analyze monthly offshore statement\reports\2026\account_statement_947159514_20260930.pdf",
 ]
 
 SHEET_ORDER = ["Summary", "Holdings", "Transactions", "Income", "Fees", "Deposits & Withdrawals", "Validation"]

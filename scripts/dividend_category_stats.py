@@ -20,7 +20,7 @@ import pandas as pd  # noqa: E402
 
 from core import calculations, db, market_data, rebalance  # noqa: E402
 
-DATA_FILE = os.path.join(PROJECT_ROOT, "data", "Offshore_Statements_2023-01_to_2026-06.xlsx")
+DATA_FILE = os.path.join(PROJECT_ROOT, "data", "Offshore_Statements_2023-01_to_2026-09.xlsx")
 SECRETS_FILE = os.path.join(PROJECT_ROOT, ".streamlit", "secrets.toml")
 DIVIDEND_ENTRY_TYPES = ["Dividends", "Div. Adj(NRA Withheld)", "Dividend", "Capital Distribution"]
 AS_OF_DATE = pd.Timestamp("2024-04-04")

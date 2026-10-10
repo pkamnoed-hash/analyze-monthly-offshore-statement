@@ -7,7 +7,7 @@ import cached_db
 from core import db, reconciliation
 
 DATA_FILE = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "Offshore_Statements_2023-01_to_2026-06.xlsx"
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "Offshore_Statements_2023-01_to_2026-09.xlsx"
 )
 
 st.title("Reconciliation")
