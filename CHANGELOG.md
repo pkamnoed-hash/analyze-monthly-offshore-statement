@@ -1,5 +1,15 @@
 # Changelog
 
+## Production trades/dividends caught up to Q3 (v4.18.1)
+
+- Your real trades and dividends for July-September, previously logged live, are now
+  replaced by the broker's own precise figures from the official statement -- your
+  current share counts match the statement exactly. October's real activity (10
+  trades, 7 dividends) was left exactly as you entered it.
+- Run from a script you confirmed yourself, with a fresh backup taken first. Verified
+  afterward every symbol you hold matches the statement, and that nothing else in the
+  database changed.
+
 ## Q3 2026 statement import (v4.18)
 
 - Imported the official July, August and September 2026 broker statements. The app's
@@ -8,7 +18,7 @@
   holdings check matched to the cent, and each month's beginning balance matched the
   prior month's ending exactly.
 - Code-only change: no page looks or behaves differently. The local dev database was
-  re-seeded to match; production was left untouched and will be caught up separately.
+  re-seeded to match; production was caught up separately (see v4.18.1 above).
 - No breaking changes. Full test suite: 807/807 passing.
 
 ## Rebalance save refresh and buy progress (v4.17.1)
