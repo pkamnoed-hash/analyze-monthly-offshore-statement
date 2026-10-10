@@ -13,7 +13,7 @@ import pandas as pd
 
 from extract_statement import extract_statement
 
-WORKBOOK = r"c:\Users\ADMIN\OneDrive\Desktop\Claude\VS Code\analyze monthly offshore statement\data\Offshore_Statements_2023-01_to_2026-06.xlsx"
+WORKBOOK = r"c:\Users\ADMIN\OneDrive\Desktop\Claude\VS Code\analyze monthly offshore statement\data\Offshore_Statements_2023-01_to_2026-09.xlsx"
 
 pdf_paths = [
     p for p in glob.glob(

@@ -4530,6 +4530,87 @@ the user's to do.
 silently does nothing (the page only creates a row when a symbol is edited). Check the
 saved rows before reading any page result.
 
+## V4.18: Q3 2026 statement import
+
+Branch `v4.18-statement-2026-q3`, cut from `main` after v4.17.1 merged in.
+Data-only release: no page looks or behaves differently.
+
+### What this is
+
+The user's broker publishes a new monthly statement PDF; three had accumulated
+(July, August, September 2026). The same pipeline V2's original statement work built
+(`scripts/extract_statement.py`, grid-based `pdfplumber` extraction; `scripts/
+merge_into_workbook.py`, append + reconciliation checks) was reused unchanged, following
+the same process the May/June 2026 import used.
+
+### What was done
+
+1. Extracted all three PDFs and ran the same 5 reconciliation checks the workbook
+   already carries for every prior month (cash identity, transaction sum vs summary,
+   dividend sum vs summary, holdings sum vs summary, prior-month-ending vs this-month-
+   beginning) *before* writing anything -- all five landed at or near zero, same small
+   per-row rounding the existing months already show, and the monthly cash chain was
+   unbroken.
+2. Merged into a new workbook, `data/Offshore_Statements_2023-01_to_2026-09.xlsx`.
+   Updated every reference to the old filename: 4 app pages, the MCP server, 4
+   one-off/`scripts/` tools, and one test file (two real-data self-consistency counts
+   re-verified at 100% match on the larger history).
+3. Removed the superseded June workbook -- only one workbook has ever been tracked in
+   git (the April predecessor never was), and the source PDFs for every month stay in
+   `reports/`, so nothing is lost.
+4. Independent verification beyond the per-statement checks: `scripts/
+   full_history_check.py` over all 45 statements the app has ever ingested (0
+   extraction errors, 0 reconciliation issues, no missing/duplicate months) and
+   `scripts/check_holdings_continuity.py` (1,669 symbol-months, 0 quantity mismatches,
+   0 "ghost" holdings). The real Dashboard page, driven on dev, showed a Portfolio
+   Value matching the September statement's total exactly.
+
+### Dev vs prod: the live trades/dividends tables
+
+Moving the workbook's cutoff from June to September doesn't, by itself, change how
+current positions are computed (`compute_current_positions` sums the whole live trades
+table regardless of any cutoff) -- so nothing breaks by shipping the code alone. But
+the live table's accuracy for anything since July depends on whether that activity was
+ever logged into the app, which turned out to be very different between dev and prod:
+
+- **Dev** had no real July-September activity logged at all (only 4 obviously synthetic
+  test rows -- round share counts, round prices). Those were cleared and the seed
+  script re-run with `--force`, bringing dev's live trades (1,022 rows) and dividends
+  (1,005 rows) current through September. Verified against the September Holdings
+  sheet: every one of 58 held symbols matched exactly.
+- **Prod** had the opposite situation: 101 real manual trades and 106 real manual
+  dividends logged live via Record Trade from July through the day of this import,
+  reflecting genuine day-to-day use. The exact matcher the Reconciliation page itself
+  uses found almost no byte-identical matches against the statement (rounded/dollar-
+  based manual entries vs. the broker's exact fractional-share fills), which at first
+  looked like a real discrepancy. Tracing one month in detail explained it: some
+  statement trades are split into multiple same-day execution rows that a single manual
+  entry combines, one real options-contract trade was never logged manually at all, and
+  one likely duplicate manual entry was found -- none of it a sign of missing or wrong
+  real-world activity, and all of it resolves cleanly by replacing the covered period
+  with the audited statement, the same pattern already used for every prior quarter
+  (the live table's seed portion has always stopped exactly where the last import left
+  off, with manual entries picking up from there).
+- **Decision**: ship the code and the new workbook now; leave prod's trades/dividends
+  tables untouched as a deliberate, separate step, specifically because a bulk delete
+  against the production database deserves its own care and its own explicit go-ahead,
+  not because anything is broken by deferring it. A full prod backup was taken before
+  shipping regardless. See "Deferred" below for the follow-up.
+
+### Verification
+
+`py_compile` and the full `pytest -q` (807 passing, 2 real-data counts in
+`tests/test_reconciliation.py` re-verified against the larger history). Full-history
+and holdings-continuity audits above. Real Dashboard/Reconciliation/Monitor Stocks
+pages driven on dev before and after the dev-side trades/dividends fix.
+
+### Deferred
+
+- **Prod's trades/dividends catch-up** (clearing the now-covered manual rows, July
+  2026 and earlier within this statement, and re-running the seed script): same fix as
+  dev, not yet applied. Intentionally deferred rather than rushed into this release;
+  the user will trigger it explicitly.
+
 ## Deferred / future
 
 - **A "view" link from Monitor Stocks straight into Company

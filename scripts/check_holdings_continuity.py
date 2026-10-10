@@ -14,7 +14,7 @@ entry types.
 
 import pandas as pd
 
-WORKBOOK = r"c:\Users\ADMIN\OneDrive\Desktop\Claude\VS Code\analyze monthly offshore statement\data\Offshore_Statements_2023-01_to_2026-06.xlsx"
+WORKBOOK = r"c:\Users\ADMIN\OneDrive\Desktop\Claude\VS Code\analyze monthly offshore statement\data\Offshore_Statements_2023-01_to_2026-09.xlsx"
 
 xls = pd.ExcelFile(WORKBOOK)
 transactions = pd.read_excel(xls, "Transactions")

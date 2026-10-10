@@ -17,7 +17,7 @@ DEFAULT_THB_RATE = 33.0
 # duplicated from app_pages/monitor_stocks.py/dashboard.py rather than centralized in
 # core/ -- matches this repo's existing per-page pattern for this same xlsx load.
 DATA_FILE = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "Offshore_Statements_2023-01_to_2026-06.xlsx"
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "Offshore_Statements_2023-01_to_2026-09.xlsx"
 )
 DIVIDEND_ENTRY_TYPES = ["Dividends", "Div. Adj(NRA Withheld)", "Dividend", "Capital Distribution"]
 
