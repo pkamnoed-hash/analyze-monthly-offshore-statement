@@ -50,7 +50,7 @@ def load_xlsx_for_reconciliation(path):
     return cutoff, transactions, income
 
 
-def _pair_1to1(left, right, key_cols):
+def pair_1to1(left, right, key_cols):
     """Generic duplicate-safe 1:1 pairing: ranks duplicates within each key
     group on both sides (groupby(..., dropna=False).cumcount()) and folds
     that rank into the join key, so e.g. two rows sharing a key on one side
@@ -95,7 +95,7 @@ def match_trades(sqlite_trades, xlsx_transactions):
     right = right[["Trade Date", "Symbol", "_qty_key", "_price_key", "xlsx_month"]]
 
     key_cols = ["Trade Date", "Symbol", "_qty_key", "_price_key"]
-    paired = _pair_1to1(left, right, key_cols)
+    paired = pair_1to1(left, right, key_cols)
 
     paired["matched"] = paired["_merge"] == "both"
     paired["reason"] = paired["matched"].map({True: None, False: "No matching xlsx trade found"})
@@ -125,7 +125,7 @@ def match_dividend_rows(sqlite_dividends, xlsx_income):
     grouped = grouped[["Trade Date", "Symbol", "_amt_key", "xlsx_month"]]
 
     key_cols = ["Trade Date", "Symbol", "_amt_key"]
-    paired = _pair_1to1(left, grouped, key_cols)
+    paired = pair_1to1(left, grouped, key_cols)
     paired["matched"] = paired["_merge"] == "both"
     paired["reason"] = paired["matched"].map({True: None, False: "No matching xlsx dividend found"})
     return paired.drop(columns=["_amt_key", "_merge"])
@@ -137,7 +137,7 @@ def match_interest_rows(sqlite_dividends, xlsx_income):
     for every interest row regardless of what the xlsx actually shows, so
     matching against the real xlsx Symbol would never line up with
     seeded/live data. Key: (Trade Date, round(Net Amt, 2)) plus
-    _pair_1to1's duplicate rank, since same-day multi-symbol interest
+    pair_1to1's duplicate rank, since same-day multi-symbol interest
     postings are real (e.g. SGOV + SHV credited the same day) and must
     pair positionally rather than being grouped/summed together."""
     left = sqlite_dividends[sqlite_dividends["Entry Type"] == "Interest"].copy()
@@ -151,7 +151,7 @@ def match_interest_rows(sqlite_dividends, xlsx_income):
     right = right[["Trade Date", "_amt_key", "xlsx_month"]]
 
     key_cols = ["Trade Date", "_amt_key"]
-    paired = _pair_1to1(left, right, key_cols)
+    paired = pair_1to1(left, right, key_cols)
     paired["matched"] = paired["_merge"] == "both"
     paired["reason"] = paired["matched"].map({True: None, False: "No matching xlsx interest found"})
     return paired.drop(columns=["_amt_key", "_merge"])
@@ -193,7 +193,7 @@ def unmatched_xlsx_trades(sqlite_trades_all, xlsx_transactions, since=None):
     sqlite = sqlite[["Trade Date", "Symbol", "_qty_key", "_price_key"]]
 
     key_cols = ["Trade Date", "Symbol", "_qty_key", "_price_key"]
-    paired = _pair_1to1(xlsx, sqlite, key_cols)
+    paired = pair_1to1(xlsx, sqlite, key_cols)
     gaps = paired[paired["_merge"] == "left_only"]
     return gaps.drop(columns=["_qty_key", "_price_key", "_merge"]).reset_index(drop=True)
 
@@ -213,7 +213,7 @@ def _unmatched_xlsx_dividend_rows(sqlite_dividends_all, xlsx_income, since=None)
     sqlite = sqlite[["Trade Date", "Symbol", "_amt_key"]]
 
     key_cols = ["Trade Date", "Symbol", "_amt_key"]
-    paired = _pair_1to1(grouped, sqlite, key_cols)
+    paired = pair_1to1(grouped, sqlite, key_cols)
     gaps = paired[paired["_merge"] == "left_only"]
     return gaps[["Trade Date", "Symbol", "Entry Type", "Net Amt"]].reset_index(drop=True)
 
@@ -232,7 +232,7 @@ def _unmatched_xlsx_interest_rows(sqlite_dividends_all, xlsx_income, since=None)
     sqlite = sqlite[["Trade Date", "_amt_key"]]
 
     key_cols = ["Trade Date", "_amt_key"]
-    paired = _pair_1to1(interest, sqlite, key_cols)
+    paired = pair_1to1(interest, sqlite, key_cols)
     gaps = paired[paired["_merge"] == "left_only"]
     # Symbol here is the xlsx's real reported symbol (e.g. "SHV") -- informational only,
     # deliberately not part of the match key (see match_interest_rows' docstring).

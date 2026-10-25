@@ -13,10 +13,15 @@ straight, with no `st.cache_data`/session-state machinery in the way.
 Credentials: TURSO_DATABASE_URL / TURSO_AUTH_TOKEN, read from the process
 environment via python-dotenv's load_dotenv() below (from mcp_server/.env on the
 VPS -- see .env.example). Write access: this file's own code only ever calls
-read functions plus the two specific derived-data writes documented per-tool
-below (reference-line "passed" marking, reference-line auto-capture) -- never
-save_trade/save_dividend/save_symbol_types. See docs/ROADMAP.md V4.13 "Write
-access" decision for why.
+read functions plus the derived-data writes documented per-tool below
+(reference-line "passed" marking, reference-line auto-capture) and, as of V4.19,
+two confirm-gated REAL-data writes: record_trades_batch/record_dividends_batch
+-- a deliberate, narrow exception to let Rich record real trades/dividends from
+a photo of a Dime! Activity screenshot, never a free pass (see each tool's own
+docstring for the two-call confirm=False/confirm=True contract this depends on).
+save_symbol_types remains categorically forbidden -- there is still no tool here
+that touches it. See docs/ROADMAP.md V4.13 "Write access" decision, and its
+V4.19 section for why the trade/dividend exception was made.
 """
 
 import os
@@ -37,9 +42,15 @@ import pandas as pd  # noqa: E402
 from mcp.server import MCPServer  # noqa: E402
 
 from core import calculations, db, market_data  # noqa: E402
+from core.dividend_entry import (  # noqa: E402
+    describe_dividend_batch_preview, preview_dividend_batch, record_dividend_batch,
+)
 from core.fundamentals_capture import capture_fundamentals  # noqa: E402
 from core.fundamentals_summary import (  # noqa: E402
     normalize_symbol, summarize_fundamentals, summarize_holdings_health,
+)
+from core.trade_entry import (  # noqa: E402
+    describe_trade_batch_preview, preview_trade_batch, record_trade_batch,
 )
 
 mcp = MCPServer("Portfolio")
@@ -332,6 +343,72 @@ def get_holdings_health() -> str:
     if positions.empty:
         return "No current holdings."
     return summarize_holdings_health(positions["Symbol"].tolist(), db.fetch_fundamentals_cache())
+
+
+@mcp.tool()
+def record_trades_batch(trades: list[dict], confirm: bool = False) -> str:
+    """Records one or more REAL buy/sell trades to the live database -- the
+    same write Record Trade on the web app performs, batched. ALWAYS call
+    with confirm=False first: it checks every row against what's already
+    recorded, tells you what's new vs. already-logged, and writes NOTHING.
+    Show that preview to the user verbatim and wait for an explicit yes.
+    Only then call again with the SAME `trades` list and confirm=True to
+    actually write the new rows (already-recorded ones are skipped
+    automatically either way).
+
+    Each item in `trades`: {"trade_date": "YYYY-MM-DD", "side": "buy"|"sell",
+    "symbol": str, "quantity": number, "price": number, and optionally
+    commission_fee/vat/reserved_fee/fee_rebate/order_type/order_id -- leave
+    these out if you don't have them, e.g. when reading a Dime! Activity
+    screenshot, which shows no fee detail.} Never invent a value for a field
+    you can't actually see -- leave it out or ask the user."""
+    try:
+        if not confirm:
+            return describe_trade_batch_preview(preview_trade_batch(trades))
+
+        result = record_trade_batch(trades)
+        lines = [f"Recorded {len(result['recorded'])} trade(s)."]
+        if result["skipped_already_recorded"]:
+            lines.append(f"Skipped {len(result['skipped_already_recorded'])} already-recorded row(s).")
+        if result["failed"]:
+            lines.append(f"{len(result['failed'])} row(s) failed to save:")
+            for f in result["failed"]:
+                lines.append(f"  - {f['symbol']} {f['trade_date']}: {f['error']}")
+        return "\n".join(lines)
+    except Exception as e:
+        return f"Couldn't process this trade batch: {e}"
+
+
+@mcp.tool()
+def record_dividends_batch(dividends: list[dict], confirm: bool = False) -> str:
+    """Records one or more REAL dividends/interest/capital distributions --
+    the same write Record Dividend performs, batched. Same two-call pattern
+    as record_trades_batch: confirm=False previews and writes nothing,
+    confirm=True (same list) writes the new rows.
+
+    Each item: {"trade_date": "YYYY-MM-DD", "entry_type": "Dividend"|
+    "Interest"|"Capital Distribution", "gross_amount": number,
+    "withholding_tax": number (0 if none), "symbol": str (omit only for
+    Interest)}. On a Dime! Activity screenshot, a dividend is TWO adjacent
+    list entries with the same timestamp -- "Dividend <SYM>" (gross_amount)
+    and "Dividend Withholding Tax <SYM>" (its absolute value is
+    withholding_tax) -- combine them into one item here, don't send them as
+    two separate dividends."""
+    try:
+        if not confirm:
+            return describe_dividend_batch_preview(preview_dividend_batch(dividends))
+
+        result = record_dividend_batch(dividends)
+        lines = [f"Recorded {len(result['recorded'])} dividend/interest entry(ies)."]
+        if result["skipped_already_recorded"]:
+            lines.append(f"Skipped {len(result['skipped_already_recorded'])} already-recorded row(s).")
+        if result["failed"]:
+            lines.append(f"{len(result['failed'])} row(s) failed to save:")
+            for f in result["failed"]:
+                lines.append(f"  - {f.get('symbol')} {f['trade_date']}: {f['error']}")
+        return "\n".join(lines)
+    except Exception as e:
+        return f"Couldn't process this dividend batch: {e}"
 
 
 if __name__ == "__main__":

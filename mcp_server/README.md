@@ -16,10 +16,17 @@ Hermes Agent "Rich" Telegram bot -- backed directly by this repo's own
 | `get_reference_line_status` | Held symbols that passed their nearest support/resistance line |
 | `get_company_fundamentals(symbol, refresh=false)` | One ticker's profile, Analyst Target verdict, latest-year KPIs, key ratios and (V4.16) the Health rating; any ticker, held or not (V4.15) |
 | `get_holdings_health` | (V4.16) Every current holding rated Weak / Mixed / Healthy with the reasons; ETFs/funds and not-yet-stored symbols named. Read-only, no live fetch |
+| `record_trades_batch(trades, confirm=false)` | (V4.19) Records real buy/sell trades, e.g. from a photo of Dime!'s Activity list. `confirm=false` previews (what's new vs. already-recorded, writes nothing); `confirm=true` writes only the new rows |
+| `record_dividends_batch(dividends, confirm=false)` | (V4.19) Same two-call pattern, for dividends/interest/capital distributions |
 
-Writes are limited to `reference_lines` (`get_reference_line_status`) and
-`fundamentals_cache` (`get_company_fundamentals`); never trades, dividends or
-symbol types. `get_holdings_health` writes nothing. See `docs/ARCHITECTURE.md` for the write-boundary reasoning.
+Writes are limited to `reference_lines` (`get_reference_line_status`),
+`fundamentals_cache` (`get_company_fundamentals`), and, as of V4.19, `trades`/
+`dividends` through the two confirm-gated batch tools above -- a deliberate,
+narrow exception, never a free pass (see `core/trade_entry.py`/
+`core/dividend_entry.py` for the two-call contract and duplicate-matching
+logic those tools depend on). `get_holdings_health` writes nothing.
+`save_symbol_types` remains categorically forbidden -- no tool here touches it.
+See `docs/ARCHITECTURE.md` for the full write-boundary reasoning.
 
 ## Local testing (before touching the VPS)
 

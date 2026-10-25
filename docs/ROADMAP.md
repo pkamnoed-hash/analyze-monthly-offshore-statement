@@ -4631,6 +4631,109 @@ Claude verified and completed everything else around it).
   immediately after showed only `trades` and `dividends` changed -- all 12 other
   tables byte-for-byte identical.
 
+## V4.19: Rich records trades/dividends from Dime! Activity screenshots
+
+Branch `v4.19-rich-trade-entry`, cut from `main` after v4.18.1 was tagged.
+
+### What this is
+
+The user asked to record real buy/sell trades and dividends through the "Rich"
+Telegram bot, not only through the web app's Record Trade / Record Dividend pages.
+The real workflow, confirmed from actual screenshots of Dime!'s own **Activity**
+list: not typing one trade at a time, but periodically uploading a photo of that
+screen (which shows many trades/dividends at once, going back weeks or months) and
+having Rich catch up whatever is missing, in one pass.
+
+This is a deliberate, narrow reversal of `mcp_server/portfolio_mcp.py`'s own standing
+rule against `save_trade`/`save_dividend`. `save_symbol_types` stays categorically
+forbidden; `save_trade`/`save_dividend` become allowed only through two new,
+confirm-gated tools.
+
+Confirmed with the user up front: a write never happens on the first call (preview,
+then an explicit confirm); both trades and dividends ship together; usage is batch
+catch-up, not one screenshot per trade; one confirmation covers the whole batch, not
+per-row; no confirmation-code/token round trip -- kept stateless like every other
+tool in this file, with the real safeguard being that Rich always restates the full
+batch before asking to confirm, and deployment verification checks Rich's actual
+tool-call log, never just the reply's wording (the same lesson V4.16 already
+documents).
+
+What the real screenshots showed, and why the design isn't "type one trade in chat":
+Dime!'s Activity list carries no fee/commission/VAT/order-ID data at all (just side,
+symbol, quantity, executed price, timestamp); a dividend appears as **two adjacent
+list entries** sharing one timestamp -- `Dividend <SYM>` (gross, positive) and
+`Dividend Withholding Tax <SYM>` (negative) -- which Rich must pair into one record
+before calling the tool; and the screenshots cover months of history that
+substantially overlaps what's already recorded (from the original statement seed, or
+prior manual entry), so a batch tool that blindly recorded everything visible would
+create serious duplication.
+
+### What was built
+
+- **`core/reconciliation.py::pair_1to1`** -- promoted from `_pair_1to1` (pure rename,
+  no behavior change). It was already a fully generic, duplicate-safe 1:1 pairing
+  primitive (per-key-group rank folded into the merge key); this is its second
+  caller group, matching to candidates read off a screenshot instead of an xlsx.
+- **`core/trade_entry.py`** (new) -- `validate_trade_rows` (per-row validation
+  mirroring Record Trade's own rules; this is also where a real gap in
+  `db.py::insert_trade` gets closed -- that function does `side.lower()` with no
+  check the result is actually `"buy"`/`"sell"`, so a typo there would have silently
+  fallen into the sell branch; this is the first place that's ever actually checked
+  it), `match_against_existing_trades` (de-dupes within the batch itself, then
+  matches survivors against the live `trades` table via `pair_1to1`, same key
+  `reconciliation.match_trades` already uses: Trade Date/Symbol/rounded signed
+  Quantity/rounded Price), `apply_sequential_position_check` (flags a sell exceeding
+  the position *at that point in the batch*, walking candidates in trade-date order
+  and recomputing `calculations.compute_current_positions` incrementally so existing
+  stock splits/ReOrg CA are accounted for correctly -- a batch's own buy can cover a
+  later sell in the same batch), `preview_trade_batch`/`describe_trade_batch_preview`
+  (never write), and `record_trade_batch` (re-runs the full preview against current
+  state, never trusts anything carried from an earlier call, then writes only what's
+  still new, best-effort per row).
+- **`core/dividend_entry.py`** (new) -- same three-stage shape: `validate_dividend_rows`
+  (entry_type enum, symbol required unless Interest, net = round(gross -
+  withholding, 2)), `match_against_existing_dividends` (same `pair_1to1` reuse, key =
+  Trade Date/Symbol/rounded Net Amt), `preview_dividend_batch`/
+  `describe_dividend_batch_preview`/`record_dividend_batch`. No oversell concept.
+- **Two new MCP tools** in `mcp_server/portfolio_mcp.py`: `record_trades_batch(trades,
+  confirm=false)` and `record_dividends_batch(dividends, confirm=false)`. Both are
+  thin wrappers -- `confirm=false` returns the preview text and writes nothing;
+  `confirm=true` (same list) writes and reports exactly what was recorded, what was
+  skipped as already-recorded, and any row that failed at write time. Neither raises
+  to the caller, matching every other tool in the file.
+- Docs: this section, `docs/ARCHITECTURE.md`'s write-boundary paragraph, and
+  `mcp_server/README.md`'s tools table.
+
+### Known limits (stated up front, not discovered later)
+
+- Batch writes are best-effort per row, not one atomic transaction.
+- Duplicate detection is exact-match (same tolerance already proven for
+  official-statement reconciliation) -- a trade Rich reads with a slightly
+  different date or quantity than what's already recorded (e.g. a timezone-shifted
+  timestamp) would show as "new" rather than being recognized as a duplicate.
+- The real risk in this feature is Rich's own image-reading accuracy, not the
+  server-side logic -- there's no way to verify extraction correctness from the code
+  side alone, which is why the first live test used a small, ground-truth-known
+  screenshot rather than a large unfamiliar catch-up batch.
+
+### Verification
+
+`core/trade_entry.py`/`core/dividend_entry.py` each have a full test file (valid
+batches, already-recorded rows skipped, a duplicate row within the same batch,
+invalid side rejected rather than silently treated as a sell, non-positive
+quantity/price rejected, multi-row oversell sequencing, `confirm=false` proven to
+write nothing via a before/after row-count diff, `confirm=true` writing exactly the
+new rows with the same field values `insert_trade`/`insert_dividend` would produce
+for the same page-style input) -- full suite 839 passing. `core/reconciliation.py`'s
+existing 45 tests pass unchanged after the rename. A real stdio-style run against
+**dev** (never prod): a dev backup taken first, a mix of real already-recorded rows
+(an actual PFFA sell and SCHD buy already in dev's seeded September history, and a
+real UTF dividend) plus throwaway new rows confirmed the preview correctly separated
+"already recorded" from "new" and wrote nothing on preview; `confirm=true` wrote
+exactly the new/throwaway rows (including a correctly-flagged oversell), verified via
+`db.fetch_trades()`/`fetch_dividends()`; throwaway rows cleaned up afterward, row
+counts back to exactly their pre-test values.
+
 ## Deferred / future
 
 - **A "view" link from Monitor Stocks straight into Company

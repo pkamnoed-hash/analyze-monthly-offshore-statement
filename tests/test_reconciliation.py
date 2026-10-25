@@ -3,7 +3,7 @@ import pandas as pd
 import pytest
 
 from core.reconciliation import (
-    _pair_1to1,
+    pair_1to1,
     load_xlsx_for_reconciliation,
     match_dividend_rows,
     match_dividends,
@@ -93,20 +93,20 @@ class TestPair1to1:
     def test_matches_on_shared_key(self):
         left = pd.DataFrame({"k": ["A"], "v": [1]})
         right = pd.DataFrame({"k": ["A"], "w": [2]})
-        result = _pair_1to1(left, right, ["k"])
+        result = pair_1to1(left, right, ["k"])
         assert result.iloc[0]["_merge"] == "both"
         assert result.iloc[0]["w"] == 2
 
     def test_no_match_is_left_only(self):
         left = pd.DataFrame({"k": ["A"], "v": [1]})
         right = pd.DataFrame({"k": ["B"], "w": [2]})
-        result = _pair_1to1(left, right, ["k"])
+        result = pair_1to1(left, right, ["k"])
         assert result.iloc[0]["_merge"] == "left_only"
 
     def test_duplicate_on_both_sides_pairs_one_to_one(self):
         left = pd.DataFrame({"k": ["A", "A"], "v": [1, 2]})
         right = pd.DataFrame({"k": ["A", "A"], "w": [10, 20]})
-        result = _pair_1to1(left, right, ["k"])
+        result = pair_1to1(left, right, ["k"])
         assert len(result) == 2
         assert (result["_merge"] == "both").all()
 
@@ -115,7 +115,7 @@ class TestPair1to1:
         # row must NOT fan out and match the same right row twice.
         left = pd.DataFrame({"k": ["A", "A"], "v": [1, 2]})
         right = pd.DataFrame({"k": ["A"], "w": [10]})
-        result = _pair_1to1(left, right, ["k"])
+        result = pair_1to1(left, right, ["k"])
         assert len(result) == 2
         assert (result["_merge"] == "both").sum() == 1
         assert (result["_merge"] == "left_only").sum() == 1
@@ -126,7 +126,7 @@ class TestPair1to1:
         # so they don't cross-match each other's xlsx counterpart.
         left = pd.DataFrame({"k": [np.nan, np.nan], "v": [1, 2]})
         right = pd.DataFrame({"k": [np.nan], "w": [10]})
-        result = _pair_1to1(left, right, ["k"])
+        result = pair_1to1(left, right, ["k"])
         assert len(result) == 2
         assert (result["_merge"] == "both").sum() == 1
 
