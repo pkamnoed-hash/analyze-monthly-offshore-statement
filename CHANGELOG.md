@@ -1,5 +1,12 @@
 # Changelog
 
+## A trade/dividend Rich recorded now shows up within 5 minutes (v4.19.1)
+
+- Before, something Rich recorded only appeared on the web app after a manual Reboot,
+  since the app's cache had no way to know an outside write had happened. It now
+  refreshes on its own within 5 minutes -- nothing in the app recorded through the
+  normal pages changed; those still show up immediately, as before.
+
 ## Rich can record trades and dividends from a screenshot (v4.19)
 
 - Send Rich (the Telegram bot) a photo of your Dime! Activity list, and it can read
