@@ -202,8 +202,18 @@ verdict the page shows. ETFs/funds have no statements and get no health block.
   stored row. A ticker typed into Telegram is validated (letters, digits and
   `. ^ = -`, up to 20 characters) before it can become a database key.
   `get_holdings_health` and the health block are read-only (stored rows in, text
-  out; no fetch). New tools must never call `save_trade`, `save_dividend` or
-  `save_symbol_types`.
+  out; no fetch). New tools must never call `save_symbol_types`.
+  (V4.19) `record_trades_batch`/`record_dividends_batch` are a deliberate,
+  narrow exception to the "no save_trade/save_dividend" rule -- real writes to
+  `trades`/`dividends`, gated behind a mandatory two-call `confirm=False`
+  (preview, writes nothing) then `confirm=True` (writes only what the preview
+  called new) contract enforced in `core/trade_entry.py`/`core/dividend_entry.py`,
+  never the tool function itself. Every candidate row is matched against what's
+  already in the live table (`core/reconciliation.py::pair_1to1`, the same
+  duplicate-safe pairing the official-statement reconciliation feature uses) so
+  a re-sent screenshot or an already-recorded trade is skipped rather than
+  duplicated. `save_symbol_types` remains categorically forbidden -- no tool
+  here touches it.
 - **Prod on the VPS, dev locally.** The VPS `mcp_server/.env` points at the
   prod database; the local `mcp_server/.env` points at dev so local testing
   can't write to prod.

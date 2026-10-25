@@ -1,5 +1,18 @@
 # Changelog
 
+## Rich can record trades and dividends from a screenshot (v4.19)
+
+- Send Rich (the Telegram bot) a photo of your Dime! Activity list, and it can read
+  every trade and dividend on it, check what's already recorded, and record only
+  what's new -- after showing you the full list and waiting for your confirmation.
+  Nothing is ever written on the first message.
+- Anything already in the database, or repeated within the same screenshot, is listed
+  as skipped, not recorded twice. A sell that would exceed what you held at the time
+  is flagged, not blocked.
+- Record Trade and Record Dividend on the web app are unchanged -- this is an
+  additional way in, not a replacement.
+- No breaking changes. Full test suite: 839/839 passing.
+
 ## Production trades/dividends caught up to Q3 (v4.18.1)
 
 - Your real trades and dividends for July-September, previously logged live, are now
