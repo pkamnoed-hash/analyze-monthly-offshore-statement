@@ -7,12 +7,20 @@ v4.5 -- these three reads were previously called uncached on every single page l
 (app_pages/dashboard.py's own old comment: "a trade just recorded should show up
 immediately"), meaning every navigation/rerun paid a real Turso round trip per read,
 even when nothing had changed -- one of three real causes behind the app's "always
-reloads" feeling (see docs/ROADMAP.md V4.5). Cached here with no ttl (held for the
-life of the session) and invalidated explicitly by whichever write actually changed
-that table, same pattern this app already uses for yfinance's "Refresh now" button
-(_cached_fetch_stock_profile.clear() in app_pages/monitor_stocks.py) -- so a save is
-never stale, not even briefly, while plain navigation stops paying for a redundant
-fetch.
+reloads" feeling (see docs/ROADMAP.md V4.5). Cached here and invalidated explicitly
+by whichever write actually changed that table, same pattern this app already uses
+for yfinance's "Refresh now" button (_cached_fetch_stock_profile.clear() in
+app_pages/monitor_stocks.py) -- so a save made THROUGH THIS APP is never stale, not
+even briefly, while plain navigation stops paying for a redundant fetch.
+
+v4.19 -- cached_fetch_trades/cached_fetch_dividends gained a 5-minute ttl (matching
+reference_line_summary's own precedent below). A write from Rich's MCP tools
+(record_trades_batch/record_dividends_batch) happens in a completely separate
+process on the VPS, so it has no way to call invalidate_trades()/
+invalidate_dividends() here -- without a ttl, a trade/dividend Rich records would
+never appear in a running app session until it happened to restart. The other
+cached reads below (symbol_types, target allocation) keep no ttl: nothing outside
+this app writes to those tables.
 """
 import pandas as pd
 import streamlit as st
@@ -20,12 +28,12 @@ import streamlit as st
 from core import calculations, db, market_data
 
 
-@st.cache_data
+@st.cache_data(ttl=300)
 def cached_fetch_trades():
     return db.fetch_trades()
 
 
-@st.cache_data
+@st.cache_data(ttl=300)
 def cached_fetch_dividends():
     return db.fetch_dividends()
 

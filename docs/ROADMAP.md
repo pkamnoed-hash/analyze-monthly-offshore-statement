@@ -4704,6 +4704,32 @@ create serious duplication.
 - Docs: this section, `docs/ARCHITECTURE.md`'s write-boundary paragraph, and
   `mcp_server/README.md`'s tools table.
 
+### Found during the first live test, and fixed the same day
+
+Two issues surfaced testing on prod with real screenshots (both from a real user, not
+a planted test case):
+
+- **Rich read the wrong date off a Dime! Activity dividend row.** The screenshot shows
+  a large, bold deposit date at the top of each entry and a smaller "record: DD Mon
+  YYYY" sub-line underneath; Rich used the record date instead of the deposit date
+  (the convention the user actually enters by hand). Not a server-side bug -- this is
+  exactly the image-reading risk the "Known limits" section below already called out
+  up front. The two affected rows were corrected by the user themselves through
+  Record Dividend's existing delete-and-re-enter path (direct database edits against
+  prod are blocked by this environment's own safety controls, by design, same as
+  V4.18.1's bulk-delete precedent).
+- **The web app didn't show what Rich had just recorded.** `cached_db.py`'s
+  `cached_fetch_trades`/`cached_fetch_dividends` cache with no ttl, invalidated only by
+  this app's OWN write paths calling `invalidate_trades()`/`invalidate_dividends()`
+  after a save -- a write from Rich's MCP tools happens in a separate process on the
+  VPS with no way to reach into a running Streamlit session and clear its cache, so a
+  trade/dividend Rich recorded stayed invisible until the app happened to restart.
+  Fixed by giving both a 5-minute ttl (`@st.cache_data(ttl=300)`), the same precedent
+  `cached_db.py::reference_line_summary` already set for a value that can change
+  outside an explicit invalidate call. In-app saves still show up immediately (the
+  explicit invalidate still fires); an external write now surfaces within 5 minutes
+  instead of only on a manual Reboot.
+
 ### Known limits (stated up front, not discovered later)
 
 - Batch writes are best-effort per row, not one atomic transaction.
