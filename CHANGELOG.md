@@ -1,5 +1,16 @@
 # Changelog
 
+## Rich can now read and adjust your Rebalance & Reallocate plan (v4.20)
+
+- Ask Rich for your current plan -- $ amount, % allocated/remaining, each holding's
+  % Reinvest and Bought status, and the resulting change to your expected monthly
+  dividend -- without opening the app.
+- Ask Rich to change the amount, a symbol's %, or tick something Bought, or to reset
+  the plan entirely -- it shows you exactly what would change first and waits for
+  your confirmation before saving, same as recording a trade.
+- This only manages the plan -- it never buys anything or records a trade. The
+  Rebalance & Reallocate page itself is unchanged.
+
 ## A trade/dividend Rich recorded now shows up within 5 minutes (v4.19.1)
 
 - Before, something Rich recorded only appeared on the web app after a manual Reboot,

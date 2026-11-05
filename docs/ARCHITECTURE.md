@@ -214,6 +214,13 @@ verdict the page shows. ETFs/funds have no statements and get no health block.
   a re-sent screenshot or an already-recorded trade is skipped rather than
   duplicated. `save_symbol_types` remains categorically forbidden -- no tool
   here touches it.
+  (V4.20) `update_rebalance_plan`/`reset_rebalance_plan` apply the same
+  confirm-gated pattern to the Rebalance & Reallocate plan tables
+  (`rebalance_plans`/`rebalance_plan_items`), enforced in
+  `core/rebalance_entry.py`. These still never touch `trades`/`dividends` --
+  the plan is a reminder of what to buy, not a real transaction, so the
+  stakes of a bad write here are lower than V4.19's exception, but the same
+  preview-before-write contract applies regardless.
 - **Prod on the VPS, dev locally.** The VPS `mcp_server/.env` points at the
   prod database; the local `mcp_server/.env` points at dev so local testing
   can't write to prod.

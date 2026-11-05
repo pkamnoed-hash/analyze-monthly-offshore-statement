@@ -14,14 +14,18 @@ Credentials: TURSO_DATABASE_URL / TURSO_AUTH_TOKEN, read from the process
 environment via python-dotenv's load_dotenv() below (from mcp_server/.env on the
 VPS -- see .env.example). Write access: this file's own code only ever calls
 read functions plus the derived-data writes documented per-tool below
-(reference-line "passed" marking, reference-line auto-capture) and, as of V4.19,
+(reference-line "passed" marking, reference-line auto-capture); as of V4.19,
 two confirm-gated REAL-data writes: record_trades_batch/record_dividends_batch
 -- a deliberate, narrow exception to let Rich record real trades/dividends from
 a photo of a Dime! Activity screenshot, never a free pass (see each tool's own
-docstring for the two-call confirm=False/confirm=True contract this depends on).
+docstring for the two-call confirm=False/confirm=True contract this depends on);
+and as of V4.20, update_rebalance_plan/reset_rebalance_plan, the same
+confirm-gated pattern applied to the Rebalance & Reallocate plan tables
+(rebalance_plans/rebalance_plan_items) -- these still record no real trade or
+dividend, only the plan (a reminder of what to buy), which is itself inert data.
 save_symbol_types remains categorically forbidden -- there is still no tool here
 that touches it. See docs/ROADMAP.md V4.13 "Write access" decision, and its
-V4.19 section for why the trade/dividend exception was made.
+V4.19/V4.20 sections for why each exception was made.
 """
 
 import os
@@ -48,6 +52,10 @@ from core.dividend_entry import (  # noqa: E402
 from core.fundamentals_capture import capture_fundamentals  # noqa: E402
 from core.fundamentals_summary import (  # noqa: E402
     normalize_symbol, summarize_fundamentals, summarize_holdings_health,
+)
+from core.rebalance_entry import (  # noqa: E402
+    apply_rebalance_edit, apply_rebalance_reset, describe_plan, get_plan_with_holdings,
+    preview_rebalance_edit, preview_rebalance_reset,
 )
 from core.trade_entry import (  # noqa: E402
     describe_trade_batch_preview, preview_trade_batch, record_trade_batch,
@@ -409,6 +417,84 @@ def record_dividends_batch(dividends: list[dict], confirm: bool = False) -> str:
         return "\n".join(lines)
     except Exception as e:
         return f"Couldn't process this dividend batch: {e}"
+
+
+@mcp.tool()
+def get_rebalance_plan() -> str:
+    """Shows the current Rebalance & Reallocate plan: the $ amount to invest,
+    % allocated/remaining, each Dividend-classified holding's % Reinvest/
+    Invest $/Bought status, and the resulting blended Div Contrib %/Expected
+    Div/Mo before vs. after this allocation. Read-only -- auto-starts a blank
+    plan if none is active yet (same as opening the page for the first
+    time), but changes nothing else. Note: Div Contrib %/Expected Div/Mo
+    match the web page; Total P/L-style figures are not reported here, since
+    those need the offshore-statement workbook this tool doesn't load."""
+    try:
+        data = get_plan_with_holdings()
+        if data["holdings"].empty:
+            return "No Dividend-classified holdings currently held -- nothing to rebalance."
+        return describe_plan(data["holdings"], data["plan"])
+    except Exception as e:
+        return f"Couldn't read the rebalance plan: {e}"
+
+
+@mcp.tool()
+def update_rebalance_plan(amount: float = None, items: list[dict] = None, confirm: bool = False) -> str:
+    """Edits the Rebalance & Reallocate plan -- the $ amount and/or any
+    symbol's % Reinvest / Bought? tick. Same two-call pattern as
+    record_trades_batch: ALWAYS call with confirm=False first -- it shows
+    the plan as it is now and what it would become, and writes NOTHING.
+    Show that to the user and wait for an explicit yes, then call again
+    with the SAME amount/items and confirm=True to actually save it.
+
+    `items`: list of {"symbol": str, "pct": number 0-100 (optional),
+    "bought": bool (optional)} -- only symbols already in the current plan
+    (i.e. currently-held Dividend-classified holdings) are valid; omit a
+    field you don't want to change for that symbol. `amount` is the whole
+    plan's $ amount to invest, omit to leave it unchanged. This does not buy
+    anything or record a trade -- Bought? is a reminder only, same as on the
+    web page; the real purchase still goes through record_trades_batch."""
+    try:
+        if not confirm:
+            result = preview_rebalance_edit(amount, items or [])
+            text = f"Current plan:\n{result['before']}\n\nIf you confirm, it would become:\n{result['after']}"
+            if result["errors"]:
+                text += "\n\nSome of this couldn't be understood:\n" + "\n".join(f"  - {e}" for e in result["errors"])
+            text += "\n\nReply to confirm, then I'll call this again with confirm=true to actually save it."
+            return text
+
+        result = apply_rebalance_edit(amount, items or [])
+        lines = [f"Saved. Updated: {', '.join(result['applied']) if result['applied'] else 'nothing (no changes)'}."]
+        if result["plan_completed"]:
+            lines.append("Every row was bought, so that plan is complete -- a fresh blank plan was started automatically.")
+        if result["errors"]:
+            lines.append("Some of this couldn't be applied:")
+            lines.extend(f"  - {e}" for e in result["errors"])
+        lines.append("")
+        lines.append(result["after"])
+        return "\n".join(lines)
+    except Exception as e:
+        return f"Couldn't update the rebalance plan: {e}"
+
+
+@mcp.tool()
+def reset_rebalance_plan(confirm: bool = False) -> str:
+    """Abandons the current Rebalance & Reallocate plan (amount, every %
+    Reinvest, every Bought? tick) and starts a fresh blank one -- the same
+    as clicking Reset plan on the web page. confirm=False previews what
+    would be abandoned and writes nothing; confirm=True actually resets
+    it."""
+    try:
+        if not confirm:
+            result = preview_rebalance_reset()
+            return (
+                f"This would abandon the current plan:\n{result['before']}\n\n"
+                "Reply to confirm, then I'll call this again with confirm=true to actually reset it."
+            )
+        result = apply_rebalance_reset()
+        return f"Plan reset. A fresh blank plan has started:\n{result['after']}"
+    except Exception as e:
+        return f"Couldn't reset the rebalance plan: {e}"
 
 
 if __name__ == "__main__":
