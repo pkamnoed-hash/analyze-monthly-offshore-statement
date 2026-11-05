@@ -18,6 +18,9 @@ Hermes Agent "Rich" Telegram bot -- backed directly by this repo's own
 | `get_holdings_health` | (V4.16) Every current holding rated Weak / Mixed / Healthy with the reasons; ETFs/funds and not-yet-stored symbols named. Read-only, no live fetch |
 | `record_trades_batch(trades, confirm=false)` | (V4.19) Records real buy/sell trades, e.g. from a photo of Dime!'s Activity list. `confirm=false` previews (what's new vs. already-recorded, writes nothing); `confirm=true` writes only the new rows |
 | `record_dividends_batch(dividends, confirm=false)` | (V4.19) Same two-call pattern, for dividends/interest/capital distributions |
+| `get_rebalance_plan` | (V4.20) The current Rebalance & Reallocate plan: $ amount, % allocated/remaining, each symbol's % Reinvest/Invest $/Bought status, and projected Div Contrib %/Expected Div/Mo. Read-only |
+| `update_rebalance_plan(amount, items, confirm=false)` | (V4.20) Edits the plan's $ amount and/or any symbol's % Reinvest/Bought? tick. Same two-call confirm pattern |
+| `reset_rebalance_plan(confirm=false)` | (V4.20) Abandons the current plan and starts a fresh blank one, same as the page's Reset plan button |
 
 Writes are limited to `reference_lines` (`get_reference_line_status`),
 `fundamentals_cache` (`get_company_fundamentals`), and, as of V4.19, `trades`/
@@ -25,6 +28,10 @@ Writes are limited to `reference_lines` (`get_reference_line_status`),
 narrow exception, never a free pass (see `core/trade_entry.py`/
 `core/dividend_entry.py` for the two-call contract and duplicate-matching
 logic those tools depend on). `get_holdings_health` writes nothing.
+As of V4.20, `rebalance_plans`/`rebalance_plan_items` through
+`update_rebalance_plan`/`reset_rebalance_plan` (same confirm-gated contract,
+enforced in `core/rebalance_entry.py`) -- these never touch `trades`/
+`dividends`, only the plan itself (a reminder of what to buy).
 `save_symbol_types` remains categorically forbidden -- no tool here touches it.
 See `docs/ARCHITECTURE.md` for the full write-boundary reasoning.
 

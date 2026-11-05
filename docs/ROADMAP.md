@@ -4760,6 +4760,79 @@ exactly the new/throwaway rows (including a correctly-flagged oversell), verifie
 `db.fetch_trades()`/`fetch_dividends()`; throwaway rows cleaned up afterward, row
 counts back to exactly their pre-test values.
 
+## V4.20: Rich connects to Rebalance & Reallocate
+
+Branch `v4.20-rich-rebalance`, cut from `main` after v4.19.1 was tagged.
+
+### What this is
+
+Following V4.19 (Rich records trades/dividends), the user asked whether Rich could
+also connect to the Rebalance & Reallocate page (`app_pages/rebalance.py`). That page
+lets the user split a $ amount across their Dividend-classified holdings (persisted
+as a "plan": amount + per-symbol % Reinvest + Bought? ticks), with live projections
+(New Cat Weight %, New Div Contrib %, New Expected Div/Mo) via
+`core/rebalance.py::apply_allocation`. It records no real trade itself -- Bought? is
+a reminder only; the actual purchase still goes through Record Trade /
+`record_trades_batch`.
+
+This gives Rich both kinds of access V4.19 established for trades/dividends: reading
+the plan and its projected effect in chat, and editing it (amount, per-symbol %,
+Bought? ticks) or resetting it -- reusing that precedent's shape (confirm-gated
+writes, stateless re-validation, `core/` logic with no Streamlit import, MCP tools
+that never raise).
+
+### What was built
+
+- **`core/rebalance_entry.py`** (new) -- `get_plan_with_holdings` (the current plan +
+  Dividend-classified holdings, auto-starting a blank plan if none is active, same as
+  opening the page for the first time; adds a placeholder `"Dividends Received"` =
+  0.0 column so `apply_allocation` has every column it expects -- this surface
+  reports Cat Weight/Div Contrib/Expected Div/Mo, not the xlsx-blended actual-P/L
+  figures the web page shows), `describe_plan` (pure text formatter -- $ amount, %
+  allocated/remaining, each symbol's % Reinvest/Invest $/Bought status, blended Div
+  Contrib %/Expected Div/Mo current vs. after), `validate_rebalance_edits` (symbol
+  must already be a current Dividend-classified holding, `pct` in [0, 100], `bought`
+  a real bool -- a malformed item is reported back, never silently dropped),
+  `preview_rebalance_edit`/`apply_rebalance_edit` (same preview-vs-confirm shape as
+  `trade_entry.py`: preview builds an in-memory-only merged plan and never writes;
+  apply re-fetches fresh state, re-validates, writes, and restarts a fresh blank plan
+  if the edit ticks the last remaining row Bought -- mirroring the page's own
+  auto-complete path), and `preview_rebalance_reset`/`apply_rebalance_reset` (same
+  shape for the page's "Reset plan" button).
+- **Three new MCP tools** in `mcp_server/portfolio_mcp.py`: `get_rebalance_plan()`
+  (read-only), `update_rebalance_plan(amount, items, confirm=false)` and
+  `reset_rebalance_plan(confirm=false)` (both confirm-gated, same two-call contract
+  as `record_trades_batch`). None of the three records a real trade or dividend --
+  only the plan itself, which is inert data (a reminder of what to buy).
+- Docs: this section, `docs/ARCHITECTURE.md`'s write-boundary paragraph, and
+  `mcp_server/README.md`'s tools table.
+
+### Known limits (stated up front)
+
+- `get_rebalance_plan`'s Expected Div/Mo and Div Contrib % match the web page
+  exactly; anything derived from "Dividends Received" (Total P/L, Total P/L %) isn't
+  surfaced here, since computing the real xlsx-blended figure would mean loading the
+  offshore-statement workbook in a process that otherwise never touches it.
+- `update_rebalance_plan`/`reset_rebalance_plan` touch only the plan tables
+  (`rebalance_plans`/`rebalance_plan_items`) -- the same "Bought? is a reminder only"
+  caveat the web page already states applies identically here.
+
+### Verification
+
+`core/rebalance_entry.py` has a full test file (21 tests: plan auto-start, `describe_plan`
+rendering, edit validation rejecting an unknown symbol/out-of-range %/non-bool `bought`,
+`preview_rebalance_edit` proven to write nothing with its `"after"` text reflecting the
+hypothetical change, `apply_rebalance_edit` writing exactly the requested changes and
+re-validating against fresh state rather than anything carried from an earlier call,
+auto-starting a fresh plan when the last row is ticked Bought, and reset mirroring the
+page's own button) -- full suite 860 passing. A real stdio-style run against **dev**
+(never prod): `get_rebalance_plan` matched the real dev plan already active (CLOZ 30%,
+AMZP 20% bought, $1,000 amount); `update_rebalance_plan` previewed a DVYE 5% edit with
+nothing written, then `confirm=true` wrote exactly that change (verified via
+`db.get_active_rebalance_plan()`), reverted afterward back to the plan's original state;
+`reset_rebalance_plan`'s preview matched that same restored state, confirming nothing had
+drifted.
+
 ## Deferred / future
 
 - **A "view" link from Monitor Stocks straight into Company
