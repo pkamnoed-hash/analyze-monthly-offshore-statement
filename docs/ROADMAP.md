@@ -4999,21 +4999,23 @@ throwaway insert/delete round trip on dev before confirming the page itself.
 Full suite 904/904 passing (860 going in, +44 new: `core/options.py`,
 `core/option_pl.py` including the partial-fill/short-strategy/source-tracking
 cases, `core/option_slip_parser.py`, `compute_investment_gain`'s new term).
-`core/option_slip_parser.py`'s real-API verification against the user's own
-two uncropped MNST screenshots is deferred -- the local `.streamlit/
-secrets.toml` `ANTHROPIC_API_KEY` was rejected (401) at the time; the parser's
-8 unit tests (mocked client) already cover the schema/fee-math/casing
-behavior, so this isn't blocking, just not yet confirmed against the real API.
-Migration run against **dev** first (6 symbols, 12 rows, P/L matching the
-known historical figures exactly -- e.g. ONDS +$27.00/+34.2%, GDX
+`core/option_slip_parser.py` confirmed against the user's own two real,
+uncropped MNST screenshots (buy and sell) via the real Claude API (after an
+expired local `ANTHROPIC_API_KEY` was replaced) -- every field matched
+exactly, and the computed net `amount` matched the real screen's own Total
+Cost ($180.64) / Estimated Total Credit ($234.35) precisely on both. Migration
+run against **dev** first (6 symbols, 12 rows, P/L matching the known
+historical figures exactly -- e.g. ONDS +$27.00/+34.2%, GDX
 −$395.00/−91.9%; `trades` confirmed unchanged; idempotent re-run confirmed
 safe), then against **prod** the same way (same 6 symbols/12 rows/-$716.00
 total, `trades` confirmed unchanged at 1,049 rows, backed up first via
-`scripts/backup_turso.py`). Rich's `get_lifetime_pl` confirmed against dev to
-include the new Options term in its reply. The page itself was exercised live
-by the user on the dev app -- manual entry, Open/Closed tables, the Duration/
-search filters, and the win-rate KPI label -- surfacing and fixing the
-Timestamp bug above along the way.
+`scripts/backup_turso.py`). Rich's `get_lifetime_pl` confirmed against both
+dev and prod to include the new Options term in its reply. The page itself
+was exercised live by the user on the dev app -- manual entry, Open/Closed
+tables, the Duration/search filters, and the win-rate KPI label -- surfacing
+and fixing the Timestamp bug above along the way. Deployed: merged, tagged
+`v4.22`, pushed; VPS pulled and gateway restarted, `get_lifetime_pl` confirmed
+live on prod with the Options term.
 
 ### Known limits (stated up front)
 
