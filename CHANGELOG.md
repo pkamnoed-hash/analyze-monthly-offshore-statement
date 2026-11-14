@@ -1,5 +1,12 @@
 # Changelog
 
+## An option trade Rich recorded now shows up within 5 minutes (v4.23.1)
+
+- Same fix as v4.19.1, now for options: an option trade Rich recorded only appeared
+  on the web app after a manual Reboot. It now refreshes on its own within 5
+  minutes -- option trades you add through the Option Monitor page itself still
+  show up immediately, as before.
+
 ## New: Tell Rich about your option trades, plus a few UI tweaks (v4.23)
 
 - Tell Rich about an option trade -- from a Dime! screenshot or just chat -- and it
