@@ -23,6 +23,9 @@ and as of V4.20, update_rebalance_plan/reset_rebalance_plan, the same
 confirm-gated pattern applied to the Rebalance & Reallocate plan tables
 (rebalance_plans/rebalance_plan_items) -- these still record no real trade or
 dividend, only the plan (a reminder of what to buy), which is itself inert data.
+As of V4.23, record_option_trades_batch -- the same confirm-gated pattern applied
+to option_trades, for Rich to record real option trades from a Dime! trade-
+confirmation screenshot or plain chat.
 save_symbol_types remains categorically forbidden -- there is still no tool here
 that touches it. See docs/ROADMAP.md V4.13 "Write access" decision, and its
 V4.19/V4.20 sections for why each exception was made.
@@ -53,7 +56,10 @@ from core.fundamentals_capture import capture_fundamentals  # noqa: E402
 from core.fundamentals_summary import (  # noqa: E402
     normalize_symbol, summarize_fundamentals, summarize_holdings_health,
 )
-from core.option_pl import resolved_events  # noqa: E402
+from core.option_entry import (  # noqa: E402
+    describe_option_batch_preview, preview_option_batch, record_option_batch,
+)
+from core.option_pl import compute_option_summary, resolved_events  # noqa: E402
 from core.rebalance_entry import (  # noqa: E402
     apply_rebalance_edit, apply_rebalance_reset, describe_plan, get_plan_with_holdings,
     preview_rebalance_edit, preview_rebalance_reset,
@@ -424,6 +430,169 @@ def record_dividends_batch(dividends: list[dict], confirm: bool = False) -> str:
         return "\n".join(lines)
     except Exception as e:
         return f"Couldn't process this dividend batch: {e}"
+
+
+@mcp.tool()
+def record_option_trades_batch(trades: list[dict], confirm: bool = False) -> str:
+    """Records one or more REAL option trades to the live database -- same
+    two-call confirm pattern as record_trades_batch. ALWAYS call with
+    confirm=False first: it checks every row against what's already recorded
+    (and against how many contracts are currently open for that symbol), tells
+    you what's new vs. already-logged vs. an overclose warning, and writes
+    NOTHING. Show that preview to the user verbatim and wait for an explicit
+    yes, then call again with the SAME `trades` list and confirm=True to
+    actually write the new rows.
+
+    Each item in `trades`: {"trade_date": "YYYY-MM-DD", "underlying": str,
+    "option_type": "Call"|"Put", "strike": number, "expiration_date":
+    "YYYY-MM-DD", "side": "buy"|"sell", "position_effect": "open"|"close",
+    "contracts": number, "price": number (per-contract premium), and
+    optionally commission/vat/occ_fee/orf_fee/taf_fee/sec_fee -- leave these
+    out if you don't have them, e.g. when reading a screenshot that doesn't
+    show every fee line. `side` and `position_effect` are INDEPENDENT --
+    never infer one from the other: selling to open (collecting premium
+    up front, e.g. a covered call or cash-secured put) is side="sell",
+    position_effect="open", not "close". Never invent a value for a field
+    you can't actually see -- leave it out or ask the user."""
+    try:
+        if not confirm:
+            return describe_option_batch_preview(preview_option_batch(trades))
+
+        result = record_option_batch(trades)
+        lines = [f"Recorded {len(result['recorded'])} option trade(s)."]
+        if result["skipped_already_recorded"]:
+            lines.append(f"Skipped {len(result['skipped_already_recorded'])} already-recorded row(s).")
+        if result["failed"]:
+            lines.append(f"{len(result['failed'])} row(s) failed to save:")
+            for f in result["failed"]:
+                lines.append(f"  - {f['symbol']} {f['trade_date']}: {f['error']}")
+        return "\n".join(lines)
+    except Exception as e:
+        return f"Couldn't process this option trade batch: {e}"
+
+
+@mcp.tool()
+def get_option_portfolio_status() -> str:
+    """Options-only trading status: win rate, total realized $ P/L and
+    aggregate % P/L across every closed/expired option round trip, and every
+    still-open position with its expiration date (soonest first). This is
+    NOT blended with stock/dividend P/L -- use get_lifetime_pl for the
+    whole-portfolio figure, which already folds resolved option P/L into its
+    own "Options" term. Use this for "how am I doing on options?" or "what
+    options do I still have open?". Read-only."""
+    option_trades = db.fetch_option_trades()
+    if option_trades.empty:
+        return "No option trades recorded yet."
+
+    summary = compute_option_summary(option_trades)
+    resolved_count = summary["win_count"] + summary["loss_count"]
+    lines = []
+    if resolved_count:
+        lines.append(
+            f"Win rate: {summary['win_rate_pct']:.1f}% ({summary['win_count']}W / {summary['loss_count']}L). "
+            f"Total realized P/L: ${summary['total_realized_pl']:,.2f} ({summary['total_pl_pct']:+.1f}%)."
+        )
+    else:
+        lines.append("No closed or expired option trades yet.")
+
+    open_positions = sorted(summary["open"], key=lambda r: pd.Timestamp(r["expiration_date"]))
+    if open_positions:
+        today = pd.Timestamp.now().normalize()
+        lines.append(f"{len(open_positions)} open position(s):")
+        for r in open_positions:
+            exp = pd.Timestamp(r["expiration_date"])
+            days = (exp - today).days
+            qty = (
+                f"{r['contracts']:g} of {r['total_contracts']:g}"
+                if r["contracts"] != r["total_contracts"] else f"{r['contracts']:g}"
+            )
+            lines.append(
+                f"  - {r['underlying']} {r['strike']:g} {r['option_type']}, exp {exp.strftime('%Y-%m-%d')} "
+                f"({days}d): {qty} contract(s)"
+            )
+    else:
+        lines.append("No open positions.")
+
+    if summary["errors"]:
+        lines.append("Some rows couldn't be matched cleanly:")
+        lines.extend(f"  - {e}" for e in summary["errors"])
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def get_option_status(
+    underlying: str, strike: float = None, option_type: str = None, expiration_date: str = None,
+) -> str:
+    """Status of one or more specific option contracts: open/closed/expired,
+    $ and % P/L. `underlying` is required (e.g. "MNST"). Narrow to one exact
+    contract with `strike`, `option_type` ("Call"/"Put"), and/or
+    `expiration_date` ("YYYY-MM-DD") whenever the user's own wording gives you
+    these -- if only `underlying` is given and several contracts are on file
+    for it, every matching contract is listed rather than guessing one.
+    Read-only."""
+    ticker = (underlying or "").strip().upper()
+    if not ticker:
+        return "Need at least an underlying ticker, e.g. 'MNST'."
+
+    option_trades = db.fetch_option_trades()
+    if option_trades.empty:
+        return "No option trades recorded yet."
+
+    rows = option_trades[option_trades["underlying"].str.upper() == ticker]
+    if strike is not None:
+        rows = rows[rows["strike"] == float(strike)]
+    if option_type:
+        rows = rows[rows["option_type"].str.lower() == option_type.strip().lower()]
+    if expiration_date:
+        rows = rows[rows["expiration_date"] == pd.Timestamp(expiration_date)]
+
+    if rows.empty:
+        return f"No option trades found for {ticker} matching those details."
+
+    summary = compute_option_summary(rows)
+    lines = []
+    for sym in sorted(rows["symbol"].unique()):
+        meta = rows[rows["symbol"] == sym].iloc[0]
+        label = (
+            f"{meta['underlying']} {meta['strike']:g} {meta['option_type']}, "
+            f"exp {pd.Timestamp(meta['expiration_date']).strftime('%Y-%m-%d')}"
+        )
+
+        for r in summary["open"]:
+            if r["symbol"] != sym:
+                continue
+            qty = (
+                f"{r['contracts']:g} of {r['total_contracts']:g}"
+                if r["contracts"] != r["total_contracts"] else f"{r['contracts']:g}"
+            )
+            lines.append(
+                f"{label}: OPEN -- {qty} contract(s), opened {pd.Timestamp(r['opened']).strftime('%Y-%m-%d')}."
+            )
+
+        for r in summary["closed"]:
+            if r["symbol"] != sym:
+                continue
+            lines.append(
+                f"{label}: CLOSED -- {r['contracts']:g} contract(s), "
+                f"opened {pd.Timestamp(r['opened']).strftime('%Y-%m-%d')} / "
+                f"closed {pd.Timestamp(r['closed']).strftime('%Y-%m-%d')}, "
+                f"P/L ${r['pl']:,.2f} ({r['pl_pct']:+.1f}%)."
+            )
+
+        for r in summary["expired"]:
+            if r["symbol"] != sym:
+                continue
+            lines.append(
+                f"{label}: EXPIRED -- {r['contracts']:g} contract(s), "
+                f"opened {pd.Timestamp(r['opened']).strftime('%Y-%m-%d')}, "
+                f"P/L ${r['pl']:,.2f} ({r['pl_pct']:+.1f}%)."
+            )
+
+    if summary["errors"]:
+        lines.append("Some rows couldn't be matched cleanly:")
+        lines.extend(f"  - {e}" for e in summary["errors"])
+
+    return "\n".join(lines) if lines else f"No resolved or open status found for {ticker}."
 
 
 @mcp.tool()

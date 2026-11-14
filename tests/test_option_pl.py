@@ -304,6 +304,9 @@ class TestComputeOptionSummary:
         assert round(summary["win_rate_pct"], 1) == 75.0
         assert round(summary["total_realized_pl"], 2) == round(27 - 395 + 1400 + 200, 2)
         assert len(summary["open"]) == 1  # the remaining 6 NVDA contracts
+        # total_pl_pct weights by premium opened, not a plain average of each trip's
+        # own pl_pct: (27-395+1400+200) / (79+430+3200+200) * 100
+        assert round(summary["total_pl_pct"], 1) == 31.5
 
     def test_empty_input_returns_zeroed_summary(self):
         summary = compute_option_summary(pd.DataFrame(columns=[
@@ -314,3 +317,4 @@ class TestComputeOptionSummary:
         assert summary["loss_count"] == 0
         assert summary["win_rate_pct"] == 0.0
         assert summary["total_realized_pl"] == 0.0
+        assert summary["total_pl_pct"] == 0.0
