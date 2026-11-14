@@ -58,13 +58,18 @@ def cached_fetch_target_allocations():
     return db.fetch_target_allocations()
 
 
-@st.cache_data
+@st.cache_data(ttl=300)
 def cached_fetch_option_trades():
-    """V4.22 -- no ttl, matching symbol_types/target_allocations' own reasoning:
-    option_trades is written only by Option Monitor's own save paths (which call
-    invalidate_option_trades() explicitly after every insert/delete), nothing
-    external writes to it yet (unlike trades/dividends' Rich MCP writes or
-    market_profile_cache's VPS cron)."""
+    """V4.22 -- started with no ttl, matching symbol_types/target_allocations'
+    own reasoning (only Option Monitor's own save paths wrote to option_trades,
+    calling invalidate_option_trades() explicitly after every insert/delete).
+    V4.23 -- gained the same 5-minute ttl cached_fetch_trades/cached_fetch_dividends
+    got in V4.19.1: Rich's new record_option_trades_batch MCP tool now also writes
+    to option_trades, from a completely separate VPS process with no way to call
+    this app's own invalidate_option_trades() -- without a ttl, that write would
+    sit invisible here until a process restart, exactly V4.19.1's bug, now for
+    options. In-app saves (Option Monitor) still refresh immediately via the
+    existing explicit invalidate call."""
     return db.fetch_option_trades()
 
 
