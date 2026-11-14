@@ -26,7 +26,7 @@ DATA_FILE = os.path.join(
 DIVIDEND_ENTRY_TYPES = ["Dividends", "Div. Adj(NRA Withheld)", "Dividend", "Capital Distribution"]
 
 
-@st.cache_data
+@st.cache_data(ttl=300)
 def _cached_read_stock_profile_from_db(symbols: list[str]) -> pd.DataFrame:
     """v4.5.1 -- Monitor Stocks' normal profile-data read path: DB-first, never calls
     yfinance for a symbol that's already been captured before. Replaces v4.5's
@@ -38,10 +38,13 @@ def _cached_read_stock_profile_from_db(symbols: list[str]) -> pd.DataFrame:
     already cheap and instant, so normal navigation reads market_profile_cache
     directly and only touches yfinance when "Refresh now" is explicitly clicked.
 
-    No ttl (matches cached_db.py's own reasoning) -- the point of caching this at all
-    is to skip even a redundant DB read on every rerun within a session, not to expire
-    data on a timer; only .clear() (called by _refresh_stock_profile_live) or a
-    changed `symbols` list busts it.
+    V4.21 -- gained a 5-minute ttl (same precedent cached_fetch_trades/
+    cached_fetch_dividends set in V4.19.1): a new VPS cron script
+    (mcp_server/refresh_market_profile.py) writes market_profile_cache once a day
+    from a separate process that has no way to call .clear() on this page-local
+    cache -- without a ttl, that write would sit invisible in an already-running
+    session until it happened to restart. "Refresh now" still shows up immediately
+    via its own explicit .clear() call either way.
 
     A symbol never captured before still works out of the box, same precedent
     cached_db.reference_line_summary already established for Reference Lines: fetched

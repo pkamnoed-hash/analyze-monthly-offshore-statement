@@ -4833,6 +4833,63 @@ nothing written, then `confirm=true` wrote exactly that change (verified via
 `reset_rebalance_plan`'s preview matched that same restored state, confirming nothing had
 drifted.
 
+## V4.21: Rich ticks "Bought?" from plain chat + daily automatic data refresh
+
+Branch `v4.21-auto-refresh`, cut from `main` after v4.20 was tagged.
+
+### What this is
+
+Two follow-ups after V4.20: (1) the user wants to tell Rich something as simple as
+"ICLO bought" (or the Thai equivalent -- "ซื้อแล้ว", any phrasing) and have it tick
+that symbol's Bought? status on the Rebalance & Reallocate plan, with the same
+confirm-before-write behavior everything else already has; (2) the user wants Monitor
+Stocks' "Refresh now" button (both its stock-profile and fundamentals halves) to run
+automatically once a day instead of requiring a manual click, at staggered times to
+spread out the yfinance load.
+
+### Part 1 -- no new code
+
+`update_rebalance_plan` (V4.20) already accepts `items: [{"symbol": "ICLO", "bought":
+true}]` and already enforces confirm-before-write via its own `confirm=false`/
+`confirm=true` contract. This needed zero repo changes -- only a wording addition to
+Rich's `SOUL.md` on the VPS, describing the *intent* to recognize (the user indicating,
+in any phrasing or language, that they bought a plan symbol) rather than a fixed
+phrase list, since Rich is an LLM and not a keyword matcher. Keeps the V4.20 rule
+intact: ticking Bought? is still not the same as recording a real trade.
+
+### Part 2 -- daily cron, reusing existing refresh logic
+
+The caching gap found first: `_cached_read_stock_profile_from_db` is duplicated with
+no ttl across `monitor_stocks.py`/`rebalance.py`/`record_trade.py`/
+`target_allocation.py`, and `cached_db.py::fundamentals_summary` also had none -- the
+exact same gap V4.19.1 fixed for trades/dividends. Fixed by giving all 5 a 5-minute
+ttl, same precedent/magic number.
+
+Two new standalone scripts in `mcp_server/` (not `scripts/`, since they need to run
+unattended on the VPS in `mcp_server/.venv` using `mcp_server/.env`'s prod
+credentials, the same pattern `portfolio_mcp.py` already established):
+`refresh_market_profile.py` (mirrors `_refresh_stock_profile_live`'s exact
+fetch-with-fallback logic for every currently-held symbol) and
+`refresh_fundamentals.py` (mirrors `_refresh_fundamentals_live`). Neither duplicates
+any logic -- both just call `core/market_data.py`/`core/calculations.py`/`core/db.py`
+directly, same functions the button already calls. Scheduled via VPS cron, 12 hours
+apart: stock profile at 11:00 AM Thailand time, fundamentals at 11:00 PM (fundamentals
+barely change day to day, so timing isn't urgent for them -- staggering just spreads
+out the yfinance load rather than bursting both at once). "Refresh now" is unchanged
+and stays available as a manual override.
+
+### Verification
+
+Full suite 860/860 passing after the ttl change (no logic change, just a kwarg). Both
+new scripts run against **dev** (never prod): `refresh_market_profile.py` refreshed
+58/58 currently-held symbols with 0 stale/fallback, confirmed via `Fetched At`
+advancing to the run's timestamp for exactly those 58 rows (the other rows, for
+symbols no longer held, were correctly left untouched); `refresh_fundamentals.py` same
+result, 58/58 refreshed, 13 untouched rows for no-longer-held symbols. Live-prod
+verification (Rich ticking Bought? from a natural statement, and the first scheduled
+cron runs actually surfacing in the web app) happens after deployment -- see the next
+update to this section once the user has tried it.
+
 ## Deferred / future
 
 - **A "view" link from Monitor Stocks straight into Company

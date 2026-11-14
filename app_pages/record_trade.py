@@ -150,7 +150,11 @@ def _handle_parse_slip():
 # portfolio value, which isn't computable without knowing every holding's current price).
 # Read-only, no live-refresh variant -- a secondary reminder here, not this page's core data;
 # it picks up whatever any other page's own "Refresh now" has most recently captured.
-@st.cache_data
+# V4.21 -- gained a 5-minute ttl (same precedent as cached_fetch_trades/
+# cached_fetch_dividends, V4.19.1) so a new VPS cron script's once-daily write to
+# market_profile_cache (mcp_server/refresh_market_profile.py) surfaces here too,
+# not just on a page that has its own "Refresh now" button.
+@st.cache_data(ttl=300)
 def _cached_read_stock_profile_from_db(symbols: list[str]) -> pd.DataFrame:
     cached = db.fetch_market_profile_cache()
     cached_symbols = set(cached["Symbol"]) if not cached.empty else set()

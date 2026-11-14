@@ -91,3 +91,38 @@ mcp_server/.venv/Scripts/mcp dev mcp_server/portfolio_mcp.py   # interactive MCP
    Check Rich's **log, not just the reply**: the tool call is recorded in the
    profile's `state.db` (`messages.tool_calls`, as `tool_call` with
    `mcp__portfolio__<tool name>`), and a reply can imitate a tool's wording.
+
+## Daily refresh cron (V4.21)
+
+Two standalone scripts, run unattended by cron on the VPS -- NOT through Hermes or
+Streamlit, just a plain `.venv` python process reusing `core/market_data.py`/
+`core/calculations.py`/`core/db.py` directly, the same functions Monitor Stocks'
+"Refresh now" button calls, against every currently-held symbol:
+
+| Script | Mirrors | Scheduled (Thailand time) |
+|---|---|---|
+| `refresh_market_profile.py` | `_refresh_stock_profile_live` (price/dividend yield/ex-date/history) | 11:00 AM daily |
+| `refresh_fundamentals.py` | `_refresh_fundamentals_live` (financial statements/ratios) | 11:00 PM daily |
+
+Staggered 12 hours apart on purpose -- fundamentals barely change day to day, so
+running both back-to-back would just double the yfinance load in one burst for no
+benefit. Each writes to `market_profile_cache`/`fundamentals_cache` and prints one
+summary line (`"Refreshed X/Y symbol(s); Z stale/fallback."`) for the cron log; a
+failed live attempt per symbol falls back to the last-captured cached value, same as
+the button, so a bad run (most likely cause: Yahoo rate-limiting) never blanks good
+data.
+
+Crontab entries (confirm the VPS's actual timezone with `timedatectl` first -- these
+assume a UTC system clock; ICT is fixed UTC+7 year-round, no DST):
+
+```cron
+0 4  * * * cd /root/repos/analyze-monthly-offshore-statement/mcp_server && .venv/bin/python refresh_market_profile.py >> refresh_profile.log 2>&1
+0 16 * * * cd /root/repos/analyze-monthly-offshore-statement/mcp_server && .venv/bin/python refresh_fundamentals.py >> refresh_fundamentals.log 2>&1
+```
+
+Every page that reads this cached data gained a 5-minute ttl in V4.21
+(`_cached_read_stock_profile_from_db` in 4 pages, `cached_db.py::fundamentals_summary`)
+-- without it, a write from this separate cron process would sit invisible in an
+already-running Streamlit session until it restarted (same gap V4.19.1 fixed for
+trades/dividends). "Refresh now" is unchanged and still available as a manual
+override.

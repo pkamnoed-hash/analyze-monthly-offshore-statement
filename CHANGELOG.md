@@ -1,5 +1,15 @@
 # Changelog
 
+## Tell Rich you bought something, and Monitor Stocks refreshes itself daily (v4.21)
+
+- Just tell Rich something like "ICLO bought" or "ซื้อ ICLO แล้ว" and it will tick that
+  symbol's Bought status on your Rebalance & Reallocate plan -- same as before, it
+  shows you what it's about to change and waits for your confirmation first.
+- Monitor Stocks' price/dividend/ex-date data now refreshes automatically once a day
+  (11:00 AM), and company fundamentals once a day (11:00 PM) -- you no longer have to
+  remember to click "Refresh now" yourself. The button is still there if you want
+  fresher data right away.
+
 ## Rich can now read and adjust your Rebalance & Reallocate plan (v4.20)
 
 - Ask Rich for your current plan -- $ amount, % allocated/remaining, each holding's

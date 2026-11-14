@@ -46,8 +46,13 @@ with st.expander("What does this page do?"):
 # read it), but core/rebalance.py's get_dividend_holdings() used to do its OWN
 # separate, unprotected live fetch for its half of this same data -- see that
 # function's docstring for the real incident this caused. "Refresh now" below now
-# drives this cache for the whole page instead.
-@st.cache_data
+# drives this cache for the whole page instead. V4.21 -- gained a 5-minute ttl
+# (same precedent as cached_fetch_trades/cached_fetch_dividends, V4.19.1): a new
+# VPS cron script (mcp_server/refresh_market_profile.py) writes
+# market_profile_cache once a day from a process that can't call .clear() on
+# this page-local cache, so without a ttl that write would sit invisible here
+# until the session restarted.
+@st.cache_data(ttl=300)
 def _cached_read_stock_profile_from_db(symbols: list[str]) -> pd.DataFrame:
     cached = db.fetch_market_profile_cache()
     cached_symbols = set(cached["Symbol"]) if not cached.empty else set()

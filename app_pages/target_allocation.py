@@ -33,8 +33,12 @@ with st.expander("What does this page do?"):
 # locally per this app's established per-page convention (see rebalance.py's own
 # DATA_FILE/DIVIDEND_ENTRY_TYPES comment defending the same choice) rather than
 # core/rebalance.py's older direct-live-call pattern (flagged in docs/ROADMAP.md as
-# a known inefficiency). ----------
-@st.cache_data
+# a known inefficiency). V4.21 -- gained a 5-minute ttl (same precedent as
+# cached_fetch_trades/cached_fetch_dividends, V4.19.1) so a new VPS cron script's
+# once-daily write to market_profile_cache (mcp_server/refresh_market_profile.py)
+# surfaces here too, not just on a page that has its own "Refresh now" button.
+# ----------
+@st.cache_data(ttl=300)
 def _cached_read_stock_profile_from_db(symbols: list[str]) -> pd.DataFrame:
     cached = db.fetch_market_profile_cache()
     cached_symbols = set(cached["Symbol"]) if not cached.empty else set()
