@@ -1,5 +1,18 @@
 # Changelog
 
+## New: Option Monitor page tracks your option trades (v4.22)
+
+- Record option trades -- manually or by uploading a Dime! trade-confirmation
+  screenshot -- on a new **Option Monitor** page (under Overview). Handles buying
+  AND selling to open (covered calls, cash-secured puts) correctly, including when
+  you close a position in separate partial sells over time.
+- See your win rate, total realized P/L, which contracts are still open, and which
+  have closed -- filter by contract name or by date range.
+- The 6 option trades already sitting in your history (from your original
+  statement) now show up here too, with the same win/loss figures.
+- Dashboard's "Investment Gain/Loss" now includes option P/L as well, so the
+  headline number stays complete.
+
 ## Tell Rich you bought something, and Monitor Stocks refreshes itself daily (v4.21)
 
 - Just tell Rich something like "ICLO bought" or "ซื้อ ICLO แล้ว" and it will tick that

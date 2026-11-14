@@ -12,6 +12,7 @@ from core.calculations import compute_realized_pl as _compute_realized_pl
 from core.backup import backup_turso_database_bytes
 from core.calculations import compute_roi
 from core.market_data import fetch_usd_thb_rate
+from core.option_pl import resolved_events as _resolved_option_events
 
 DEFAULT_THB_RATE = 33.0
 
@@ -263,11 +264,18 @@ dividends_by_symbol = div_in_range.groupby("Symbol")["Net Amt"].sum()
 # can never disagree. realized_by_symbol/dividends_by_symbol above stay as separate
 # groupby computations -- still needed for the By Symbol tab's per-symbol breakdown,
 # unrelated to this aggregate KPI.
-_gain = compute_investment_gain(realized_events, latest_holdings["Unrealized"].sum(), blended_income, start, end)
+# V4.22 -- option_events feeds the same function's new option_realized term, same
+# "one formula, never two numbers that quietly disagree" property as every other term.
+option_events = _resolved_option_events(cached_db.cached_fetch_option_trades())
+_gain = compute_investment_gain(
+    realized_events, latest_holdings["Unrealized"].sum(), blended_income, start, end,
+    option_realized=option_events,
+)
 total_realized = _gain["realized"]
 total_unrealized = _gain["unrealized"]
 total_dividends = _gain["dividends"]
 total_interest = _gain["interest"]
+total_options = _gain["options"]
 investment_gain = _gain["total"]
 
 # --- KPI cards ---
@@ -320,9 +328,9 @@ st.divider()
 st.subheader("Returns & Performance")
 c3, c4, c5, c6 = st.columns(4)
 c3.metric("Investment Gain/Loss", f"${investment_gain:,.2f}", delta=thb(investment_gain), delta_color="off",
-          help="Realized P/L + Unrealized P/L + Dividends + Interest. This is the recommended headline "
-               "number — it's built from trade prices and holding values, so it isn't affected by how "
-               "the statement labels cash movements.")
+          help=f"Realized P/L + Unrealized P/L + Dividends + Interest + Options (${total_options:,.2f}). "
+               "This is the recommended headline number — it's built from trade prices and holding "
+               "values, so it isn't affected by how the statement labels cash movements.")
 if roi_pct is not None:
     roi_delta = f"{annualized_roi_pct:,.2f}%/yr annualized" if annualized_roi_pct is not None else None
     c4.metric("ROI (period)", f"{roi_pct:,.2f}%", delta=roi_delta, delta_color="off",

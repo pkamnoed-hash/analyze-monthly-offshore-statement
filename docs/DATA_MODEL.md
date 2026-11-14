@@ -103,6 +103,36 @@ always-classified view. See `docs/METHODOLOGY.md` for how a symbol gets
 tagged (bulk catch-up vs. first-trade inline field) and `docs/ROADMAP.md`'s
 V2.1 section for the full design reasoning.
 
+## `option_trades` (V4.22)
+
+A dedicated table for option trades -- deliberately **not** a reuse of `trades`'
+FIFO position pipeline, which assumes a symbol's first trade is always a buy
+establishing cost basis before a sell realizes against it. That assumption is
+wrong for a short options strategy (selling to open before buying to close); see
+`core/option_pl.py`'s own module docstring for the real bug this would cause if
+option trades were ever entered through `trades` instead.
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | INTEGER PK | autoincrement |
+| `trade_date` | TEXT NOT NULL | ISO `YYYY-MM-DD` |
+| `symbol` | TEXT NOT NULL | OCC-style compound ticker, e.g. `"MNST261218C00045000"` (see `core/options.py`) |
+| `underlying`, `option_type`, `strike`, `expiration_date` | -- | the same contract, decomposed -- so callers never have to re-parse `symbol` |
+| `side` | TEXT NOT NULL | `'buy'` \| `'sell'` -- determines `amount`'s sign, same as `trades.side` |
+| `position_effect` | TEXT NOT NULL | `'open'` \| `'close'` -- the field that makes matching direction-agnostic; never inferred from `side` |
+| `contracts` | REAL NOT NULL | always a **positive** magnitude (1 contract = 100 shares); direction comes from `side` + `position_effect` together, not from this column's sign |
+| `price` | REAL NOT NULL | quoted per-contract premium |
+| `amount` | REAL NOT NULL | net signed cash flow AFTER every fee below: buy = negative (money out), sell = positive (money in) |
+| `commission`, `vat`, `occ_fee`, `orf_fee`, `taf_fee`, `sec_fee` | REAL | the six fee line items a real Dime! "Order Information" screen shows -- verified exactly against two real screenshots (buy: 180.00 + 0.55 + 0.04 + 0.03 + 0.02 = 180.64 Total Cost; sell: 235.00 − 0.55 − 0.04 − 0.03 − 0.02 − 0.00 − 0.01 = 234.35 Estimated Total Credit) |
+| `source` | TEXT NOT NULL | `'manual'` \| `'slip'` \| `'migrated-seed'` (the 6 historical option trades originally seeded into `trades`, copied here -- `trades` itself is untouched) |
+| `notes` | TEXT | |
+| `created_at` | TEXT NOT NULL | |
+
+No `reconciled_month` -- Reconciliation doesn't cover option trades (out of scope
+for V1). `core/option_pl.py::match_round_trips` does the actual FIFO lot-matching
+at READ time (nothing here is pre-matched/stored) -- see that module's docstring
+for the partial-fill mechanics.
+
 ## Mapping to the official xlsx
 
 The xlsx (`data/Offshore_Statements_*.xlsx`) is the audited source of

@@ -313,6 +313,7 @@ pg = st.navigation({
     "Overview": [
         st.Page("app_pages/dashboard.py", title="Dashboard", default=True),
         st.Page("app_pages/monitor_stocks.py", title="Monitor Stocks"),
+        st.Page("app_pages/option_monitor.py", title="Option Monitor"),
     ],
     "Input": [
         st.Page("app_pages/record_trade.py", title="Record Trade"),

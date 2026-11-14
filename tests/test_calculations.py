@@ -1414,6 +1414,41 @@ class TestComputeInvestmentGain:
         assert result["dividends"] == pytest.approx(1.0 + 2.0 + 4.0 + 8.0)
         assert result["interest"] == pytest.approx(16.0 + 32.0)
 
+    def test_option_realized_defaults_to_zero_when_omitted(self):
+        # V4.22 -- every caller that hasn't been updated yet (or has no option
+        # trades) must keep getting exactly the same total as before.
+        realized_events = pd.DataFrame({"Trade Date": pd.to_datetime(["2026-06-15"]), "Realized P/L": [100.0]})
+        result = compute_investment_gain(
+            realized_events, unrealized=500.0, blended_income=make_income([]),
+            start=pd.Timestamp("2026-06-01"), end=pd.Timestamp("2026-06-30"),
+        )
+        assert result["options"] == pytest.approx(0.0)
+        assert result["total"] == pytest.approx(100.0 + 500.0)
+
+    def test_option_realized_within_range_is_included_in_total(self):
+        realized_events = pd.DataFrame({"Trade Date": pd.to_datetime(["2026-06-15"]), "Realized P/L": [100.0]})
+        option_realized = pd.DataFrame({"Trade Date": pd.to_datetime(["2026-06-20"]), "Realized P/L": [27.0]})
+        result = compute_investment_gain(
+            realized_events, unrealized=0.0, blended_income=make_income([]),
+            start=pd.Timestamp("2026-06-01"), end=pd.Timestamp("2026-06-30"),
+            option_realized=option_realized,
+        )
+        assert result["options"] == pytest.approx(27.0)
+        assert result["total"] == pytest.approx(100.0 + 27.0)
+
+    def test_option_realized_outside_range_is_excluded(self):
+        option_realized = pd.DataFrame({
+            "Trade Date": pd.to_datetime(["2026-05-31", "2026-08-01"]),
+            "Realized P/L": [999.0, 999.0],
+        })
+        result = compute_investment_gain(
+            pd.DataFrame({"Trade Date": pd.to_datetime([]), "Realized P/L": pd.Series(dtype=float)}),
+            unrealized=0.0, blended_income=make_income([]),
+            start=pd.Timestamp("2026-06-01"), end=pd.Timestamp("2026-06-30"),
+            option_realized=option_realized,
+        )
+        assert result["options"] == pytest.approx(0.0)
+
 
 class TestComputeHoldingsPl:
     def test_total_pl_is_unrealized_plus_dividends_received(self):

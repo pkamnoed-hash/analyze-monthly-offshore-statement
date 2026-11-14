@@ -180,6 +180,45 @@ SCHEMA_STATEMENTS = [
         updated_at    TEXT NOT NULL DEFAULT (datetime('now'))
     )
     """,
+    # V4.22 -- a dedicated table for option trades, deliberately NOT a reuse of
+    # `trades`/its FIFO position pipeline: that pipeline assumes a symbol's first
+    # trade is always a buy establishing cost basis, which is wrong for a short
+    # options strategy (sell-to-open before buy-to-close) -- see core/option_pl.py's
+    # own docstring for the real bug this would otherwise cause. `position_effect`
+    # (open/close) is the field that makes matching direction-agnostic; `symbol` is
+    # the OCC-style compound ticker (e.g. "MNST261218C00045000"), kept alongside the
+    # decomposed underlying/option_type/strike/expiration_date so callers never have
+    # to re-parse it. `amount` is the net signed cash flow AFTER all six fee columns
+    # (buy negative, sell positive) -- verified against two real, uncropped Dime!
+    # "Order Information" screenshots (buy: 180.00 + 0.55 + 0.04 + 0.03 + 0.02 =
+    # 180.64 Total Cost; sell: 235.00 - 0.55 - 0.04 - 0.03 - 0.02 - 0.00 - 0.01 =
+    # 234.35 Estimated Total Credit).
+    """
+    CREATE TABLE IF NOT EXISTS option_trades (
+        id               INTEGER PRIMARY KEY AUTOINCREMENT,
+        trade_date       TEXT NOT NULL,
+        symbol           TEXT NOT NULL,
+        underlying       TEXT NOT NULL,
+        option_type      TEXT NOT NULL CHECK(option_type IN ('Call','Put')),
+        strike           REAL NOT NULL,
+        expiration_date  TEXT NOT NULL,
+        side             TEXT NOT NULL CHECK(side IN ('buy','sell')),
+        position_effect  TEXT NOT NULL CHECK(position_effect IN ('open','close')),
+        contracts        REAL NOT NULL,
+        price            REAL NOT NULL,
+        amount           REAL NOT NULL,
+        commission       REAL NOT NULL DEFAULT 0.0,
+        vat              REAL NOT NULL DEFAULT 0.0,
+        occ_fee          REAL NOT NULL DEFAULT 0.0,
+        orf_fee          REAL NOT NULL DEFAULT 0.0,
+        taf_fee          REAL NOT NULL DEFAULT 0.0,
+        sec_fee          REAL NOT NULL DEFAULT 0.0,
+        source           TEXT NOT NULL DEFAULT 'manual',
+        notes            TEXT,
+        created_at       TEXT NOT NULL DEFAULT (datetime('now'))
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_option_trades_symbol_date ON option_trades(symbol, trade_date)",
 ]
 
 # reference_lines shipped in v4.4 without captured_side/passed_at, added in v4.4.1 for
@@ -253,6 +292,11 @@ TRADE_COLUMNS = [
     "source", "notes",
 ]
 DIVIDEND_COLUMNS = ["trade_date", "symbol", "entry_type", "net_amount", "source", "notes"]
+OPTION_TRADE_COLUMNS = [
+    "trade_date", "symbol", "underlying", "option_type", "strike", "expiration_date",
+    "side", "position_effect", "contracts", "price", "amount", "commission", "vat",
+    "occ_fee", "orf_fee", "taf_fee", "sec_fee", "source", "notes",
+]
 
 
 def get_connection():
@@ -452,6 +496,65 @@ def fetch_dividends(conn=None):
     df = df.rename(columns={
         "trade_date": "Trade Date", "symbol": "Symbol", "entry_type": "Entry Type", "net_amount": "Net Amt",
     })
+    return df
+
+
+def insert_option_trade(
+    *, trade_date, symbol, underlying, option_type, strike, expiration_date,
+    side, position_effect, contracts, price,
+    commission=0.0, vat=0.0, occ_fee=0.0, orf_fee=0.0, taf_fee=0.0, sec_fee=0.0,
+    source="manual", notes=None, conn=None,
+):
+    """Entry point for manually-entered, slip-parsed, or migrated-seed option trades
+    (Option Monitor page / scripts/migrate_option_trades_from_seed.py). `contracts` is
+    a POSITIVE magnitude; `side` ('buy'/'sell') alone determines `amount`'s sign --
+    unlike `trades`' insert_trade(), `position_effect` ('open'/'close') never affects
+    the sign, only how core/option_pl.py's FIFO matcher later pairs rows together.
+    `amount` is the net cash flow AFTER every fee (verified against two real Dime!
+    screenshots -- see option_trades' own CREATE TABLE comment in SCHEMA_STATEMENTS):
+    buy = -(gross + fees) (money out), sell = +(gross - fees) (money in)."""
+    side = side.lower()
+    position_effect = position_effect.lower()
+    gross_amount = contracts * price * 100
+    total_fees = (
+        (commission or 0.0) + (vat or 0.0) + (occ_fee or 0.0)
+        + (orf_fee or 0.0) + (taf_fee or 0.0) + (sec_fee or 0.0)
+    )
+    amount = -(gross_amount + total_fees) if side == "buy" else (gross_amount - total_fees)
+
+    row = {
+        "trade_date": trade_date, "symbol": symbol, "underlying": underlying,
+        "option_type": option_type, "strike": strike, "expiration_date": expiration_date,
+        "side": side, "position_effect": position_effect, "contracts": contracts,
+        "price": price, "amount": amount, "commission": commission, "vat": vat,
+        "occ_fee": occ_fee, "orf_fee": orf_fee, "taf_fee": taf_fee, "sec_fee": sec_fee,
+        "source": source, "notes": notes,
+    }
+    c, should_close = _with_connection(conn)
+    values = [row.get(col) for col in OPTION_TRADE_COLUMNS]
+    placeholders = ",".join("?" for _ in OPTION_TRADE_COLUMNS)
+    c.execute(
+        f"INSERT INTO option_trades ({','.join(OPTION_TRADE_COLUMNS)}) VALUES ({placeholders})", values,
+    )
+    c.commit()
+    if should_close:
+        c.close()
+
+
+def fetch_option_trades(conn=None):
+    """Returns a DataFrame of every option_trades row, snake_case columns as stored
+    (no Title Case renaming -- unlike fetch_trades/fetch_dividends, nothing outside
+    core/option_pl.py consumes this, so there's no legacy xlsx-shaped interface to
+    match), trade_date/expiration_date parsed to pd.Timestamp."""
+    import pandas as pd
+
+    c, should_close = _with_connection(conn)
+    df = _read_sql(c, "SELECT * FROM option_trades ORDER BY trade_date")
+    if should_close:
+        c.close()
+    if not df.empty:
+        df["trade_date"] = pd.to_datetime(df["trade_date"])
+        df["expiration_date"] = pd.to_datetime(df["expiration_date"])
     return df
 
 
@@ -1133,6 +1236,18 @@ def delete_trade(trade_id, conn=None):
     restriction is enforced by what's displayed, not by this function."""
     c, should_close = _with_connection(conn)
     c.execute("DELETE FROM trades WHERE id=?", (trade_id,))
+    c.commit()
+    if should_close:
+        c.close()
+
+
+def delete_option_trade(option_trade_id, conn=None):
+    """Deletes one option_trades row by id -- Option Monitor's per-row delete
+    button, same convention as delete_trade()/delete_dividend(): no source
+    restriction here, since the page only ever shows manual/slip rows (never
+    the 6 migrated-seed rows) as deletable in the first place."""
+    c, should_close = _with_connection(conn)
+    c.execute("DELETE FROM option_trades WHERE id=?", (option_trade_id,))
     c.commit()
     if should_close:
         c.close()

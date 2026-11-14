@@ -824,7 +824,7 @@ def is_ex_date_this_month(ex_date, today: pd.Timestamp | None = None) -> bool:
 
 def compute_investment_gain(
     realized_events: pd.DataFrame, unrealized: float, blended_income: pd.DataFrame,
-    start: pd.Timestamp, end: pd.Timestamp,
+    start: pd.Timestamp, end: pd.Timestamp, *, option_realized: pd.DataFrame = None,
 ) -> dict:
     """V4.13 -- Dashboard's "Investment Gain/Loss" KPI, extracted from
     app_pages/dashboard.py's own inline arithmetic so the upcoming Hermes MCP
@@ -842,11 +842,20 @@ def compute_investment_gain(
     compute_holdings_pl below). Passing it in keeps this function honest about
     that -- it doesn't pretend to compute something it doesn't.
 
-    Returns {"total", "realized", "unrealized", "dividends", "interest"} -- all
-    floats. `total = realized + unrealized + dividends + interest`, matching
-    Dashboard's "Investment Gain/Loss" exactly. Dividend/interest Entry Type
-    vocabulary matches blended_dividends()'s own docstring (xlsx and db sides
-    use different labels for the same real-world categories)."""
+    V4.22 -- `option_realized` (core/option_pl.py::resolved_events()' output,
+    Trade Date/Realized P/L shaped the same as `realized_events`) is optional and
+    defaults to None/empty, so every existing caller that hasn't been updated yet
+    keeps getting exactly the same total as before. When given, it's filtered to
+    the same [start, end] range and folded into `total` as a 5th term -- shared by
+    Dashboard and Rich's `get_lifetime_pl` tool, so the two can never quietly
+    disagree about whether option P/L counts.
+
+    Returns {"total", "realized", "unrealized", "dividends", "interest",
+    "options"} -- all floats. `total = realized + unrealized + dividends +
+    interest + options`, matching Dashboard's "Investment Gain/Loss" exactly.
+    Dividend/interest Entry Type vocabulary matches blended_dividends()'s own
+    docstring (xlsx and db sides use different labels for the same real-world
+    categories)."""
     end_of_period = end + pd.offsets.MonthEnd(0)
     realized_in_range = realized_events[
         (realized_events["Trade Date"] >= start) & (realized_events["Trade Date"] <= end_of_period)
@@ -866,10 +875,18 @@ def compute_investment_gain(
     ]["Net Amt"].sum()
     total_interest = income_in_range[income_in_range["Entry Type"].isin(interest_types)]["Net Amt"].sum()
 
-    total = total_realized + unrealized + total_dividends + total_interest
+    if option_realized is not None and not option_realized.empty:
+        options_in_range = option_realized[
+            (option_realized["Trade Date"] >= start) & (option_realized["Trade Date"] <= end_of_period)
+        ]
+        total_options = options_in_range["Realized P/L"].sum()
+    else:
+        total_options = 0.0
+
+    total = total_realized + unrealized + total_dividends + total_interest + total_options
     return {
         "total": total, "realized": total_realized, "unrealized": unrealized,
-        "dividends": total_dividends, "interest": total_interest,
+        "dividends": total_dividends, "interest": total_interest, "options": total_options,
     }
 
 
