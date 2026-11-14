@@ -228,6 +228,21 @@ verdict the page shows. ETFs/funds have no statements and get no health block.
   the `rich` profile's `config.yaml`; nothing extra to host or authenticate.
 - **Lightweight dependencies.** `mcp_server/requirements.txt` omits Streamlit
   and Plotly because the VPS has ~2GB RAM and no swap.
+- **(V4.21) Two standalone cron scripts, same venv, same prod `.env`.**
+  `mcp_server/refresh_market_profile.py`/`refresh_fundamentals.py` run unattended
+  on the VPS (not through Hermes, not through Streamlit) to replicate what Monitor
+  Stocks' "Refresh now" button does for every currently-held symbol, once a day
+  each, staggered 12 hours apart (profile at 11:00 AM Thailand time, fundamentals
+  at 11:00 PM) to spread out the yfinance load. They reuse `core/market_data.py`/
+  `core/calculations.py`/`core/db.py` directly -- no new logic, just the existing
+  fetch-with-fallback path run from a cron job instead of a button click. Because
+  the write happens in a separate process with no running Streamlit session to call
+  `.clear()` on, every page that reads `market_profile_cache`/`fundamentals_cache`
+  gained a 5-minute ttl in V4.21 (`_cached_read_stock_profile_from_db` in
+  `monitor_stocks.py`/`rebalance.py`/`record_trade.py`/`target_allocation.py`, and
+  `cached_db.py::fundamentals_summary`) -- the same mechanism V4.19.1 already used
+  for an external write to `trades`/`dividends`. "Refresh now" is unchanged and
+  still available as a manual override.
 
 ### Deployment on the VPS
 

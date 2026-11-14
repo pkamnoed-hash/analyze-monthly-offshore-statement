@@ -205,7 +205,7 @@ def invalidate_reference_line_summary():
     reference_line_summary.clear()
 
 
-@st.cache_data
+@st.cache_data(ttl=300)
 def fundamentals_summary(symbols: list[str]) -> pd.DataFrame:
     """V4.11 -- shared DB-first read for Company Fundamentals AND Monitor Stocks'
     Fundamentals tab, promoted here from Company Fundamentals' own private
@@ -224,11 +224,14 @@ def fundamentals_summary(symbols: list[str]) -> pd.DataFrame:
     db.fetch_market_profile_cache() already uses, until a later "Refresh now" or
     page visit succeeds.
 
-    No ttl, matching Company Fundamentals' own original reasoning: the point of
-    caching this at all is to skip a redundant DB read on every rerun within a
-    session, not to expire data on a timer -- only .clear() (called by
-    invalidate_fundamentals_summary(), wired into both pages' own "Refresh now"
-    handlers) or a changed `symbols` list busts it."""
+    V4.21 -- gained a 5-minute ttl (same precedent cached_fetch_trades/
+    cached_fetch_dividends set in V4.19.1): a new VPS cron script
+    (mcp_server/refresh_fundamentals.py) writes fundamentals_cache once a day
+    from a separate process that has no way to call this app's own
+    invalidate_fundamentals_summary() -- without a ttl, that write would sit
+    invisible in an already-running session until it happened to restart.
+    In-app saves (both pages' "Refresh now") still show up immediately via the
+    explicit invalidate() call; only an external write relies on the ttl now."""
     cached = db.fetch_fundamentals_cache()
     cached_symbols = set(cached["Symbol"]) if not cached.empty else set()
     missing = [s for s in symbols if s not in cached_symbols]
