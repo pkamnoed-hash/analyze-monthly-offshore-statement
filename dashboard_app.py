@@ -312,7 +312,7 @@ with st.sidebar.expander("Set up Face ID / Touch ID"):
 pg = st.navigation({
     "Overview": [
         st.Page("app_pages/dashboard.py", title="Dashboard", default=True),
-        st.Page("app_pages/monitor_stocks.py", title="Monitor Stocks"),
+        st.Page("app_pages/monitor_stocks.py", title="Stock Monitor"),
         st.Page("app_pages/option_monitor.py", title="Option Monitor"),
     ],
     "Input": [

@@ -5029,6 +5029,107 @@ live on prod with the Options term.
   already used for stock trades -- same failure mode and mitigation (human
   review before Save).
 
+## V4.23: Option trading via Rich + Dashboard UI tweaks
+
+Branch `v4.23-rich-options-ui`, cut from `main` after v4.22 was tagged.
+
+### What this is
+
+V4.22 shipped Option Monitor web-app-only, with Rich/Telegram support
+explicitly deferred as a fast-follow. This release builds that fast-follow,
+plus a handful of small UI polish items noticed while using the app
+day-to-day: recording an option trade via Rich (screenshot or plain chat,
+same as stock trades already work), asking Rich for the overall
+option-trading status or one specific contract's status, the "Since Last
+Statement" tables defaulting to newest-first, renaming "Monitor Stocks" to
+"Stock Monitor", and restyling + relocating Dashboard's Duration filter to
+match Option Monitor's own look.
+
+**Investigated first, before designing anything**: Rich never receives raw
+image bytes at the MCP layer -- `core/slip_parser.py`/`core/
+option_slip_parser.py`'s Claude-vision parsing is called only from the
+Streamlit pages. Rich's own model already looks at the Telegram photo and
+must extract structured fields itself before calling any MCP tool -- this is
+already how stock trades work (`record_trades_batch` takes `list[dict]`,
+never an image), so the new option tool follows the exact same contract.
+There was no `core/option_entry.py` yet -- `core/option_pl.py::
+validate_option_rows` already existed (field-level validation), but the
+confirm-gated preview/dup-detection/record layer `core/trade_entry.py`
+provides for stocks had no option equivalent.
+
+### What was built
+
+- **`core/option_pl.py::compute_option_summary`** gains `total_pl_pct` -- the
+  portfolio-wide version of each round trip's own `pl_pct`: total realized
+  P/L ÷ total premium opened across every resolved trip (not a plain average
+  of each trip's own `pl_pct`, which would weight a 1-contract trip the same
+  as a 100-contract one).
+- **`core/option_entry.py`** (new) -- mirrors `core/trade_entry.py`'s shape:
+  `match_against_existing_option_trades` (dup-detection keyed on trade_date/
+  symbol/side/position_effect/contracts/price -- `position_effect` plays the
+  role trade_entry.py's signed quantity plays for stocks, telling an open and
+  a close for the same symbol/date/price apart), `apply_overclose_check`
+  (this module's equivalent of the stock-side oversell check -- walks
+  candidates in trade-date order against a running book built from existing
+  DB rows plus what's been accepted so far in the same batch, reusing
+  `option_pl.match_round_trips`'s own built-in overclose detection rather
+  than a hand-rolled tally), `preview_option_batch`/
+  `describe_option_batch_preview`/`record_option_batch`.
+- **3 new MCP tools in `mcp_server/portfolio_mcp.py`**:
+  - `record_option_trades_batch(trades, confirm)` -- same two-call
+    confirm=False (preview, writes nothing) / confirm=True (writes) pattern
+    as `record_trades_batch`.
+  - `get_option_portfolio_status()` -- options-only win rate, total realized
+    $ and % P/L, and every open position sorted by nearest expiration date.
+    Deliberately NOT blended with stock/dividend P/L (that's what
+    `get_lifetime_pl` already does via its Options term).
+  - `get_option_status(underlying, strike=None, option_type=None,
+    expiration_date=None)` -- status of one or more specific contracts
+    (open/closed/expired, $ and % P/L), narrowed by whichever optional fields
+    Rich's own model can fill in from the conversation -- same
+    structured-arguments convention as the existing
+    `get_company_fundamentals(symbol)` tool, not a free-text query string.
+    Lists every matching contract rather than guessing one when under-specified.
+- **`app_pages/dashboard.py`** -- `live_trades`/`live_dividends` (the "Since
+  Last Statement" tables) now `.sort_values("Trade Date", ascending=False)`,
+  newest first; Duration filter moved from the sidebar into the main content
+  area, directly under the page title, and restyled from a dropdown + range
+  date picker to a segmented-control pill row + separate From/To fields,
+  matching Option Monitor's own control -- same `PRESET_MONTHS_BACK` dict,
+  same clamp-to-available-data / snap-to-month-boundary logic, same `start`/
+  `end` outputs as before, purely a different widget presentation and
+  location (confirmed via an interactive mockup before building).
+- **Nav rename** -- `dashboard_app.py`'s `st.Page(..., title=...)` and
+  `app_pages/monitor_stocks.py`'s own `st.title(...)` both changed from
+  "Monitor Stocks" to "Stock Monitor".
+
+### Verification
+
+Full suite 917/917 passing (904 going in, +13 new: `core/option_pl.py`'s
+`total_pl_pct` aggregate, `core/option_entry.py`'s dup-detection/overclose/
+preview/record cases). All 3 new MCP tools manually verified against **dev**
+Turso (pre-setting `TURSO_*` env vars before importing `portfolio_mcp` so its
+own `load_dotenv(mcp_server/.env)`, which points at prod, doesn't override
+them): `get_option_portfolio_status` and `get_option_status` read back the 6
+migrated historical trades correctly (win rate 33.3%, total P/L -$716.00/
+-31.9%, matching V4.22's own verified figures); `record_option_trades_batch`
+previewed cleanly with confirm=False (wrote nothing), then a real confirm=True
+write/read-back/delete round trip against dev confirmed the actual DB path
+works end to end, not just the sqlite-backed unit tests. Dashboard's sort fix,
+nav rename, and Duration restyle/relocation are UI-only changes with no
+browser automation available in this environment -- left for the user's own
+click-through on the dev app before merging.
+
+### Known limits
+
+- Rich still can't see the screenshot itself through any tool call -- its own
+  model does the extraction (same as stocks today). If Rich's vision misreads
+  a field, the `confirm=False` preview is the only safety net before it's saved.
+- `get_option_status` with only `underlying` given and several contracts on
+  file for that ticker returns all of them -- Rich's model is expected to
+  narrow further (ask the user, or pass more arguments) rather than this tool
+  guessing one.
+
 ## Deferred / future
 
 - **A "view" link from Monitor Stocks straight into Company

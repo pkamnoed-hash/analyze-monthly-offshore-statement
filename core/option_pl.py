@@ -233,16 +233,23 @@ def compute_option_summary(option_trades: pd.DataFrame, *, as_of=None) -> dict:
     """win_count/loss_count/win_rate_pct/total_realized_pl over every RESOLVED
     round trip (closed + expired), plus the still-open (not yet expired)
     positions for display. A tie (pl == 0) counts as a loss, not a win -- matches
-    this app's "Win" badge only ever meaning pl > 0."""
+    this app's "Win" badge only ever meaning pl > 0.
+
+    `total_pl_pct` is the portfolio-wide version of each trip's own `pl_pct`:
+    total realized P/L divided by the total premium that changed hands opening
+    every resolved trip (not a simple average of each trip's `pl_pct`, which
+    would weight a 1-contract trip the same as a 100-contract one)."""
     result = match_round_trips(option_trades, as_of=as_of)
     resolved = result["closed"] + result["expired"]
     win_count = sum(1 for r in resolved if r["pl"] > 0)
     loss_count = len(resolved) - win_count
     total_realized_pl = sum(r["pl"] for r in resolved)
     win_rate_pct = (win_count / len(resolved) * 100) if resolved else 0.0
+    total_opening_premium = sum(abs(r["open_amount"]) for r in resolved)
+    total_pl_pct = (total_realized_pl / total_opening_premium * 100) if total_opening_premium else 0.0
     return {
         "win_count": win_count, "loss_count": loss_count, "win_rate_pct": win_rate_pct,
-        "total_realized_pl": total_realized_pl,
+        "total_realized_pl": total_realized_pl, "total_pl_pct": total_pl_pct,
         "closed": result["closed"], "expired": result["expired"], "open": result["open"],
         "errors": result["errors"],
     }

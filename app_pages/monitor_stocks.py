@@ -174,7 +174,7 @@ def _dividends_received_by_symbol() -> pd.Series:
     return _blended_dividend_rows().groupby("Symbol")["Net Amt"].sum()
 
 
-st.title("Monitor Stocks")
+st.title("Stock Monitor")
 # Collapsed by default -- was a full-width st.caption() paragraph right under the title
 # (pushed all the actual data below the fold). Same pattern as Dashboard's "Since Last
 # Statement" expander: keeps the page opening clean while keeping the term definitions

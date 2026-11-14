@@ -118,7 +118,11 @@ latest_live_date = pd.concat([db_trades["Trade Date"], db_dividends["Trade Date"
 data_end = max(max_day, latest_live_date) if pd.notna(latest_live_date) else max_day
 data_end_month = pd.Timestamp(data_end.year, data_end.month, 1)
 
-st.sidebar.header("Duration")
+# V4.23 -- moved from the sidebar into the main content area and restyled to match
+# Option Monitor's own Duration control (segmented-control pills + separate From/To
+# fields) -- same PRESET_MONTHS_BACK dict, same clamp/month-snap logic, same
+# start/end outputs as before, just a different widget presentation and location.
+st.subheader("Duration")
 
 # Months back from the latest available month, per preset. "Past Week" and "Past Month"
 # both resolve to just that one month -- data is stored monthly, so there's no finer
@@ -133,9 +137,14 @@ PRESET_MONTHS_BACK = {
     "Past Year": 11,
     "Past 2 Years": 23,
 }
-preset = st.sidebar.selectbox("Choose a date range", list(PRESET_MONTHS_BACK.keys()), index=0)
+duration_col1, duration_col2 = st.columns([2, 2])
+with duration_col1:
+    preset = st.segmented_control(
+        "Duration", list(PRESET_MONTHS_BACK.keys()), default="All", key="dashboard_duration_preset",
+    )
 
-months_back = PRESET_MONTHS_BACK[preset]
+months_back = PRESET_MONTHS_BACK.get(preset)  # .get(): segmented_control returns None
+# if its selection is clicked off, same as picking "All" below
 if months_back is None:
     default_start = min_month
 else:
@@ -151,25 +160,21 @@ else:
 # more forgiving -- and load-bearing here, since a browser extension has been observed
 # overwriting this field with its own guess independent of what we set as the default.
 # The key is re-seeded per preset so picking a new preset refreshes the shown range,
-# while manual edits to the range persist until the preset changes again.
-date_range = st.sidebar.date_input(
-    "Custom range",
-    value=(default_start.date(), data_end.date()),
-    key=f"custom_range_{preset}",
-)
-if isinstance(date_range, tuple) and len(date_range) == 2:
-    start, end = pd.Timestamp(date_range[0]), pd.Timestamp(date_range[1])
-else:
-    st.sidebar.info("Pick both a start and end date.")
-    start, end = min_month, data_end_month
+# while manual edits to either date persist until the preset changes again -- same
+# key-reseed trick Option Monitor's own From/To fields already use.
+with duration_col2:
+    from_col, to_col = st.columns(2)
+    with from_col:
+        date_from = st.date_input("From", value=default_start.date(), key=f"dashboard_from_{preset}")
+    with to_col:
+        date_to = st.date_input("To", value=data_end.date(), key=f"dashboard_to_{preset}")
+start, end = pd.Timestamp(date_from), pd.Timestamp(date_to)
 
 clamped = start < min_month or end > data_end
 start = min(max(start, min_month), data_end_month)
 end = min(max(end, min_month), data_end)
 if clamped:
-    st.sidebar.caption(
-        f"Clamped to available data: {min_month.strftime('%b %Y')} – {data_end_month.strftime('%b %Y')}."
-    )
+    st.caption(f"Clamped to available data: {min_month.strftime('%b %Y')} – {data_end_month.strftime('%b %Y')}.")
 # Data is stored monthly, so snap the picked dates to whichever months they fall in.
 start = pd.Timestamp(start.year, start.month, 1)
 end = pd.Timestamp(end.year, end.month, 1)
@@ -370,14 +375,14 @@ if abs(balance_based_gain - investment_gain) > 1:
 # an official broker PDF. Portfolio Value/Unrealized P/L above stay as of the last statement
 # (see caption) -- this panel is where new activity in between statements is actually visible.
 live_trades = db_trades[db_trades["Trade Date"] > cutoff].copy()
-live_dividends = db_dividends[db_dividends["Trade Date"] > cutoff]
+live_dividends = db_dividends[db_dividends["Trade Date"] > cutoff].sort_values("Trade Date", ascending=False)
 
 # Joined on id (compute_fifo_realized_pl threads the originating trade's id through) so each
 # trade shows the Realized P/L it actually produced, not just an aggregate elsewhere on the
 # page -- blank for buys (nothing realized), the FIFO-computed value for sells/corp actions.
 live_realized = realized_events.dropna(subset=["id"])[["id", "Realized P/L"]]
 live_trades["id"] = live_trades["id"].astype(float)
-live_trades = live_trades.merge(live_realized, on="id", how="left")
+live_trades = live_trades.merge(live_realized, on="id", how="left").sort_values("Trade Date", ascending=False)
 
 with st.expander(
     f"Since Last Statement ({cutoff.strftime('%b %Y')})",

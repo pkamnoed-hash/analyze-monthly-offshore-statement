@@ -1,5 +1,19 @@
 # Changelog
 
+## New: Tell Rich about your option trades, plus a few UI tweaks (v4.23)
+
+- Tell Rich about an option trade -- from a Dime! screenshot or just chat -- and it
+  records it to Option Monitor the same way Record Trade already works, previewing
+  before it saves and catching duplicates or a close that exceeds what you have open.
+- Ask Rich "how are my options doing?" or "what's the status of my MNST call?" for
+  your win rate, total P/L, open positions by expiration date, or one specific
+  contract's status.
+- Dashboard's "Since Last Statement" trade/dividend tables now show the newest rows
+  first.
+- "Monitor Stocks" is now called "Stock Monitor" in the sidebar.
+- Dashboard's Duration filter moved out of the sidebar and into the main page, now
+  styled as the same pill buttons + From/To fields Option Monitor uses.
+
 ## New: Option Monitor page tracks your option trades (v4.22)
 
 - Record option trades -- manually or by uploading a Dime! trade-confirmation
