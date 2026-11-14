@@ -58,6 +58,16 @@ def cached_fetch_target_allocations():
     return db.fetch_target_allocations()
 
 
+@st.cache_data
+def cached_fetch_option_trades():
+    """V4.22 -- no ttl, matching symbol_types/target_allocations' own reasoning:
+    option_trades is written only by Option Monitor's own save paths (which call
+    invalidate_option_trades() explicitly after every insert/delete), nothing
+    external writes to it yet (unlike trades/dividends' Rich MCP writes or
+    market_profile_cache's VPS cron)."""
+    return db.fetch_option_trades()
+
+
 def invalidate_trades():
     cached_fetch_trades.clear()
 
@@ -80,6 +90,10 @@ def invalidate_target_sectors():
 
 def invalidate_target_allocations():
     cached_fetch_target_allocations.clear()
+
+
+def invalidate_option_trades():
+    cached_fetch_option_trades.clear()
 
 
 @st.cache_data(ttl=300)

@@ -113,6 +113,41 @@ See `docs/DATA_MODEL.md` for the schema these flows write to, and
 `docs/METHODOLOGY.md` for how the Dashboard/Reconciliation calculations
 themselves work.
 
+## Option trading (V4.22)
+
+Option Monitor (`app_pages/option_monitor.py`) is deliberately a **separate**
+pipeline from the stock `trades` flow above, not an extension of it -- `core/
+calculations.py`'s FIFO position/realized-P&L logic assumes a symbol's first
+trade is always a buy establishing cost basis before a sell realizes against
+it, which silently breaks for a short options strategy (sell-to-open before
+buy-to-close): the opening sell would book its entire proceeds as instant 100%
+profit, the position would vanish from `compute_current_positions` while open,
+the later buy-to-close would open a phantom long lot instead of closing
+anything, and `apply_sequential_position_check` would flag the opening sell as
+a false-positive oversell. `core/option_pl.py` runs its own FIFO matcher keyed
+on `position_effect` ('open'/'close') instead of `side`, so a short round trip
+nets out exactly as correctly as a long one -- see that module's own docstring
+for the full reasoning, and `docs/DATA_MODEL.md`'s `option_trades` section for
+the schema.
+
+Three pieces work together: `core/options.py` (OCC-style symbol parsing/
+building), `core/option_pl.py` (validation, FIFO matching with partial-fill
+support, win-ratio/P&L), `core/option_slip_parser.py` (Claude-vision screenshot
+parsing, mirroring `core/slip_parser.py`'s existing stock-slip pattern exactly).
+Dashboard's "Investment Gain/Loss" KPI and Rich's `get_lifetime_pl` MCP tool
+both gained a 5th term (`core/calculations.py::compute_investment_gain`'s new
+`option_realized` parameter, fed by `core/option_pl.py::resolved_events`) so
+option P/L is never a fully siloed number -- the same "one formula, never two
+numbers that quietly disagree" property every other term in that function
+already has.
+
+The 6 option trades that were sitting in `trades` from the original
+broker-statement seed import stay exactly where they are (Dashboard's
+historical Realized P/L is unchanged) AND were copied into `option_trades`
+(`scripts/migrate_option_trades_from_seed.py`, idempotent) so Option Monitor's
+win-ratio/P&L view includes them from day one -- the same dollars legitimately
+appear in both the portfolio-wide total and the option-specific view.
+
 ## Hermes / Telegram integration (V4.13)
 
 A separate system, [Hermes Agent](https://hermes-agent.nousresearch.com),

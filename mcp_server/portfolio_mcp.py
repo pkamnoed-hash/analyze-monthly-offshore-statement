@@ -53,6 +53,7 @@ from core.fundamentals_capture import capture_fundamentals  # noqa: E402
 from core.fundamentals_summary import (  # noqa: E402
     normalize_symbol, summarize_fundamentals, summarize_holdings_health,
 )
+from core.option_pl import resolved_events  # noqa: E402
 from core.rebalance_entry import (  # noqa: E402
     apply_rebalance_edit, apply_rebalance_reset, describe_plan, get_plan_with_holdings,
     preview_rebalance_edit, preview_rebalance_reset,
@@ -210,13 +211,19 @@ def get_lifetime_pl() -> str:
     start = xlsx["summary"]["Month"].min()
     end = pd.Timestamp(data_end.year, data_end.month, 1)
 
-    result = calculations.compute_investment_gain(realized_events, unrealized, blended_income, start, end)
+    # V4.22 -- option_events feeds compute_investment_gain's option_realized term,
+    # same "one formula, never two numbers that quietly disagree" property Dashboard's
+    # own call shares.
+    option_events = resolved_events(db.fetch_option_trades())
+    result = calculations.compute_investment_gain(
+        realized_events, unrealized, blended_income, start, end, option_realized=option_events,
+    )
     statement_date = latest_month.strftime("%b %Y")
     return (
         f"Lifetime Total P/L: ${result['total']:,.2f} "
         f"(Realized ${result['realized']:,.2f} + Unrealized ${result['unrealized']:,.2f} as of the "
         f"{statement_date} statement + Dividends ${result['dividends']:,.2f} + "
-        f"Interest ${result['interest']:,.2f})."
+        f"Interest ${result['interest']:,.2f} + Options ${result['options']:,.2f})."
     )
 
 

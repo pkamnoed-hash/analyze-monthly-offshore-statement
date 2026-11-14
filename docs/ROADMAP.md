@@ -4890,6 +4890,143 @@ verification (Rich ticking Bought? from a natural statement, and the first sched
 cron runs actually surfacing in the web app) happens after deployment -- see the next
 update to this section once the user has tried it.
 
+## V4.22: Option trading tracker
+
+Branch `v4.22-option-tracker`, cut from `main` after v4.21 was tagged.
+
+### What this is
+
+The user found 6 historical option trades hiding in the `trades` table
+(OCC-style symbols like `ONDS260130P00012000`, from the original
+broker-statement seed import) and wanted to start deliberately tracking option
+trades going forward: record them (manual entry + screenshot upload), see win
+ratio and realized P/L, and view them on their own page.
+
+**Investigated first, before designing anything**: `core/calculations.py::
+compute_current_positions`/`compute_realized_pl` assume a symbol's first trade
+is always a buy establishing cost basis before a sell realizes against it. For
+a short options strategy -- selling to open (e.g. a covered call or
+cash-secured put, collecting premium up front) before buying to close -- this
+breaks silently and WRONG: the opening sell books its entire proceeds as
+instant 100% profit, the position vanishes from `compute_current_positions`
+while open, the later buy-to-close opens a phantom long lot instead of closing
+anything, and `apply_sequential_position_check` flags the opening sell as a
+false-positive oversell. The user's 6 existing trades happen to all be
+buy-first (long option purchases), so they compute correctly today by
+accident -- but this must never be the path for a short options trade. Hence a
+separate table and its own direction-agnostic P/L matching, not an extension
+of the stock pipeline.
+
+Confirmed with the user up front: the 6 historical trades stay exactly where
+they are in `trades` (Dashboard's Realized P/L unchanged) AND get copied into
+the new option table too; V1 is web-app only (no Rich/Telegram tool yet);
+screenshot upload lives on the new page itself, not inside Record Trade's
+Upload Slip tab; no changes needed to Allocation Type (option trades never
+appear on that page's classification list, since they live in their own
+table); every entry page's per-row delete convention applies here too,
+restricted to manual/slip rows, never the migrated-seed ones; and Dashboard's
+"Investment Gain/Loss" gains option P/L as a 5th term rather than leaving
+Option Monitor fully siloed.
+
+### What was built
+
+- **`core/db.py`** -- new `option_trades` table (full schema in
+  `docs/DATA_MODEL.md`) + `insert_option_trade`/`fetch_option_trades`/
+  `delete_option_trade`, same shape as the `trades` equivalents.
+- **`core/options.py`** (new) -- OCC-style symbol parsing/building
+  (`parse_option_symbol`/`build_option_symbol`), verified against all 6 real
+  historical symbols.
+- **`core/option_pl.py`** (new) -- `validate_option_rows` (mirrors
+  `trade_entry.validate_trade_rows`'s shape); `match_round_trips` -- a FIFO
+  lot-matcher keyed on `position_effect` ('open'/'close') instead of `side`,
+  the fix for the short-strategy bug above, with real **partial-fill**
+  support: an open lot can be closed across several separate partial sells
+  over time, each producing its own correctly-matched round trip with its own
+  `contracts`/`pl`/`pl_pct` (`pl_pct` = P/L ÷ the premium that changed hands
+  at open, computed the same way for a long or a short); an unmatched open lot
+  past its expiration auto-resolves as expired-worthless (full premium lost
+  for a long, kept for a short) -- the stated v1 simplification that
+  American-style exercise/assignment isn't modeled (the user's own
+  screenshots confirm Dime!'s contracts are "Auto-exercise/close if ITM" at
+  expiration, which this app can't predict in advance). `compute_option_summary`
+  (win rate/total realized P/L) and `resolved_events` (feeds Dashboard's KPI,
+  below) build on the same matcher.
+- **`core/option_slip_parser.py`** (new) -- mirrors `core/slip_parser.py`'s
+  Claude-vision structure exactly, new schema/prompt for the Dime! "Order
+  Information" screen layout (all 6 fee fields, confirmed against two real,
+  uncropped screenshots -- the math checked out exactly both ways: buy 180.00
+  + 0.55 + 0.04 + 0.03 + 0.02 = 180.64 Total Cost; sell 235.00 − 0.55 − 0.04 −
+  0.03 − 0.02 − 0.00 − 0.01 = 234.35 Estimated Total Credit). Deliberately does
+  NOT extract `position_effect` -- never shown on the slip, so the user always
+  picks Open/Close themselves.
+- **`app_pages/option_monitor.py`** (new page, registered under Overview next
+  to Monitor Stocks) -- Record trade tab (manual entry + screenshot upload,
+  sharing outer widgets the same way `record_trade.py` does so the Parse
+  button's callback can pre-fill them); Open Positions tab (unclosed/expired
+  contracts, "X of Y contracts" when partially closed, a Cost/Credit column
+  separate from Est. P/L/% P/L which stay blank until a position actually
+  resolves); Closed Trades tab (one row per matched round trip); a contract
+  search filtering both tables to one specific contract at a time; a Duration
+  control (preset pills + explicit From/To dates) placed inline above the
+  KPIs, not in the sidebar, since this filter is page-local; per-row Delete
+  (manual/slip rows only, migrated-seed rows show a locked "History" label
+  instead).
+- **Dashboard's "Investment Gain/Loss" gains an Options term** --
+  `compute_investment_gain` takes a new optional `option_realized` parameter
+  (defaults to 0, so every untouched caller keeps the exact same total as
+  before); `app_pages/dashboard.py` and `mcp_server/portfolio_mcp.py::
+  get_lifetime_pl` both pass `option_pl.resolved_events()`'s output, so the
+  two can never quietly disagree about whether option P/L counts.
+- **`scripts/migrate_option_trades_from_seed.py`** (new, one-off, idempotent)
+  -- copies the 6 historical option trades from `trades` into `option_trades`
+  without touching `trades` itself.
+
+### Found during the first live test, and fixed the same day
+
+Saving a manually-entered option trade through the real page crashed with
+`ValueError: Unsupported parameter type <Timestamp>` -- the exact same class
+of bug V4.19's `record_trade_batch`/`record_dividend_batch` hit before: the DB
+driver can't bind a `pd.Timestamp` directly as a SQL parameter.
+`validate_option_rows` correctly returns `trade_date`/`expiration_date` as
+`pd.Timestamp` (useful for other callers, e.g. tests), but
+`app_pages/option_monitor.py`'s save handler wasn't converting them to plain
+`YYYY-MM-DD` strings before calling `db.insert_option_trade` -- fixed at that
+exact point, same as the V4.19 precedent, and verified against a real
+throwaway insert/delete round trip on dev before confirming the page itself.
+
+### Verification
+
+Full suite 904/904 passing (860 going in, +44 new: `core/options.py`,
+`core/option_pl.py` including the partial-fill/short-strategy/source-tracking
+cases, `core/option_slip_parser.py`, `compute_investment_gain`'s new term).
+`core/option_slip_parser.py`'s real-API verification against the user's own
+two uncropped MNST screenshots is deferred -- the local `.streamlit/
+secrets.toml` `ANTHROPIC_API_KEY` was rejected (401) at the time; the parser's
+8 unit tests (mocked client) already cover the schema/fee-math/casing
+behavior, so this isn't blocking, just not yet confirmed against the real API.
+Migration run against **dev** first (6 symbols, 12 rows, P/L matching the
+known historical figures exactly -- e.g. ONDS +$27.00/+34.2%, GDX
+−$395.00/−91.9%; `trades` confirmed unchanged; idempotent re-run confirmed
+safe), then against **prod** the same way (same 6 symbols/12 rows/-$716.00
+total, `trades` confirmed unchanged at 1,049 rows, backed up first via
+`scripts/backup_turso.py`). Rich's `get_lifetime_pl` confirmed against dev to
+include the new Options term in its reply. The page itself was exercised live
+by the user on the dev app -- manual entry, Open/Closed tables, the Duration/
+search filters, and the win-rate KPI label -- surfacing and fixing the
+Timestamp bug above along the way.
+
+### Known limits (stated up front)
+
+- American-style exercise/assignment is not modeled -- see "What this is"
+  above; an ITM contract Dime! auto-exercises/closes needs its resulting event
+  logged by the user (a real stock trade on Record Trade, or a correcting
+  option entry here), not something this app predicts.
+- No Rich/Telegram entry path yet (confirmed scope decision) -- can mirror
+  `record_trades_batch`'s confirm-gated shape as a fast-follow.
+- Screenshot parsing depends on the same Claude-vision slip-parser approach
+  already used for stock trades -- same failure mode and mitigation (human
+  review before Save).
+
 ## Deferred / future
 
 - **A "view" link from Monitor Stocks straight into Company
