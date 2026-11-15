@@ -1,5 +1,13 @@
 # Changelog
 
+## Fixed: a fully-sold stock could still show up on Stock Monitor (v4.24.1)
+
+- If a stock's buy and sell share counts were recorded to very slightly different
+  precision (a difference smaller than a thousandth of a cent's worth of shares --
+  real for BP and GOOY), it could keep showing up as a "current position" on Stock
+  Monitor even after being completely sold. Fixed so a position that's effectively
+  fully closed is treated as closed.
+
 ## New: Quarterly view on Company Fundamentals (v4.24)
 
 - Company Fundamentals now has a View toggle -- Annual or Quarterly -- next to the
