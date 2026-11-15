@@ -324,6 +324,24 @@ class TestComputeCurrentPositions:
         result = compute_current_positions(tx)
         assert list(result["Symbol"]) == ["BBB"]
 
+    def test_a_full_sell_does_not_leave_a_dust_residual_from_a_recording_mismatch(self):
+        # Regression, confirmed real on prod with these EXACT values: BP bought
+        # as two lots (2.0 + 1.476800447 shares, from the original historical
+        # seed import) then sold in one real-world trade recorded as 3.4768004
+        # shares -- a genuine ~4.7e-08-share gap between the recorded buy total
+        # and the recorded sell (the sell was captured/rounded to fewer
+        # significant figures than the seed import used), not float-arithmetic
+        # noise. A too-tight 1e-9 pop/filter threshold let that dust-sized
+        # leftover through, so BP kept showing up as a "current position" on
+        # Stock Monitor after being fully sold.
+        tx = make_transactions([
+            buy("BP", "2026-06-03", 2.0, 43.96),
+            buy("BP", "2026-06-03", 1.476800447, 43.96, commission=0.25),
+            sell("BP", "2026-11-09", 3.4768004, 44.4626),
+        ])
+        result = compute_current_positions(tx)
+        assert result.empty, f"BP should be fully closed, not: {result.to_dict('records')}"
+
 
 class TestComputeHoldingPeriodStart:
     def test_never_sold_starts_at_first_buy(self):

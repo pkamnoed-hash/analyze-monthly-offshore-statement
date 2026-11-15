@@ -119,7 +119,21 @@ def _run_fifo(trades: pd.DataFrame):
                 cost_removed += take * lot_cost
                 lot_qty -= take
                 remaining -= take
-                if lot_qty <= 1e-9:
+                # V4.24.1 -- 1e-6, not 1e-9: a sell meant to close a position out
+                # doesn't always carry the exact same share count the buy(s) were
+                # recorded with -- confirmed real for BP, bought as two lots
+                # (2.0 + 1.476800447 shares, from the original historical seed
+                # import) and later sold in a single real-world trade recorded as
+                # 3.4768004 shares (likely captured/rounded to fewer significant
+                # figures than the seed import used) -- a genuine ~4.7e-08-share
+                # gap in the recorded data itself, not a float-arithmetic artifact.
+                # A 1e-9 threshold is too tight to call that "closed," so the
+                # dust-sized leftover lingered as an open lot. 1e-6 matches the
+                # threshold compute_holding_period_start() below already uses for
+                # the exact same "is this position effectively zero" question --
+                # no real investor's remaining position is ever a hundred-millionth
+                # of a share.
+                if lot_qty <= 1e-6:
                     book.popleft()
                 else:
                     book[0][0] = lot_qty
@@ -184,12 +198,19 @@ def compute_current_positions(trades: pd.DataFrame) -> pd.DataFrame:
     compute_fifo_realized_pl builds. Quantity is the sum of remaining lots;
     Avg Cost is their quantity-weighted average -- what you'd need to pay to
     rebuy the position, and what a future sell will use as cost. Symbols
-    fully sold out (zero remaining lots) are simply absent from the result."""
+    fully sold out (zero remaining lots) are simply absent from the result.
+
+    V4.24.1 -- 1e-6, not 1e-9 (matching compute_holding_period_start's own
+    threshold below, and _run_fifo's lot-closing fix above): a second guard
+    against the same dust-sized residual (see _run_fifo's own comment for the
+    real root cause -- a recorded buy/sell share-count mismatch too small to
+    matter, not float arithmetic), in case a lot somehow still carries one
+    (belt-and-suspenders -- _run_fifo's own fix is the real one)."""
     _, lots = _run_fifo(trades)
     rows = []
     for sym, book in lots.items():
         qty = sum(q for q, _ in book)
-        if qty > 1e-9:
+        if qty > 1e-6:
             cost = sum(q * c for q, c in book)
             rows.append({"Symbol": sym, "Quantity": qty, "Avg Cost": cost / qty, "Cost Basis": cost})
     return pd.DataFrame(rows, columns=["Symbol", "Quantity", "Avg Cost", "Cost Basis"])
