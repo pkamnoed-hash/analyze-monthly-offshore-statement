@@ -743,6 +743,10 @@ def apply_fundamentals_fallback(live_rows: pd.DataFrame, cached_rows: pd.DataFra
     fallback_cols = [
         "Currency", "Financial Currency", "Current Price", "Target Mean Price",
         "Number Of Analysts", "Income Statement", "Balance Sheet", "Cash Flow",
+        # V4.24 -- without these, a failed live fetch would silently replace real
+        # cached quarterly data with the failed attempt's own blank {} (every other
+        # yfinance-derived field already gets restored from cache; these were missed).
+        "Quarterly Income Statement", "Quarterly Balance Sheet", "Quarterly Cash Flow",
     ]
     out_rows = []
     for _, live_row in live_rows.iterrows():
@@ -950,17 +954,62 @@ def safe_divide(numerator, denominator):
     return numerator / denominator
 
 
-def yoy_pct(values: list) -> float | None:
+def yoy_pct(values: list, lookback: int = 1) -> float | None:
     """V4.15 (moved from the page's private `_yoy_pct`) -- latest-vs-prior-year %
     change over a date-ascending list, or None ("n/m") when there's no prior year or
     the prior year was zero/negative -- a plain % change is meaningless there (e.g.
-    TSM's Free Cash Flow swinging from negative to positive)."""
-    if len(values) < 2:
+    TSM's Free Cash Flow swinging from negative to positive).
+
+    V4.24 -- `lookback` (default 1, every existing caller's behavior unchanged)
+    generalizes which prior period it compares against: `1` is the immediately
+    prior column (correct YoY for annual data, or QoQ for quarterly data);
+    Company Fundamentals' quarterly view passes `4` for a true "same quarter last
+    year" comparison, avoiding the seasonal noise a plain quarter-over-quarter
+    comparison can show."""
+    if len(values) < lookback + 1:
         return None
-    latest, prior = values[-1], values[-2]
+    latest, prior = values[-1], values[-1 - lookback]
     if latest is None or pd.isna(latest) or prior is None or pd.isna(prior) or prior <= 0:
         return None
     return (latest - prior) / prior * 100
+
+
+def trailing_twelve_month_statement(quarterly_statement: dict) -> dict | None:
+    """V4.24 -- reconstructs a synthetic trailing-twelve-month (TTM) statement from
+    a quarterly one (shaped like market_data._statement_to_dict's own
+    {row_label: {date_str: value}}), by summing each row's last 4 quarters into a
+    single period keyed by the latest of those 4 dates.
+
+    Why TTM and not just handing a single quarter's statement to callers like
+    core/health.py::assess_health: that module's hard "losing money"/"burning cash"
+    flags and its debt_to_cash_flow ratio all assume one period = one year (see its
+    own module docstring) -- a single quarter's Net Income or Operating Cash Flow
+    swinging negative from ordinary seasonality would trigger the same flag a real
+    annual loss does, and dividing Total Debt by one quarter's cash flow instead of
+    a year's overstates leverage roughly 4x. Summing the trailing 4 quarters turns
+    quarterly data back into an annual-equivalent figure those same thresholds
+    already handle correctly, with ZERO changes to health.py itself.
+
+    Returns `None` when fewer than 4 quarterly periods exist across the whole
+    statement (not enough history to reconstruct a real TTM figure -- callers show
+    this as "not enough quarterly history yet," never a guess). A label missing a
+    value on one of the 4 dates contributes 0 to that label's sum (consistent with
+    this module's other None-tolerant helpers, e.g. safe_divide) rather than
+    making the whole label None -- a line item one quarter didn't report (e.g. a
+    one-off item) shouldn't blank out the other 3 quarters' real figures."""
+    all_dates = sorted({d for values in quarterly_statement.values() for d in values})
+    if len(all_dates) < 4:
+        return None
+    window = all_dates[-4:]
+    latest = window[-1]
+
+    def _safe(v):
+        return 0 if v is None or pd.isna(v) else v
+
+    return {
+        label: {latest: sum(_safe(values.get(d)) for d in window)}
+        for label, values in quarterly_statement.items()
+    }
 
 
 def compute_key_ratios(income: dict, balance: dict) -> dict:

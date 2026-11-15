@@ -6,7 +6,8 @@ from core.market_data import fetch_fundamentals, fetch_price_history, fetch_stoc
 
 class FakeTicker:
     def __init__(self, info=None, history_df=None, raise_on_history=False, dividends=None,
-                 income_stmt=None, balance_sheet=None, cashflow=None):
+                 income_stmt=None, balance_sheet=None, cashflow=None,
+                 quarterly_income_stmt=None, quarterly_balance_sheet=None, quarterly_cashflow=None):
         self.info = info
         self._history_df = history_df
         self._raise_on_history = raise_on_history
@@ -18,6 +19,10 @@ class FakeTicker:
         self.income_stmt = income_stmt if income_stmt is not None else pd.DataFrame()
         self.balance_sheet = balance_sheet if balance_sheet is not None else pd.DataFrame()
         self.cashflow = cashflow if cashflow is not None else pd.DataFrame()
+        # V4.24 -- same empty-DataFrame-by-default convention as the annual ones above.
+        self.quarterly_income_stmt = quarterly_income_stmt if quarterly_income_stmt is not None else pd.DataFrame()
+        self.quarterly_balance_sheet = quarterly_balance_sheet if quarterly_balance_sheet is not None else pd.DataFrame()
+        self.quarterly_cashflow = quarterly_cashflow if quarterly_cashflow is not None else pd.DataFrame()
 
     def history(self, start=None, end=None):
         self.history_call_kwargs = {"start": start, "end": end}
@@ -363,6 +368,9 @@ class TestFetchFundamentals:
         income = _statement({"Total Revenue": [245122.0], "Net Income": [88136.0]}, ["2026-06-30"])
         balance = _statement({"Total Assets": [512163.0]}, ["2026-06-30"])
         cashflow = _statement({"Free Cash Flow": [74071.0]}, ["2026-06-30"])
+        q_income = _statement({"Total Revenue": [64727.0]}, ["2026-06-30"])
+        q_balance = _statement({"Total Assets": [512163.0]}, ["2026-06-30"])
+        q_cashflow = _statement({"Free Cash Flow": [20412.0]}, ["2026-06-30"])
         yf_module = FakeYfModule({
             "MSFT": FakeTicker(
                 info={"currentPrice": 452.0, "targetMeanPrice": 486.5, "numberOfAnalystOpinions": 42,
@@ -371,6 +379,7 @@ class TestFetchFundamentals:
                       "industry": "Software - Infrastructure", "sector": "Technology",
                       "fullTimeEmployees": 228000, "country": "United States", "city": "Redmond"},
                 income_stmt=income, balance_sheet=balance, cashflow=cashflow,
+                quarterly_income_stmt=q_income, quarterly_balance_sheet=q_balance, quarterly_cashflow=q_cashflow,
             ),
         })
 
@@ -386,6 +395,9 @@ class TestFetchFundamentals:
         assert row["Income Statement"]["Total Revenue"]["2026-06-30"] == pytest.approx(245122.0)
         assert row["Balance Sheet"]["Total Assets"]["2026-06-30"] == pytest.approx(512163.0)
         assert row["Cash Flow"]["Free Cash Flow"]["2026-06-30"] == pytest.approx(74071.0)
+        assert row["Quarterly Income Statement"]["Total Revenue"]["2026-06-30"] == pytest.approx(64727.0)
+        assert row["Quarterly Balance Sheet"]["Total Assets"]["2026-06-30"] == pytest.approx(512163.0)
+        assert row["Quarterly Cash Flow"]["Free Cash Flow"]["2026-06-30"] == pytest.approx(20412.0)
         assert row["Business Summary"] == "Microsoft Corporation develops and licenses software."
         assert row["Industry"] == "Software - Infrastructure"
         assert row["Sector"] == "Technology"
@@ -430,6 +442,9 @@ class TestFetchFundamentals:
         assert row["Income Statement"] == {}
         assert row["Balance Sheet"] == {}
         assert row["Cash Flow"] == {}
+        assert row["Quarterly Income Statement"] == {}
+        assert row["Quarterly Balance Sheet"] == {}
+        assert row["Quarterly Cash Flow"] == {}
         # Company Profile fields absent from `info` here -- a real, valid outcome for
         # some ETFs, not a failure -- .get() returns None rather than raising.
         assert row["Business Summary"] is None
@@ -462,8 +477,29 @@ class TestFetchFundamentals:
         assert result.empty
         assert "Symbol" in result.columns
         assert "Income Statement" in result.columns
+        assert "Quarterly Income Statement" in result.columns
         assert "Business Summary" in result.columns
         assert "Employees" in result.columns
+
+    def test_quarterly_statements_carry_multiple_trailing_quarters(self):
+        # Real finding: yfinance typically returns ~4-5 trailing quarterly columns,
+        # fewer than the ~4-5 FISCAL YEARS the annual statements carry.
+        q_income = _statement(
+            {"Total Revenue": [60000.0, 62000.0, 64727.0]},
+            ["2025-12-31", "2026-03-31", "2026-06-30"],
+        )
+        yf_module = FakeYfModule({
+            "MSFT": FakeTicker(
+                info={"currentPrice": 452.0, "currency": "USD", "financialCurrency": "USD"},
+                quarterly_income_stmt=q_income,
+            ),
+        })
+
+        result = fetch_fundamentals(["MSFT"], yf_module=yf_module)
+
+        revenue_by_date = result.iloc[0]["Quarterly Income Statement"]["Total Revenue"]
+        assert list(revenue_by_date.keys()) == ["2025-12-31", "2026-03-31", "2026-06-30"]
+        assert revenue_by_date["2026-06-30"] == pytest.approx(64727.0)
 
     def test_failed_fetch_leaves_company_profile_fields_blank_too(self):
         yf_module = FakeYfModule({"GHOST": FakeTicker(info={"currency": "USD"})})

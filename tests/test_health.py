@@ -429,3 +429,13 @@ class TestFormatting:
         assert health.describe_health(health.assess_health(income, {}, {})).startswith(
             "Health: not rated -- only 2 usable measures")
         assert "no financial statements are stored" in health.describe_health(None)
+
+    def test_period_label_defaults_to_annual_wording(self):
+        assert "A rule-of-thumb read of the stored annual statements" in health.describe_health(assess())
+
+    def test_period_label_override_is_honored(self):
+        text = health.describe_health(
+            assess(), period_label="the trailing twelve months, reconstructed from quarterly statements",
+        )
+        assert "A rule-of-thumb read of the trailing twelve months, reconstructed from quarterly statements" in text
+        assert "stored annual statements" not in text

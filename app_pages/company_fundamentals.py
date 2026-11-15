@@ -96,13 +96,27 @@ def _raw_table(statement: dict, exclude_labels: set) -> pd.DataFrame:
     """Every OTHER row the statement actually returned, in its native (unformatted)
     units -- deliberately not forced into the curated table's money/EPS formatting,
     since a raw statement mixes dollar amounts, per-share figures, share counts, and
-    ratios/rates with no metadata telling this page which is which."""
+    ratios/rates with no metadata telling this page which is which.
+
+    V4.24 -- gains the same "Trend" sparkline column the curated table above
+    already has (same LineChartColumn convention, a missing point becomes 0.0
+    not None for the same reason -- the chart column silently falls back to
+    showing the raw list as text otherwise). Unlike the curated table, these
+    values are NOT rescaled (e.g. ÷1e6) -- each row keeps its own native units,
+    since the sparkline here is read as a shape over time per row, not compared
+    in magnitude against any other row."""
     remaining = {label: values for label, values in statement.items() if label not in exclude_labels}
     if not remaining:
         return pd.DataFrame()
     all_dates = sorted({d for values in remaining.values() for d in values})
     data = {label: [values.get(d) for d in all_dates] for label, values in remaining.items()}
-    return pd.DataFrame(data, index=all_dates).T
+    df = pd.DataFrame(data, index=all_dates).T
+    trend = {
+        label: [v if v is not None and not pd.isna(v) else 0.0 for v in (values.get(d) for d in all_dates)]
+        for label, values in remaining.items()
+    }
+    df.insert(0, "Trend", [trend[label] for label in df.index])
+    return df
 
 
 def _render_statement_tab(statement: dict, rows: list[tuple[str, str]], unit_caption: str):
@@ -125,15 +139,19 @@ def _render_statement_tab(statement: dict, rows: list[tuple[str, str]], unit_cap
                 "reformatted) -- dollar amounts, per-share figures, and share counts "
                 "may appear side by side."
             )
-            st.dataframe(raw, use_container_width=True)
+            st.dataframe(
+                raw, use_container_width=True,
+                column_config={"Trend": st.column_config.LineChartColumn("Trend", width="small")},
+            )
 
 st.title("Company Fundamentals")
 with st.expander("What does this page do?"):
     st.caption(
         "Shows one holding's real income statement, balance sheet, and cash flow "
-        "(annual, straight from yfinance), plus an Analyst Target valuation -- the "
-        "current price compared against sell-side analysts' own real price targets, "
-        "not a value this app computes itself."
+        "(straight from yfinance, annual or quarterly via the View toggle below), "
+        "plus an Analyst Target valuation -- the current price compared against "
+        "sell-side analysts' own real price targets, not a value this app computes "
+        "itself."
     )
 
 
@@ -192,6 +210,31 @@ else:
         st.info(f"No current holdings in the {category} category.")
     else:
         holding_symbol = st.selectbox("Symbol (your holdings)", sorted(symbol_options["Symbol"].tolist()))
+
+# ---------------------------------------------------------------------------------
+# V4.24 -- View toggle (Annual/Quarterly), placed here per the approved mockup
+# (https://claude.ai/artifact/Svcp1TRPdmM6S7ZRPa68QJ): between the Allocation Type
+# radio row above and the Symbol pickers below, styled like Option Monitor's own
+# segmented-control pills. Picks which pair of statement dicts (annual vs
+# "Quarterly ..." keys on the fundamentals_cache row) feeds EVERYTHING below --
+# KPI row, Key ratios, the Overview chart, Summary of Health, and all 3 statement
+# tabs -- one switch point, not a page rewrite. The second "Change shown as"
+# pill only matters for the KPI row's delta and only appears in Quarterly view
+# (comparing to the immediately-prior quarter is QoQ; comparing 4 periods back is
+# a true year-over-year figure that avoids seasonal noise -- see
+# calculations.yoy_pct's own docstring).
+# ---------------------------------------------------------------------------------
+view_col, delta_col = st.columns([2, 2])
+with view_col:
+    view = st.segmented_control(
+        "View", ["Annual", "Quarterly"], default="Annual", key="company_fundamentals_view",
+    ) or "Annual"
+delta_mode = "YoY"
+if view == "Quarterly":
+    with delta_col:
+        delta_mode = st.segmented_control(
+            "Change shown as", ["YoY", "QoQ"], default="YoY", key="company_fundamentals_delta_mode",
+        ) or "YoY"
 
 free_symbol = st.text_input(
     "Or look up any other symbol", placeholder="e.g. AAPL",
@@ -263,53 +306,85 @@ if pd.notna(row["Currency"]) and pd.notna(row["Financial Currency"]) and row["Cu
         "the trading price without a currency conversion."
     )
 
-income = row["Income Statement"]
-balance = row["Balance Sheet"]
-cashflow = row["Cash Flow"]
+if view == "Quarterly":
+    income = row["Quarterly Income Statement"]
+    balance = row["Quarterly Balance Sheet"]
+    cashflow = row["Quarterly Cash Flow"]
+else:
+    income = row["Income Statement"]
+    balance = row["Balance Sheet"]
+    cashflow = row["Cash Flow"]
 
 # ---------------------------------------------------------------------------------
-# Summary of Health (V4.16) -- a rule-of-thumb read of the stored annual statements,
-# from core/health.py (shared with Monitor Stocks' Health column and the Hermes MCP
-# server, so all three show the same verdict). Nothing here is fetched or saved. An
-# ETF/fund has no statements, so assess_health() returns None and the section is
-# simply absent (the "no financial statements" note below covers that case).
+# Summary of Health (V4.16) -- a rule-of-thumb read of the stored statements, from
+# core/health.py (shared with Monitor Stocks' Health column and the Hermes MCP
+# server, so all three show the same verdict for the ANNUAL view -- Monitor Stocks'
+# column and get_holdings_health stay annual-only; only this page and Rich's
+# single-symbol get_company_fundamentals tool gained the quarterly option).
+# Nothing here is fetched or saved. An ETF/fund has no statements, so
+# assess_health() returns None and the section is simply absent (the "no financial
+# statements" note below covers that case).
+#
+# V4.24 -- Quarterly view does NOT feed raw quarterly statements into assess_health:
+# its hard loss/burn flags and debt_to_cash_flow ratio all assume one period = one
+# year (see calculations.trailing_twelve_month_statement's own docstring for why).
+# Instead it reconstructs a trailing-twelve-month (TTM) income + cash flow
+# statement by summing the last 4 quarters, paired with the latest single
+# quarter's balance sheet (already a point-in-time snapshot -- latest_statement_value
+# picks its own most recent date out of the full quarterly dict, so no slicing is
+# needed here). assess_health() itself runs completely unchanged either way.
 # ---------------------------------------------------------------------------------
-health_result = health.assess_health(income, balance, cashflow, row.get("Sector"), row.get("Industry"))
-if health_result is not None:
+not_enough_quarterly_history = False
+if view == "Quarterly":
+    ttm_income = calculations.trailing_twelve_month_statement(income)
+    ttm_cashflow = calculations.trailing_twelve_month_statement(cashflow)
+    not_enough_quarterly_history = ttm_income is None or ttm_cashflow is None
+    health_income, health_cashflow = ttm_income or {}, ttm_cashflow or {}
+    health_period_label = "the trailing twelve months, reconstructed from quarterly statements"
+else:
+    health_income, health_cashflow = income, cashflow
+    health_period_label = "the stored annual statements"
+
+if not_enough_quarterly_history:
     st.subheader("Summary of Health", help=HEALTH_HELP)
-    if health_result["overall"] is None:
-        n_measures = health_result["n_measures"]
-        st.info(
-            f"Not enough data to rate -- only {n_measures} usable measure{'s' if n_measures != 1 else ''} "
-            f"in the stored statements (at least {health.MIN_MEASURES} needed)."
+    st.info("Not enough quarterly history yet to rate (need at least 4 quarters on file).")
+else:
+    health_result = health.assess_health(health_income, balance, health_cashflow, row.get("Sector"), row.get("Industry"))
+    if health_result is not None:
+        st.subheader("Summary of Health", help=HEALTH_HELP)
+        if health_result["overall"] is None:
+            n_measures = health_result["n_measures"]
+            st.info(
+                f"Not enough data to rate -- only {n_measures} usable measure{'s' if n_measures != 1 else ''} "
+                f"in the stored statements (at least {health.MIN_MEASURES} needed)."
+            )
+        else:
+            st.markdown(f"**Overall: {health.format_health_cell(health_result)}**")
+
+        for col, group in zip(st.columns(3), health.GROUPS):
+            group_result = health_result["groups"][group]
+            with col:
+                st.markdown(f"**{health.DOTS.get(group_result['light'], '⚪')} {group}**")
+                if group_result["measures"]:
+                    st.markdown("  \n".join(
+                        f"{health.DOTS[m['light']]} {m['name']}: {m['value']}" for m in group_result["measures"]
+                    ))
+                else:
+                    st.caption("Not rated for this kind of statement.")
+
+        reasons = health.health_reasons(health_result)
+        if reasons:
+            st.markdown("**Watch:** " + "; ".join(reasons))
+        elif health_result["overall"] == health.YELLOW:
+            st.markdown("No single red measure -- the verdict reflects several middling readings.")
+
+        caption = (
+            f"A rule-of-thumb read of {health_period_label} "
+            f"({health.PROFILE_DESCRIPTIONS[health_result['profile']]}), not investment advice."
         )
-    else:
-        st.markdown(f"**Overall: {health.format_health_cell(health_result)}**")
-
-    for col, group in zip(st.columns(3), health.GROUPS):
-        group_result = health_result["groups"][group]
-        with col:
-            st.markdown(f"**{health.DOTS.get(group_result['light'], '⚪')} {group}**")
-            if group_result["measures"]:
-                st.markdown("  \n".join(
-                    f"{health.DOTS[m['light']]} {m['name']}: {m['value']}" for m in group_result["measures"]
-                ))
-            else:
-                st.caption("Not rated for this kind of statement.")
-
-    reasons = health.health_reasons(health_result)
-    if reasons:
-        st.markdown("**Watch:** " + "; ".join(reasons))
-    elif health_result["overall"] == health.YELLOW:
-        st.markdown("No single red measure -- the verdict reflects several middling readings.")
-
-    caption = (
-        "A rule-of-thumb read of the latest stored annual statements "
-        f"({health.PROFILE_DESCRIPTIONS[health_result['profile']]}), not investment advice."
-    )
-    if health_result["partial"]:
-        caption += " These statements look like a bank, lender or fund, so it is rated on return on equity and growth only."
-    st.caption(caption)
+        if health_result["partial"]:
+            caption += " These statements look like a bank, lender or fund, so it is rated on return on equity and growth only."
+        st.caption(caption)
 
 # ---------------------------------------------------------------------------------
 # Valuation card -- Analyst Target is real yfinance data (targetMeanPrice, an
@@ -354,44 +429,67 @@ if not income and not balance and not cashflow:
     st.stop()
 
 
-def _kpi_card(col, label: str, dates: list, values: list, delta_color: str, help_text: str):
-    """One KPI card: latest value (in millions), its YoY delta, and a sparkline
-    across every year available -- the mockup's own "Revenue/Net Income/FCF/Total
-    Debt" row, ported here almost directly since it's just a compact restatement of
-    data the Overview tab's own chart already fetches. `delta_color="inverse"` for
-    Total Debt (a decrease is the good direction), "normal" for the other three (an
-    increase is)."""
+def _kpi_card(col, label: str, dates: list, values: list, delta_color: str, help_text: str, *, quarterly: bool, lookback: int, delta_suffix: str):
+    """One KPI card: latest value (in millions), its period-over-period delta, and
+    a sparkline across every period available -- the mockup's own "Revenue/Net
+    Income/FCF/Total Debt" row, ported here almost directly since it's just a
+    compact restatement of data the Overview tab's own chart already fetches.
+    `delta_color="inverse"` for Total Debt (a decrease is the good direction),
+    "normal" for the other three (an increase is).
+
+    V4.24 -- `quarterly` switches the sparkline's x-axis label from year-only
+    (`dates[:4]`, which would collide across several quarters sharing the same
+    year) to a "MM/YY" label; `lookback`/`delta_suffix` control
+    calculations.yoy_pct's comparison basis and the delta's own wording (QoQ vs a
+    true year-over-year figure 4 periods back)."""
     with col:
         latest = values[-1] if values else None
         value_text = f"${latest / 1e6:,.0f}M" if latest is not None and not pd.isna(latest) else "N/A"
-        pct = calculations.yoy_pct(values)
+        pct = calculations.yoy_pct(values, lookback=lookback)
         st.metric(
             label, value_text,
-            delta=f"{pct:+.1f}% YoY" if pct is not None else None,
+            delta=f"{pct:+.1f}% {delta_suffix}" if pct is not None else None,
             delta_color=delta_color, help=help_text,
         )
         if len(values) > 1:
-            # Indexed by year only (dates[:4]) -- the full "YYYY-MM-DD" period-end
-            # date was correct but needlessly precise for a sparkline axis; the day
-            # is always the fiscal year-end anyway, so the year alone is the whole
-            # meaningful part. height=150 (up from an original 60 matching the
-            # mockup) so the year-to-year shape is actually legible.
+            # Annual: indexed by year only (dates[:4]) -- the full "YYYY-MM-DD"
+            # period-end date was correct but needlessly precise for a sparkline
+            # axis, and the day is always the fiscal year-end anyway. Quarterly:
+            # year-only would collide across same-year quarters, so "YY/MM" instead
+            # -- YEAR FIRST, not "MM/YY": st.bar_chart (Altair underneath) sorts a
+            # string-indexed series alphabetically, not by insertion order, so
+            # "MM/YY" scrambles across a year boundary (confirmed real: 01/26
+            # sorted before 04/25) while "YY/MM" sorts identically to chronological
+            # order. height=150 (up from an original 60 matching the mockup) so the
+            # period-to-period shape is actually legible.
+            labels = [d[:4] for d in dates] if not quarterly else [f"{d[2:4]}/{d[5:7]}" for d in dates]
             series = pd.Series(
                 [v / 1e6 if v is not None and not pd.isna(v) else 0 for v in values],
-                index=[d[:4] for d in dates],
+                index=labels,
             )
             st.bar_chart(series, height=150, use_container_width=True)
 
 
+is_quarterly = view == "Quarterly"
+kpi_period_label = "latest quarter" if is_quarterly else "latest FY"
+kpi_period_phrase = "quarter" if is_quarterly else "fiscal year"
+kpi_lookback = (4 if delta_mode == "YoY" else 1) if is_quarterly else 1
+kpi_delta_suffix = ("YoY (vs same qtr)" if delta_mode == "YoY" else "QoQ") if is_quarterly else "YoY"
+_kpi_kwargs = {"quarterly": is_quarterly, "lookback": kpi_lookback, "delta_suffix": kpi_delta_suffix}
+
 kcol1, kcol2, kcol3, kcol4 = st.columns(4)
-_kpi_card(kcol1, "Revenue (latest FY)", *calculations.statement_series(income, "Total Revenue"), "normal",
-          "Total sales in the most recent fiscal year, before any costs are subtracted.")
-_kpi_card(kcol2, "Net Income (latest FY)", *calculations.statement_series(income, "Net Income"), "normal",
-          "Bottom-line profit in the most recent fiscal year, after every expense, interest, and tax.")
-_kpi_card(kcol3, "Free Cash Flow (latest FY)", *calculations.statement_series(cashflow, "Free Cash Flow"), "normal",
-          "Cash left over after operating and capital expenses in the most recent fiscal year.")
-_kpi_card(kcol4, "Total Debt (latest FY)", *calculations.statement_series(balance, "Total Debt"), "inverse",
-          "All interest-bearing borrowing outstanding at the most recent fiscal year-end.")
+_kpi_card(kcol1, f"Revenue ({kpi_period_label})", *calculations.statement_series(income, "Total Revenue"), "normal",
+          f"Total sales in the most recent {kpi_period_phrase}, before any costs are subtracted.",
+          **_kpi_kwargs)
+_kpi_card(kcol2, f"Net Income ({kpi_period_label})", *calculations.statement_series(income, "Net Income"), "normal",
+          f"Bottom-line profit in the most recent {kpi_period_phrase}, after every expense, interest, and tax.",
+          **_kpi_kwargs)
+_kpi_card(kcol3, f"Free Cash Flow ({kpi_period_label})", *calculations.statement_series(cashflow, "Free Cash Flow"), "normal",
+          f"Cash left over after operating and capital expenses in the most recent {kpi_period_phrase}.",
+          **_kpi_kwargs)
+_kpi_card(kcol4, f"Total Debt ({kpi_period_label})", *calculations.statement_series(balance, "Total Debt"), "inverse",
+          f"All interest-bearing borrowing outstanding at the most recent {kpi_period_phrase}-end.",
+          **_kpi_kwargs)
 
 tab_overview, tab_income, tab_balance, tab_cashflow = st.tabs(
     ["Overview", "Income Statement", "Balance Sheet", "Cash Flow"]
@@ -403,6 +501,11 @@ with tab_overview:
     # error when a line item is missing -- e.g. a company with no captured Stockholders
     # Equity this year.
     st.subheader("Key ratios")
+    if is_quarterly:
+        st.caption(
+            "Based on the latest quarter's raw figures, not annualized -- Return on "
+            "Equity and margins will read smaller than the annual view."
+        )
     ratios = calculations.compute_key_ratios(income, balance)
     gross_margin, op_margin = ratios["gross_margin"], ratios["operating_margin"]
     roe, debt_equity, current_ratio = ratios["return_on_equity"], ratios["debt_to_equity"], ratios["current_ratio"]

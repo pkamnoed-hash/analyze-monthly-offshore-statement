@@ -268,6 +268,9 @@ _FUNDAMENTALS_EMPTY_COLUMNS = {
     "Income Statement": "object",
     "Balance Sheet": "object",
     "Cash Flow": "object",
+    "Quarterly Income Statement": "object",
+    "Quarterly Balance Sheet": "object",
+    "Quarterly Cash Flow": "object",
     "Business Summary": "object",
     "Industry": "object",
     "Sector": "object",
@@ -308,6 +311,13 @@ def fetch_fundamentals(symbols: list[str], *, yf_module=None) -> pd.DataFrame:
     year range rather than being forced onto a shared one), plus the Analyst Target
     valuation trio (Current Price, Target Mean Price, Number Of Analysts) and the two
     currency fields needed to detect a statement/quote currency mismatch.
+
+    V4.24 -- also fetches the QUARTERLY equivalents (`Quarterly Income Statement`/
+    `Quarterly Balance Sheet`/`Quarterly Cash Flow`, via `ticker.quarterly_income_stmt`/
+    `quarterly_balance_sheet`/`quarterly_cashflow`), same `_statement_to_dict` shape,
+    same empty-dict-for-ETFs behavior -- for Company Fundamentals' quarterly view.
+    yfinance typically returns only ~4-5 trailing quarters of columns, fewer than the
+    annual statements' ~4-5 years.
 
     `Currency` (`info["currency"]`, the quote's trading currency) vs `Financial
     Currency` (`info["financialCurrency"]`, what the statements are actually reported
@@ -371,6 +381,9 @@ def fetch_fundamentals(symbols: list[str], *, yf_module=None) -> pd.DataFrame:
                 "Income Statement": _statement_to_dict(ticker.income_stmt),
                 "Balance Sheet": _statement_to_dict(ticker.balance_sheet),
                 "Cash Flow": _statement_to_dict(ticker.cashflow),
+                "Quarterly Income Statement": _statement_to_dict(ticker.quarterly_income_stmt),
+                "Quarterly Balance Sheet": _statement_to_dict(ticker.quarterly_balance_sheet),
+                "Quarterly Cash Flow": _statement_to_dict(ticker.quarterly_cashflow),
                 "Business Summary": info.get("longBusinessSummary"),
                 "Industry": info.get("industry"),
                 "Sector": info.get("sector"),
@@ -389,6 +402,9 @@ def fetch_fundamentals(symbols: list[str], *, yf_module=None) -> pd.DataFrame:
                 "Income Statement": {},
                 "Balance Sheet": {},
                 "Cash Flow": {},
+                "Quarterly Income Statement": {},
+                "Quarterly Balance Sheet": {},
+                "Quarterly Cash Flow": {},
                 "Business Summary": None,
                 "Industry": None,
                 "Sector": None,

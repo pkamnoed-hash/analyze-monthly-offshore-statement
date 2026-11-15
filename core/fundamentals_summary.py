@@ -66,10 +66,11 @@ def _multiple(value) -> str:
     return f"{value:.2f}x" if value is not None else "N/A"
 
 
-def summarize_fundamentals(row) -> str:
+def summarize_fundamentals(row, *, period: str = "annual") -> str:
     """`row` is one row of db.fetch_fundamentals_cache() (a Series or dict keyed
     Symbol/Currency/Financial Currency/Current Price/Target Mean Price/Number Of
-    Analysts/Income Statement/Balance Sheet/Cash Flow/Business Summary/Industry/
+    Analysts/Income Statement/Balance Sheet/Cash Flow/Quarterly Income Statement/
+    Quarterly Balance Sheet/Quarterly Cash Flow/Business Summary/Industry/
     Sector/Employees/Country/City/Fetched At). Missing values may be None or NaN --
     both are treated as absent, the same way the page does.
 
@@ -77,7 +78,20 @@ def summarize_fundamentals(row) -> str:
     portfolio) gets the profile and valuation but no KPIs/ratios. Statement figures are
     labelled in the statement's own currency when it isn't USD -- unlike the page,
     which always prints "$" and relies on its mismatch banner -- because a chat answer
-    has no banner and "$2,894,308M" for TSM (really TWD) would be badly misleading."""
+    has no banner and "$2,894,308M" for TSM (really TWD) would be badly misleading.
+
+    V4.24 -- `period="quarterly"` selects the Quarterly statement dicts instead
+    (same single-switch-point design as the page), labels the KPI line "Latest
+    quarter" instead of "Latest fiscal year", and uses a true year-over-year
+    comparison (4 periods back, same quarter last year -- see
+    calculations.yoy_pct's own docstring for why, not just the immediately-prior
+    quarter) since a plain-text chat answer has no toggle for the user to pick QoQ
+    vs YoY themselves. Health in quarterly mode reconstructs a trailing-twelve-month
+    statement first (calculations.trailing_twelve_month_statement) -- see that
+    function's docstring for why raw quarterly figures can't go straight into
+    health.assess_health -- falling back to a plain "not enough quarterly history"
+    note instead of a health block when fewer than 4 quarters are on file."""
+    is_quarterly = period == "quarterly"
     symbol = row["Symbol"]
     fetched = pd.Timestamp(row["Fetched At"]).strftime("%d/%m/%Y") if _present(row.get("Fetched At")) else "an unknown date"
     lines = [f"{symbol} -- stored data as of {fetched} (the price and statements below are from then)."]
@@ -125,11 +139,18 @@ def summarize_fundamentals(row) -> str:
             "so the statement figures below aren't directly comparable to the price without a currency conversion."
         )
 
-    statements = {
-        "income": _as_dict(row.get("Income Statement")),
-        "balance": _as_dict(row.get("Balance Sheet")),
-        "cashflow": _as_dict(row.get("Cash Flow")),
-    }
+    if is_quarterly:
+        statements = {
+            "income": _as_dict(row.get("Quarterly Income Statement")),
+            "balance": _as_dict(row.get("Quarterly Balance Sheet")),
+            "cashflow": _as_dict(row.get("Quarterly Cash Flow")),
+        }
+    else:
+        statements = {
+            "income": _as_dict(row.get("Income Statement")),
+            "balance": _as_dict(row.get("Balance Sheet")),
+            "cashflow": _as_dict(row.get("Cash Flow")),
+        }
     if not any(statements.values()):
         lines.append(
             "No financial statements available for this symbol (likely an ETF or fund), "
@@ -138,23 +159,30 @@ def summarize_fundamentals(row) -> str:
         return "\n".join(lines)
 
     unit = "$" if not _present(financial_currency) or financial_currency == "USD" else f"{financial_currency} "
-    fiscal_year_end = None
+    period_end = None
+    kpi_yoy_lookback = 4 if is_quarterly else 1
     kpi_lines = []
     for label, source, row_label in _KPI_ROWS:
         dates, values = calculations.statement_series(statements[source], row_label)
         latest = values[-1] if values else None
         if _present(latest):
             text = f"{unit}{latest / 1e6:,.0f}M"
-            yoy = calculations.yoy_pct(values)
+            yoy = calculations.yoy_pct(values, lookback=kpi_yoy_lookback)
             if yoy is not None:
                 text += f" ({yoy:+.1f}% YoY)"
         else:
             text = "N/A"
         kpi_lines.append(f"- {label}: {text}")
         if row_label == "Total Revenue" and dates:
-            fiscal_year_end = dates[-1]
-    lines.append(f"Latest fiscal year{f' (ended {fiscal_year_end})' if fiscal_year_end else ''}:")
+            period_end = dates[-1]
+    period_noun = "quarter" if is_quarterly else "fiscal year"
+    lines.append(f"Latest {period_noun}{f' (ended {period_end})' if period_end else ''}:")
     lines.extend(kpi_lines)
+    if is_quarterly:
+        lines.append(
+            "Note: these are the latest quarter's raw, non-annualized figures -- a quarter's "
+            "margin or return on equity reads smaller than an annual one measured the same way."
+        )
 
     ratios = calculations.compute_key_ratios(statements["income"], statements["balance"])
     lines.append(
@@ -162,11 +190,26 @@ def summarize_fundamentals(row) -> str:
         f"return on equity {_pct(ratios['return_on_equity'])}, debt/equity {_multiple(ratios['debt_to_equity'])}, "
         f"current ratio {_multiple(ratios['current_ratio'])}."
     )
-    result = health.assess_health(
-        statements["income"], statements["balance"], statements["cashflow"], row.get("Sector"), row.get("Industry")
-    )
-    if result is not None:
-        lines.append(health.describe_health(result))
+
+    if is_quarterly:
+        ttm_income = calculations.trailing_twelve_month_statement(statements["income"])
+        ttm_cashflow = calculations.trailing_twelve_month_statement(statements["cashflow"])
+        if ttm_income is None or ttm_cashflow is None:
+            lines.append("Health: not enough quarterly history yet to rate (need at least 4 quarters on file).")
+        else:
+            result = health.assess_health(
+                ttm_income, statements["balance"], ttm_cashflow, row.get("Sector"), row.get("Industry"),
+            )
+            if result is not None:
+                lines.append(health.describe_health(
+                    result, period_label="the trailing twelve months, reconstructed from quarterly statements",
+                ))
+    else:
+        result = health.assess_health(
+            statements["income"], statements["balance"], statements["cashflow"], row.get("Sector"), row.get("Industry")
+        )
+        if result is not None:
+            lines.append(health.describe_health(result))
     return "\n".join(lines)
 
 

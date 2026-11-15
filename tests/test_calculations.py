@@ -32,6 +32,7 @@ from core.calculations import (
     safe_divide,
     statement_series,
     to_heikin_ashi,
+    trailing_twelve_month_statement,
     valuation_assessment,
     yoy_pct,
 )
@@ -1023,6 +1024,9 @@ def _fund_live_row(symbol, **overrides):
         "Income Statement": {"Total Revenue": {"2026-06-30": 245122.0}},
         "Balance Sheet": {"Total Assets": {"2026-06-30": 512163.0}},
         "Cash Flow": {"Free Cash Flow": {"2026-06-30": 74071.0}},
+        "Quarterly Income Statement": {"Total Revenue": {"2026-06-30": 64727.0}},
+        "Quarterly Balance Sheet": {"Total Assets": {"2026-06-30": 512163.0}},
+        "Quarterly Cash Flow": {"Free Cash Flow": {"2026-06-30": 20412.0}},
     }
     row.update(overrides)
     return row
@@ -1034,6 +1038,7 @@ def _failed_fund_live_row(symbol):
         "Symbol": symbol, "Currency": None, "Financial Currency": None,
         "Current Price": float("nan"), "Target Mean Price": None, "Number Of Analysts": None,
         "Income Statement": {}, "Balance Sheet": {}, "Cash Flow": {},
+        "Quarterly Income Statement": {}, "Quarterly Balance Sheet": {}, "Quarterly Cash Flow": {},
     }
 
 
@@ -1044,6 +1049,9 @@ def _fund_cached_row(symbol, **overrides):
         "Income Statement": {"Total Revenue": {"2025-06-30": 230000.0}},
         "Balance Sheet": {"Total Assets": {"2025-06-30": 500000.0}},
         "Cash Flow": {"Free Cash Flow": {"2025-06-30": 70000.0}},
+        "Quarterly Income Statement": {"Total Revenue": {"2026-03-31": 61000.0}},
+        "Quarterly Balance Sheet": {"Total Assets": {"2026-03-31": 495000.0}},
+        "Quarterly Cash Flow": {"Free Cash Flow": {"2026-03-31": 18000.0}},
         "Fetched At": pd.Timestamp("2026-08-14 12:00:00"),
     }
     row.update(overrides)
@@ -1069,6 +1077,19 @@ class TestApplyFundamentalsFallback:
         assert row["Current Price"] == 440.0
         assert row["Income Statement"] == {"Total Revenue": {"2025-06-30": 230000.0}}
         assert row["Fetched At"] == pd.Timestamp("2026-08-14 12:00:00")
+
+    def test_a_failed_row_also_falls_back_to_cached_quarterly_statements(self):
+        # Regression: fallback_cols originally omitted the 3 V4.24 quarterly fields,
+        # so a failed live fetch would silently replace real cached quarterly data
+        # with the failed attempt's own blank {} -- every other yfinance-derived
+        # field already fell back correctly, these were missed.
+        live = pd.DataFrame([_failed_fund_live_row("MSFT")])
+        cached = pd.DataFrame([_fund_cached_row("MSFT")])
+        result = apply_fundamentals_fallback(live, cached)
+        row = result.iloc[0]
+        assert row["Quarterly Income Statement"] == {"Total Revenue": {"2026-03-31": 61000.0}}
+        assert row["Quarterly Balance Sheet"] == {"Total Assets": {"2026-03-31": 495000.0}}
+        assert row["Quarterly Cash Flow"] == {"Free Cash Flow": {"2026-03-31": 18000.0}}
 
     def test_a_failed_row_with_nothing_ever_cached_stays_blank_not_a_regression(self):
         live = pd.DataFrame([_failed_fund_live_row("NEWSYM")])
@@ -1568,6 +1589,76 @@ class TestYoyPct:
         assert yoy_pct([100.0, None]) is None
         assert yoy_pct([None, 100.0]) is None
         assert yoy_pct([100.0, float("nan")]) is None
+
+    def test_lookback_4_compares_against_same_quarter_last_year(self):
+        # Q1 2025=100, Q2=120, Q3=90 (seasonal dip), Q4=130, Q1 2026=115 -- QoQ
+        # (lookback=1) would show a decline vs Q4; true YoY (lookback=4) compares
+        # against Q1 2025 and correctly shows growth.
+        values = [100.0, 120.0, 90.0, 130.0, 115.0]
+        assert yoy_pct(values, lookback=1) == pytest.approx((115.0 - 130.0) / 130.0 * 100)
+        assert yoy_pct(values, lookback=4) == pytest.approx((115.0 - 100.0) / 100.0 * 100)
+
+    def test_lookback_4_with_fewer_than_5_periods_is_none(self):
+        assert yoy_pct([100.0, 120.0, 90.0, 130.0], lookback=4) is None
+
+
+class TestTrailingTwelveMonthStatement:
+    def test_sums_the_last_4_quarters_keyed_by_the_latest_date(self):
+        quarterly = {
+            "Total Revenue": {
+                "2025-08-03": 15004.0, "2025-11-02": 16200.0,
+                "2026-02-01": 17200.0, "2026-05-03": 17900.0,
+            },
+        }
+        result = trailing_twelve_month_statement(quarterly)
+        assert result == {"Total Revenue": {"2026-05-03": pytest.approx(15004.0 + 16200.0 + 17200.0 + 17900.0)}}
+
+    def test_only_the_trailing_4_of_5_available_quarters_are_summed(self):
+        quarterly = {
+            "Total Revenue": {
+                "2025-05-04": 14916.0,  # excluded -- 5th-oldest, outside the trailing window
+                "2025-08-03": 15004.0, "2025-11-02": 16200.0,
+                "2026-02-01": 17200.0, "2026-05-03": 17900.0,
+            },
+        }
+        result = trailing_twelve_month_statement(quarterly)
+        assert result["Total Revenue"]["2026-05-03"] == pytest.approx(15004.0 + 16200.0 + 17200.0 + 17900.0)
+
+    def test_fewer_than_4_quarters_is_none(self):
+        quarterly = {"Total Revenue": {"2026-02-01": 17200.0, "2026-05-03": 17900.0}}
+        assert trailing_twelve_month_statement(quarterly) is None
+
+    def test_empty_statement_is_none(self):
+        assert trailing_twelve_month_statement({}) is None
+
+    def test_a_missing_or_nan_value_for_one_quarter_contributes_zero_not_none(self):
+        # e.g. a one-off line item only reported in 3 of the 4 quarters -- the other
+        # 3 quarters' real figures must still sum correctly, not blank out to None.
+        quarterly = {
+            "Restructuring Charges": {
+                "2025-08-03": 12.0, "2025-11-02": None,
+                "2026-02-01": float("nan"), "2026-05-03": 8.0,
+            },
+            "Total Revenue": {
+                "2025-08-03": 15004.0, "2025-11-02": 16200.0,
+                "2026-02-01": 17200.0, "2026-05-03": 17900.0,
+            },
+        }
+        result = trailing_twelve_month_statement(quarterly)
+        assert result["Restructuring Charges"]["2026-05-03"] == pytest.approx(20.0)
+
+    def test_different_labels_can_have_different_available_dates(self):
+        # A label yfinance only started reporting partway through -- the overall
+        # 4-quarter window is still chosen from the UNION of every label's dates.
+        quarterly = {
+            "Total Revenue": {
+                "2025-08-03": 15004.0, "2025-11-02": 16200.0,
+                "2026-02-01": 17200.0, "2026-05-03": 17900.0,
+            },
+            "New Line Item": {"2026-02-01": 5.0, "2026-05-03": 6.0},
+        }
+        result = trailing_twelve_month_statement(quarterly)
+        assert result["New Line Item"]["2026-05-03"] == pytest.approx(11.0)  # missing 2 quarters count as 0
 
 
 class TestComputeKeyRatios:

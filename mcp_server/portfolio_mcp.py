@@ -312,10 +312,10 @@ def get_reference_line_status() -> str:
 
 
 @mcp.tool()
-def get_company_fundamentals(symbol: str, refresh: bool = False) -> str:
+def get_company_fundamentals(symbol: str, refresh: bool = False, period: str = "annual") -> str:
     """Fundamentals for ONE stock, as shown on the web app's Company Fundamentals
     page: business profile, the Analyst Target valuation (Overvalued / Undervalued /
-    Fair value), latest-fiscal-year Revenue, Net Income, Free Cash Flow and Total Debt
+    Fair value), latest-period Revenue, Net Income, Free Cash Flow and Total Debt
     with year-over-year change, the key ratios (gross margin, operating margin,
     return on equity, debt/equity, current ratio), and the Health rating (Healthy /
     Mixed / Weak, with each measure and what to watch). Use it for questions like "is KO
@@ -325,10 +325,19 @@ def get_company_fundamentals(symbol: str, refresh: bool = False) -> str:
     analyst coverage, so only their profile comes back. The answer states the date of
     the data. Stored data can be days or weeks old: pass refresh=true when the user
     wants current numbers, which re-fetches live from Yahoo Finance and saves it.
-    Writes only to the fundamentals cache, never to trades or dividends."""
+    Writes only to the fundamentals cache, never to trades or dividends.
+
+    `period`: "annual" (default) or "quarterly" -- pass "quarterly" when the user
+    specifically asks for quarterly/latest-quarter figures. In quarterly mode, the
+    Health rating is computed from a reconstructed trailing-twelve-month (TTM)
+    statement (summing the last 4 quarters), not the single latest quarter, so it
+    stays a meaningful annual-equivalent read rather than reacting to one seasonal
+    quarter -- it will say so if fewer than 4 quarters are on file yet."""
     ticker = normalize_symbol(symbol)
     if ticker is None:
         return f"{symbol!r} doesn't look like a ticker symbol (expected letters and digits, e.g. KO or BRK.B)."
+    if period not in ("annual", "quarterly"):
+        return f"period must be 'annual' or 'quarterly', got {period!r}."
 
     cached = db.fetch_fundamentals_cache()
     match = cached[cached["Symbol"] == ticker]
@@ -345,7 +354,7 @@ def get_company_fundamentals(symbol: str, refresh: bool = False) -> str:
             )
         else:
             note = "A live refresh failed just now (likely a temporary Yahoo Finance problem), so this is the last stored data."
-    text = summarize_fundamentals(match.iloc[0])
+    text = summarize_fundamentals(match.iloc[0], period=period)
     return f"{note}\n{text}" if note else text
 
 

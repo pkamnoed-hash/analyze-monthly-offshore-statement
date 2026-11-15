@@ -5130,6 +5130,127 @@ click-through on the dev app before merging.
   narrow further (ask the user, or pass more arguments) rather than this tool
   guessing one.
 
+## V4.24: Quarterly view for Company Fundamentals
+
+Branch `v4.24-quarterly-fundamentals`, cut from `main` after v4.23.1 was tagged.
+
+### What this is
+
+Company Fundamentals only ever showed ANNUAL financial statements. The user
+wanted a quarterly view added alongside it, with the view picker as a
+segmented-control pill row (matching Option Monitor's own style) between the
+Allocation Type radios and the Symbol pickers -- confirmed via an interactive
+mockup before any code was written.
+
+**Researched before designing anything:** `core/calculations.py`'s
+`latest_statement_value`/`statement_series`/`compute_key_ratios` are already
+period-agnostic -- they just read a generic `{row_label: {date: value}}` dict,
+so Key ratios, the Overview chart, and both statement tabs' Trend sparklines
+needed ZERO changes to work with quarterly data. The KPI row's "YoY" delta and
+its year-only sparkline x-axis label DID need adjusting (confirmed via the
+mockup, which demonstrated both a QoQ option and a true "same quarter last
+year" option side by side -- the user chose to keep both as a live toggle, not
+pick one permanently).
+
+**The one real finding that changed the design:** `core/health.py` cannot
+safely take raw quarterly statements. Its hard loss/burn flags read only the
+single latest period, so a normal seasonal or one-off-charge quarter would
+trigger the same flag a genuine annual loss would; `debt_to_cash_flow` divides
+a balance-sheet stock (Total Debt) by a flow (Operating Cash Flow) and would
+read ~4x too high fed one quarter's OCF instead of a year's; the growth/
+consistency measures explicitly assume one period = one year. Fix: reconstruct
+a trailing-twelve-month (TTM) income + cash flow statement by summing the last
+4 quarters, paired with the latest single quarter's balance sheet (already a
+point-in-time snapshot -- and fresher than today's annual-only Health, which
+uses the last fiscal year-end balance sheet). Fed into `assess_health()`
+completely UNCHANGED -- confirmed against real MSFT data: TTM revenue ($346B,
+ending Sep 2026) correctly came in higher than the latest annual figure ($332B,
+ending Jun 2026, an older period), and the TTM Health verdict ("Healthy")
+matched the annual one on Profit & cash flow and Debt & risk, with Growth
+correctly reporting "no measures available" (needs multiple TTM points, rarely
+available with yfinance's typical ~4-5 trailing quarters).
+
+### What was built
+
+- **`core/market_data.py::fetch_fundamentals`** -- also fetches
+  `ticker.quarterly_income_stmt`/`quarterly_balance_sheet`/`quarterly_cashflow`
+  via the existing `_statement_to_dict` helper, as 3 new row keys ("Quarterly
+  Income Statement" etc.). Confirmed empirically: quarterly statements use the
+  EXACT SAME row labels as annual ones (e.g. "Total Revenue", "Net Income"),
+  so every shared calculation function just works.
+- **`core/db.py`** -- `fundamentals_cache` gains 3 nullable quarterly JSON
+  columns, migrated the same way V4.12's profile-fields migration did;
+  `save_fundamentals_cache`/`fetch_fundamentals_cache` round-trip them.
+- **`core/calculations.py`** -- `trailing_twelve_month_statement()` (new, the
+  TTM reconstruction above -- a label missing a value for one of the 4
+  quarters contributes 0 rather than blanking the whole label, and a NaN
+  bug caught during development: `value or 0` treats a real `float('nan')` as
+  truthy and lets it poison the sum, fixed with an explicit `pd.isna` check);
+  `yoy_pct()` gains an optional `lookback` parameter (default `1`, every
+  existing caller unaffected) so quarterly view can compare 4 periods back for
+  a true year-over-year figure instead of quarter-over-quarter.
+- **`core/health.py`** -- `describe_health()` gains an optional `period_label`
+  keyword (default preserves today's exact "stored annual statements" wording)
+  so a TTM caller can honestly describe what it actually read. No threshold or
+  flag logic touched.
+- **`app_pages/company_fundamentals.py`** -- the View (Annual/Quarterly) pill
+  row and, only in Quarterly view, a second "Change shown as" (YoY/QoQ) pill
+  controlling the KPI row's delta; one switch point feeds the selected pair of
+  statement dicts to everything below. Summary of Health reconstructs TTM
+  figures in quarterly view, showing "Not enough quarterly history yet" when
+  fewer than 4 quarters are on file rather than guessing.
+- **Rich**: `get_company_fundamentals` gains an optional `period="annual"|
+  "quarterly"` parameter, threaded into `core/fundamentals_summary.py::
+  summarize_fundamentals`'s same statement-selection and TTM-reconstruction
+  logic -- verified end to end against dev with a real `refresh=true` call.
+  `get_holdings_health`/Monitor Stocks' Health column stay annual-only
+  (confirmed scope decision -- both are bulk, all-holdings views, not where
+  the quarterly request originated).
+- **Found and fixed during verification**: `calculations.
+  apply_fundamentals_fallback()`'s hardcoded `fallback_cols` list didn't
+  include the 3 new quarterly fields -- a failed live fetch would have
+  silently replaced real cached quarterly data with the failed attempt's own
+  blank `{}` (every other yfinance-derived field already fell back correctly
+  from cache; these were simply missed when the function was written before
+  quarterly data existed). Fixed with a regression test before it ever shipped.
+
+### Verification
+
+Full suite 935/935 passing (904 going into V4.23, +13 V4.23, +1 V4.23.1-class
+hotfix logic, +~17 new for V4.24: `trailing_twelve_month_statement`, `yoy_pct`'s
+`lookback`, `describe_health`'s `period_label`, the quarterly fetch/cache
+round-trip and migration, `summarize_fundamentals`'s quarterly branch, and the
+`apply_fundamentals_fallback` regression). Verified against REAL `yfinance`
+data for MSFT (not just mocks) before asking for a UI click-through: quarterly
+and annual statements share identical row labels; TTM reconstruction produced
+a more current revenue figure than the annual statement; quarterly Key ratios'
+Return on Equity read smaller than the annual one (7.8% vs 30.2%) exactly as
+the new caption warns, since it's one quarter's raw Net Income over the same
+full-year-sized equity base. Rich's `get_company_fundamentals` verified against
+**dev** Turso with `period="annual"`, `period="quarterly"` (after a live
+`refresh=true` populated the quarterly columns for the first time -- the
+migration adds the columns as NULL, it doesn't backfill old rows, same as
+V4.12's own finding), and an invalid `period` value returning a clean error
+instead of a crash.
+
+### Known limits (stated up front)
+
+- yfinance typically provides only ~4-5 trailing quarters. TTM needs exactly
+  4, so there's little margin -- a symbol with fewer than 4 quarters on file
+  shows "not enough quarterly history yet," not a guess.
+- Health's growth/consistency trend measures need MULTIPLE TTM points to say
+  anything (each TTM point consumes 4 quarters); with ~4-5 quarters typically
+  available, there's rarely more than one independent TTM window, so those
+  specific measures will often show "not enough data" in quarterly/TTM mode
+  even when the TTM reconstruction itself works fine for every other measure
+  -- confirmed real against MSFT above, not a hypothetical edge case.
+- Monitor Stocks' Health column and `get_holdings_health` stay annual-only --
+  confirmed scope decision, not an oversight.
+- A symbol already cached before this release shows no quarterly data until
+  its next live refresh (manual "Refresh now", Rich's `refresh=true`, or the
+  existing daily `mcp_server/refresh_fundamentals.py` cron, which needed zero
+  code changes to start also fetching/saving quarterly data for free).
+
 ## Deferred / future
 
 - **A "view" link from Monitor Stocks straight into Company
