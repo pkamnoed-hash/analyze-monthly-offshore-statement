@@ -96,13 +96,27 @@ def _raw_table(statement: dict, exclude_labels: set) -> pd.DataFrame:
     """Every OTHER row the statement actually returned, in its native (unformatted)
     units -- deliberately not forced into the curated table's money/EPS formatting,
     since a raw statement mixes dollar amounts, per-share figures, share counts, and
-    ratios/rates with no metadata telling this page which is which."""
+    ratios/rates with no metadata telling this page which is which.
+
+    V4.24 -- gains the same "Trend" sparkline column the curated table above
+    already has (same LineChartColumn convention, a missing point becomes 0.0
+    not None for the same reason -- the chart column silently falls back to
+    showing the raw list as text otherwise). Unlike the curated table, these
+    values are NOT rescaled (e.g. ÷1e6) -- each row keeps its own native units,
+    since the sparkline here is read as a shape over time per row, not compared
+    in magnitude against any other row."""
     remaining = {label: values for label, values in statement.items() if label not in exclude_labels}
     if not remaining:
         return pd.DataFrame()
     all_dates = sorted({d for values in remaining.values() for d in values})
     data = {label: [values.get(d) for d in all_dates] for label, values in remaining.items()}
-    return pd.DataFrame(data, index=all_dates).T
+    df = pd.DataFrame(data, index=all_dates).T
+    trend = {
+        label: [v if v is not None and not pd.isna(v) else 0.0 for v in (values.get(d) for d in all_dates)]
+        for label, values in remaining.items()
+    }
+    df.insert(0, "Trend", [trend[label] for label in df.index])
+    return df
 
 
 def _render_statement_tab(statement: dict, rows: list[tuple[str, str]], unit_caption: str):
@@ -125,7 +139,10 @@ def _render_statement_tab(statement: dict, rows: list[tuple[str, str]], unit_cap
                 "reformatted) -- dollar amounts, per-share figures, and share counts "
                 "may appear side by side."
             )
-            st.dataframe(raw, use_container_width=True)
+            st.dataframe(
+                raw, use_container_width=True,
+                column_config={"Trend": st.column_config.LineChartColumn("Trend", width="small")},
+            )
 
 st.title("Company Fundamentals")
 with st.expander("What does this page do?"):
