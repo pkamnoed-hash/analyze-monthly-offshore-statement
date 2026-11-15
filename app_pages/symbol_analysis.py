@@ -1,3 +1,4 @@
+import time
 from datetime import datetime
 
 import pandas as pd
@@ -41,6 +42,111 @@ with st.expander("What does this page do?"):
 # fetch below.
 positions = calculations.compute_current_positions(cached_db.cached_fetch_trades())
 symbol_types = cached_db.cached_fetch_symbol_types()
+
+
+def _regenerate_reference_lines_for_symbol(symbol: str) -> bool:
+    """Regenerate and save one symbol's Reference Lines from a fresh YTD/Day capture,
+    mirroring what the single-symbol "Regenerate" button below computes for whichever
+    symbol is currently open. Returns False (leaving that symbol's previously saved
+    lines untouched) if price history couldn't be fetched -- e.g. a yfinance rate
+    limit mid-batch -- never a guess."""
+    history = market_data.fetch_price_history(symbol, HISTORY_DAYS)
+    if history.empty:
+        return False
+    latest = float(history["Close"].iloc[-1])
+    resampled = calculations.resample_ohlc(history, "D")
+    today = pd.Timestamp.today().normalize()
+    cutoff = pd.Timestamp(year=today.year, month=1, day=1)
+    bars_in_range = int((resampled["Date"] >= cutoff).sum())
+    swing_window = min(25, max(3, bars_in_range // 25))
+    reflines = calculations.compute_reference_lines(
+        resampled["Date"], resampled["High"], resampled["Low"],
+        latest, window=swing_window, search_from=cutoff,
+    )
+    lines = [{"price": p, "is_override": False} for p in reflines["resistance"] + reflines["support"]]
+    db.save_reference_lines(symbol, lines, latest_price=latest, captured_timeline="YTD", captured_interval="Day")
+    return True
+
+
+# ---------------------------------------------------------------------------------
+# Regenerate All: a single paced batch run over every held symbol, independent of
+# the category filter in Zone 1 below -- "every stock in my port". Confirmed first
+# since it discards manual drags/deletes/adds in bulk and can't be undone in bulk.
+# Paced ~1 symbol/sec to stay clear of yfinance rate limits (the same incident class
+# as V4.5's Yahoo Finance outage on Streamlit Community Cloud's shared IP).
+# ---------------------------------------------------------------------------------
+all_symbols = sorted(positions["Symbol"].tolist())
+regen_phase = st.session_state.get("regen_all_phase", "idle")
+
+with st.container(border=True):
+    rcol1, rcol2 = st.columns([3, 1])
+    with rcol1:
+        st.markdown("**Regenerate All Reference Lines**")
+        st.caption(
+            "Recaptures every held symbol's support/resistance from current price "
+            "data. Paced to avoid yfinance rate limits (~1 symbol/sec) -- takes a "
+            "minute or two for a full portfolio."
+        )
+    with rcol2:
+        if regen_phase in ("idle", "done"):
+            if st.button(f"Regenerate All ({len(all_symbols)} symbols)", key="regen_all_btn"):
+                st.session_state["regen_all_phase"] = "confirm"
+                st.rerun()
+        else:
+            st.button("Running...", disabled=True, key="regen_all_btn_disabled")
+
+    if regen_phase == "done":
+        result = st.session_state.get("regen_all_result", {})
+        st.success(f"✅ Regenerated {result.get('succeeded', 0)} of {result.get('total', 0)} symbols.")
+        failed = result.get("failed", [])
+        if failed:
+            st.caption(
+                f"{len(failed)} rate-limited mid-run -- kept their previous lines "
+                f"untouched ({', '.join(failed)}). You can regenerate just those "
+                "individually from their own chart."
+            )
+
+if regen_phase == "confirm":
+    @st.dialog("Regenerate all held symbols?")
+    def _confirm_regenerate_all():
+        st.write(
+            f"This discards any manual drags, deletes, or added lines for **all "
+            f"{len(all_symbols)}** currently-held symbols and replaces them with a "
+            "fresh auto-detected set. This can't be undone in bulk -- you'd need to "
+            "fix each symbol one at a time afterward."
+        )
+        dcol1, dcol2 = st.columns(2)
+        if dcol1.button("Cancel"):
+            st.session_state["regen_all_phase"] = "idle"
+            st.rerun()
+        if dcol2.button("Yes, regenerate all", type="primary"):
+            st.session_state["regen_all_phase"] = "running"
+            st.rerun()
+
+    _confirm_regenerate_all()
+
+if regen_phase == "running":
+    progress = st.progress(0.0)
+    status = st.empty()
+    succeeded = 0
+    failed_names = []
+    n = len(all_symbols)
+    for i, sym in enumerate(all_symbols):
+        status.caption(f"Regenerating... {i + 1} / {n} -- {sym}")
+        try:
+            if _regenerate_reference_lines_for_symbol(sym):
+                succeeded += 1
+            else:
+                failed_names.append(sym)
+        except Exception:
+            failed_names.append(sym)
+        progress.progress((i + 1) / n)
+        if i < n - 1:
+            time.sleep(1)
+    cached_db.invalidate_reference_line_summary()
+    st.session_state["regen_all_result"] = {"succeeded": succeeded, "total": n, "failed": failed_names}
+    st.session_state["regen_all_phase"] = "done"
+    st.rerun()
 
 query_symbol = st.query_params.get("symbol")
 

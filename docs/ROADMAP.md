@@ -5251,6 +5251,61 @@ instead of a crash.
   existing daily `mcp_server/refresh_fundamentals.py` cron, which needed zero
   code changes to start also fetching/saving quarterly data for free).
 
+## V4.25: Regenerate All on Auto Trendline
+
+Branch `v4.25-regenerate-all-trendlines`, cut from `main` after v4.24.1 was
+tagged.
+
+### What this is
+
+Auto Trendline's "Regenerate" button only ever worked on whichever one symbol
+was currently open. The user asked for a single button that regenerates
+every held symbol's Reference Lines in one pass -- discussed first, no code
+written until the risk and blast radius were talked through: the real
+yfinance rate-limit incident class (V4.5's Yahoo outage on Streamlit
+Community Cloud's shared IP) and the fact that a bulk regenerate discards
+every symbol's manual drags/deletes/adds at once, with no bulk undo. A
+Design-canvas mockup (idle button with count -> confirm modal -> paced
+progress -> done banner naming any rate-limited symbols) was approved before
+any implementation began.
+
+### What was built
+
+- **`app_pages/symbol_analysis.py`** -- a new standalone
+  `_regenerate_reference_lines_for_symbol(symbol)` helper (the existing
+  per-symbol `_regenerate_reference_lines()` is a closure nested inside the
+  page's `@st.fragment`, bound to whichever symbol is currently open, so it
+  can't be called for other symbols). The helper repeats what the fragment
+  already does for the open symbol -- `market_data.fetch_price_history`,
+  `calculations.resample_ohlc`/`compute_reference_lines` over a fixed YTD/Day
+  basis (there's no per-symbol UI in a batch context) -- and writes straight
+  through `db.save_reference_lines`, skipping the single-symbol session-state
+  round trip entirely. A failed fetch (e.g. rate-limited) returns `False` and
+  that symbol's previously saved lines are left alone, not cleared.
+- A small state machine (`regen_all_phase`: idle/confirm/running/done) placed
+  in Zone 1, above the existing category filter, since it operates on every
+  held symbol (`positions["Symbol"]`, already computed once at the top of the
+  page) regardless of which category is selected. Confirm step uses
+  `st.dialog`; the running step loops synchronously with `st.progress` and a
+  status caption, `time.sleep(1)` between symbols for the ~1/sec pacing.
+- Calls `cached_db.invalidate_reference_line_summary()` once after the whole
+  batch finishes, the same real fix V4.5.2 already established for the
+  single-symbol save path (without it, Monitor Stocks' Reference Lines tab
+  can show stale Passed R/S cells for up to 5 minutes after a regenerate).
+
+Nothing else on the page changed -- the per-symbol closure, the fragment, the
+category filter, and the single-symbol Regenerate button are untouched.
+
+### Verification
+
+936/936 existing tests still passing (no new tests -- this is a UI-only
+addition with no new `core/` logic, same precedent as v4.23's UI tweaks,
+which also had no browser-automation tool available to drive a multi-step
+Streamlit interaction). Verified live on dev by the user: confirm modal
+shows the right symbol count, Cancel leaves everything unchanged, a real run
+pages through the full portfolio with the progress bar advancing roughly
+once a second, and the done banner's count matched.
+
 ## Deferred / future
 
 - **A "view" link from Monitor Stocks straight into Company

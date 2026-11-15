@@ -7,6 +7,7 @@ not an aspirational process, a record of what's been done.
 
 | Branch | Purpose |
 |---|---|
+| `v4.25-regenerate-all-trendlines` | V4.25 feature branch, cut from `main` after v4.24.1 was tagged. Adds a "Regenerate All" button to Auto Trendline that recaptures Reference Lines for every held symbol in one paced (~1/sec) run, with a confirm step first since it's destructive and can't be bulk-undone -- design discussed and mockup-approved before any code (yfinance rate-limit risk, same incident class as v4.5's Yahoo outage). New standalone `_regenerate_reference_lines_for_symbol()` in `app_pages/symbol_analysis.py` (the existing per-symbol regenerate is a fragment-nested closure that can't serve other symbols), writing straight through the already-shipped `db.save_reference_lines`; invalidates Monitor Stocks' cached summary once after the batch (v4.5.2's own precedent). No `core/db.py`/schema changes, no new MCP tool. 936/936 tests passing (UI-only, no new tests, same as v4.23's UI tweaks). Verified live on dev by the user.
 | `main` | Stable line. Only receives completed, tested versions via merge. |
 | `V1-record-trade-and-view` | V1 feature branch (login, storage, Record Trade, Record Dividend, blended Dashboard). Merged into `main`, kept around afterward rather than deleted. |
 | `v2-Reconciliation` | V2 feature branch (Reconciliation page). Branched from `main` *after* V1 was merged in, not from the V1 branch directly -- keeps each version's diff clean and reviewable on its own. |
