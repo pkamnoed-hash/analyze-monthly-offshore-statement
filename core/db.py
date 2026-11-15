@@ -145,6 +145,9 @@ SCHEMA_STATEMENTS = [
         income_json         TEXT,
         balance_json        TEXT,
         cashflow_json       TEXT,
+        quarterly_income_json    TEXT,
+        quarterly_balance_json   TEXT,
+        quarterly_cashflow_json  TEXT,
         current_price       REAL,
         target_mean_price   REAL,
         number_of_analysts  INTEGER,
@@ -251,6 +254,10 @@ _FUNDAMENTALS_CACHE_MIGRATION_COLUMNS = {
     "employees": "ALTER TABLE fundamentals_cache ADD COLUMN employees INTEGER",
     "country": "ALTER TABLE fundamentals_cache ADD COLUMN country TEXT",
     "city": "ALTER TABLE fundamentals_cache ADD COLUMN city TEXT",
+    # V4.24 -- same gap, same fix, for Company Fundamentals' quarterly view.
+    "quarterly_income_json": "ALTER TABLE fundamentals_cache ADD COLUMN quarterly_income_json TEXT",
+    "quarterly_balance_json": "ALTER TABLE fundamentals_cache ADD COLUMN quarterly_balance_json TEXT",
+    "quarterly_cashflow_json": "ALTER TABLE fundamentals_cache ADD COLUMN quarterly_cashflow_json TEXT",
 }
 
 
@@ -983,16 +990,17 @@ def save_fundamentals_cache(rows: list[dict], conn=None):
     matches fetch_fundamentals()'s own successful-row shape (Symbol/Currency/Financial
     Currency/Current Price/Target Mean Price/Number Of Analysts/Income Statement/
     Balance Sheet/Cash Flow, plus V4.12's Company Profile fields -- Business
-    Summary/Industry/Sector/Employees/Country/City) -- only ever called with rows
-    that DID succeed live.
+    Summary/Industry/Sector/Employees/Country/City, plus V4.24's Quarterly Income
+    Statement/Quarterly Balance Sheet/Quarterly Cash Flow) -- only ever called with
+    rows that DID succeed live.
 
     INSERT OR REPLACE since `symbol` is the table's PRIMARY KEY. Batched into a single
-    executescript() call, same reasoning as save_market_profile_cache. Income
-    Statement/Balance Sheet/Cash Flow are JSON-encoded (each a plain
-    {row_label: {date_str: value}} dict, no native SQLite nested-object type); Target
-    Mean Price/Number Of Analysts/the Company Profile fields are legitimately None for
-    a symbol yfinance doesn't have them for (e.g. an ETF) -- stored as SQL NULL, not
-    treated as a failure."""
+    executescript() call, same reasoning as save_market_profile_cache. Every statement
+    field (annual and quarterly) is JSON-encoded (each a plain {row_label: {date_str:
+    value}} dict, no native SQLite nested-object type); Target Mean Price/Number Of
+    Analysts/the Company Profile fields are legitimately None for a symbol yfinance
+    doesn't have them for (e.g. an ETF) -- stored as SQL NULL, not treated as a
+    failure."""
     import json
 
     import pandas as pd
@@ -1006,7 +1014,8 @@ def save_fundamentals_cache(rows: list[dict], conn=None):
         statements.append(
             "INSERT OR REPLACE INTO fundamentals_cache "
             "(symbol, currency, financial_currency, income_json, balance_json, "
-            "cashflow_json, current_price, target_mean_price, number_of_analysts, "
+            "cashflow_json, quarterly_income_json, quarterly_balance_json, "
+            "quarterly_cashflow_json, current_price, target_mean_price, number_of_analysts, "
             "business_summary, industry, sector, employees, country, city, "
             "fetched_at) VALUES ("
             f"{_sql_literal(row['Symbol'])}, {_sql_literal(row.get('Currency'))}, "
@@ -1014,6 +1023,9 @@ def save_fundamentals_cache(rows: list[dict], conn=None):
             f"{_sql_literal(json.dumps(row.get('Income Statement') or {}))}, "
             f"{_sql_literal(json.dumps(row.get('Balance Sheet') or {}))}, "
             f"{_sql_literal(json.dumps(row.get('Cash Flow') or {}))}, "
+            f"{_sql_literal(json.dumps(row.get('Quarterly Income Statement') or {}))}, "
+            f"{_sql_literal(json.dumps(row.get('Quarterly Balance Sheet') or {}))}, "
+            f"{_sql_literal(json.dumps(row.get('Quarterly Cash Flow') or {}))}, "
             f"{_num(row.get('Current Price'))}, {_num(row.get('Target Mean Price'))}, "
             f"{_num(row.get('Number Of Analysts'))}, "
             f"{_sql_literal(row.get('Business Summary'))}, {_sql_literal(row.get('Industry'))}, "
@@ -1035,15 +1047,18 @@ def save_fundamentals_cache(rows: list[dict], conn=None):
 def fetch_fundamentals_cache(conn=None):
     """Returns a DataFrame (Symbol, Currency, Financial Currency, Current Price,
     Target Mean Price, Number Of Analysts, Income Statement, Balance Sheet, Cash
-    Flow, Business Summary, Industry, Sector, Employees, Country, City, Fetched At)
+    Flow, Quarterly Income Statement, Quarterly Balance Sheet, Quarterly Cash Flow,
+    Business Summary, Industry, Sector, Employees, Country, City, Fetched At)
     -- V4.10's durable fallback source for Company Fundamentals' DB-first read,
-    mirroring fetch_market_profile_cache exactly. Income Statement/Balance
-    Sheet/Cash Flow are JSON-decoded back into plain nested dicts; Target Mean
+    mirroring fetch_market_profile_cache exactly. Every statement field (annual and
+    V4.24's quarterly ones) is JSON-decoded back into plain nested dicts; Target Mean
     Price/Number Of Analysts/the Company Profile fields can be real None (no
     analyst coverage or no profile data, not a fetch failure); Fetched At is parsed
     back into a real Timestamp. A symbol never successfully fetched at least once
     just isn't present here -- same "absence means never captured" convention
-    fetch_market_profile_cache already uses."""
+    fetch_market_profile_cache already uses. A row saved before V4.24's migration
+    has SQL NULL for the 3 quarterly columns -- decoded to {} below, same as any
+    other symbol with no statements on file, not an error."""
     import json
 
     import pandas as pd
@@ -1051,7 +1066,8 @@ def fetch_fundamentals_cache(conn=None):
     c, should_close = _with_connection(conn)
     df = _read_sql(
         c, "SELECT symbol, currency, financial_currency, income_json, balance_json, "
-        "cashflow_json, current_price, target_mean_price, number_of_analysts, "
+        "cashflow_json, quarterly_income_json, quarterly_balance_json, "
+        "quarterly_cashflow_json, current_price, target_mean_price, number_of_analysts, "
         "business_summary, industry, sector, employees, country, city, "
         "fetched_at FROM fundamentals_cache",
     )
@@ -1060,14 +1076,19 @@ def fetch_fundamentals_cache(conn=None):
     df = df.rename(columns={
         "symbol": "Symbol", "currency": "Currency", "financial_currency": "Financial Currency",
         "income_json": "Income Statement", "balance_json": "Balance Sheet",
-        "cashflow_json": "Cash Flow", "current_price": "Current Price",
+        "cashflow_json": "Cash Flow", "quarterly_income_json": "Quarterly Income Statement",
+        "quarterly_balance_json": "Quarterly Balance Sheet", "quarterly_cashflow_json": "Quarterly Cash Flow",
+        "current_price": "Current Price",
         "target_mean_price": "Target Mean Price", "number_of_analysts": "Number Of Analysts",
         "business_summary": "Business Summary", "industry": "Industry", "sector": "Sector",
         "employees": "Employees", "country": "Country", "city": "City",
         "fetched_at": "Fetched At",
     })
     df["Fetched At"] = pd.to_datetime(df["Fetched At"])
-    for col in ("Income Statement", "Balance Sheet", "Cash Flow"):
+    for col in (
+        "Income Statement", "Balance Sheet", "Cash Flow",
+        "Quarterly Income Statement", "Quarterly Balance Sheet", "Quarterly Cash Flow",
+    ):
         df[col] = df[col].apply(lambda v: json.loads(v) if isinstance(v, str) else {})
     return df
 

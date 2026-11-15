@@ -304,9 +304,18 @@ def health_reasons(result) -> list[str]:
     return [flag.capitalize() for flag in result["flags"]] + [f"{name}: {value}" for name, value in reds.items()]
 
 
-def describe_health(result) -> str:
+def describe_health(result, *, period_label: str = "the stored annual statements") -> str:
     """Multi-line text a chat bot can relay: the verdict, each group with its measures, the
-    reasons it isn't cleaner, the rule profile used, and the rule-of-thumb caveat."""
+    reasons it isn't cleaner, the rule profile used, and the rule-of-thumb caveat.
+
+    V4.24 -- `period_label` (default preserves today's exact wording for every
+    existing caller) lets a quarterly/TTM caller swap in an honest description of
+    what was actually fed in (e.g. "the trailing twelve months, reconstructed from
+    quarterly statements") instead of silently keeping the "annual" wording for
+    data that isn't. This module's own thresholds/flags are UNCHANGED either way --
+    see calculations.trailing_twelve_month_statement's docstring for why a caller
+    must reconstruct TTM figures before calling assess_health with quarterly data,
+    rather than passing a single quarter's statements directly."""
     if result is None:
         return "Health: not available -- no financial statements are stored for this symbol (likely an ETF or fund)."
     overall = result["overall"]
@@ -330,6 +339,6 @@ def describe_health(result) -> str:
         lines.append("Watch: " + "; ".join(reasons) + ".")
     lines.append(
         f"Rules used: {result['profile']} profile ({PROFILE_DESCRIPTIONS[result['profile']]}). "
-        "A rule-of-thumb read of the stored annual statements, not investment advice."
+        f"A rule-of-thumb read of {period_label}, not investment advice."
     )
     return "\n".join(lines)

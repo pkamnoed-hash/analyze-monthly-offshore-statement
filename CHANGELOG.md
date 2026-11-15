@@ -1,5 +1,20 @@
 # Changelog
 
+## New: Quarterly view on Company Fundamentals (v4.24)
+
+- Company Fundamentals now has a View toggle -- Annual or Quarterly -- next to the
+  category filter. Switching it updates the KPI row, Key ratios, the Revenue/Net
+  Income chart, and all 3 statement tabs together.
+- In Quarterly view, a second toggle lets you choose how the % change is shown: QoQ
+  (vs last quarter) or YoY (vs the same quarter last year, which avoids seasonal
+  swings looking like real growth or decline).
+- The Health rating in Quarterly view is based on the trailing twelve months
+  (the last 4 quarters added together), not a single quarter -- so a normal
+  seasonal dip doesn't get flagged the same way a real annual loss would. It'll
+  tell you if there isn't enough quarterly history yet to do this.
+- Ask Rich for a stock's quarterly fundamentals too -- just ask for "quarterly"
+  figures and it'll use the same logic as the page.
+
 ## An option trade Rich recorded now shows up within 5 minutes (v4.23.1)
 
 - Same fix as v4.19.1, now for options: an option trade Rich recorded only appeared

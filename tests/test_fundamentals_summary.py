@@ -250,6 +250,86 @@ class TestHealthInTheCompanyAnswer:
         assert next(line for line in text.splitlines() if line.startswith("Health:")).count("Partial:") == 1
 
 
+QUARTERLY_INCOME = {
+    "Total Revenue": {
+        "2025-09-30": 230e6, "2025-12-31": 240e6, "2026-03-31": 250e6,
+        "2026-06-30": 260e6, "2026-09-30": 270e6,
+    },
+    "Gross Profit": {
+        "2025-09-30": 95e6, "2025-12-31": 100e6, "2026-03-31": 105e6,
+        "2026-06-30": 108e6, "2026-09-30": 112e6,
+    },
+    "Operating Income": {
+        "2025-09-30": 42e6, "2025-12-31": 45e6, "2026-03-31": 48e6,
+        "2026-06-30": 50e6, "2026-09-30": 52e6,
+    },
+    "Net Income": {
+        "2025-09-30": 28e6, "2025-12-31": 30e6, "2026-03-31": 33e6,
+        "2026-06-30": 35e6, "2026-09-30": 37e6,
+    },
+}
+QUARTERLY_BALANCE = {
+    "Stockholders Equity": {"2026-09-30": 780e6},
+    "Total Debt": {"2026-09-30": 390e6},
+    "Current Assets": {"2026-09-30": 310e6},
+    "Current Liabilities": {"2026-09-30": 205e6},
+}
+QUARTERLY_CASHFLOW = {
+    "Free Cash Flow": {
+        "2025-09-30": 20e6, "2025-12-31": 22e6, "2026-03-31": 24e6,
+        "2026-06-30": 25e6, "2026-09-30": 26e6,
+    },
+}
+
+
+class TestQuarterlyPeriod:
+    def make_quarterly_row(self, **overrides):
+        return make_row(**{
+            "Quarterly Income Statement": QUARTERLY_INCOME,
+            "Quarterly Balance Sheet": QUARTERLY_BALANCE,
+            "Quarterly Cash Flow": QUARTERLY_CASHFLOW,
+            **overrides,
+        })
+
+    def test_default_period_is_unaffected(self):
+        # Sanity: a row that also carries Quarterly fields still summarizes the
+        # SAME annual text when period isn't passed -- no accidental coupling.
+        assert summarize_fundamentals(self.make_quarterly_row()) == summarize_fundamentals(make_row())
+
+    def test_quarterly_period_labels_latest_quarter_and_uses_the_quarterly_figures(self):
+        text = summarize_fundamentals(self.make_quarterly_row(), period="quarterly")
+        lines = text.splitlines()
+        assert "Latest quarter (ended 2026-09-30):" in lines
+        # $270M is the raw latest-QUARTER revenue (not a TTM sum) -- YoY compares
+        # against the same quarter a year ago (4 periods back: $230M), not last quarter.
+        assert f"- Revenue: $270M ({(270 - 230) / 230 * 100:+.1f}% YoY)" in lines
+        assert "these are the latest quarter's raw, non-annualized figures" in text
+
+    def test_quarterly_health_uses_ttm_reconstruction_not_the_single_quarter(self):
+        text = summarize_fundamentals(self.make_quarterly_row(), period="quarterly")
+        assert "Health: Healthy." in text
+        assert "reconstructed from quarterly statements" in text
+        assert "stored annual statements" not in text
+
+    def test_quarterly_with_fewer_than_4_quarters_reports_not_enough_history(self):
+        thin_income = {"Total Revenue": {"2026-06-30": 260e6, "2026-09-30": 270e6}}
+        thin_cashflow = {"Free Cash Flow": {"2026-06-30": 25e6, "2026-09-30": 26e6}}
+        text = summarize_fundamentals(
+            self.make_quarterly_row(**{
+                "Quarterly Income Statement": thin_income, "Quarterly Cash Flow": thin_cashflow,
+            }),
+            period="quarterly",
+        )
+        assert "Health: not enough quarterly history yet to rate" in text
+        assert "Health: Healthy." not in text
+
+    def test_invalid_period_is_not_this_functions_job_to_validate(self):
+        # Validation lives at the MCP tool boundary (mcp_server/portfolio_mcp.py);
+        # this pure function trusts its caller, same convention as the rest of core/.
+        text = summarize_fundamentals(self.make_quarterly_row(), period="bogus")
+        assert "Latest fiscal year" in text  # falls through to the annual branch
+
+
 class TestSummarizeHoldingsHealth:
     def cache(self, **rows):
         """A fundamentals_cache frame: each keyword is a symbol, its value that row's overrides."""

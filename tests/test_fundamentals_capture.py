@@ -14,6 +14,9 @@ class FakeTicker:
         self.income_stmt = pd.DataFrame()
         self.balance_sheet = pd.DataFrame()
         self.cashflow = pd.DataFrame()
+        self.quarterly_income_stmt = pd.DataFrame()
+        self.quarterly_balance_sheet = pd.DataFrame()
+        self.quarterly_cashflow = pd.DataFrame()
 
 
 class FakeYfModule:

@@ -467,12 +467,13 @@ class TestFundamentalsCacheColumnMigration:
         db.init_db(conn=c)
 
         row = c.execute(
-            "SELECT symbol, currency, current_price, business_summary, employees "
-            "FROM fundamentals_cache WHERE symbol = 'MSFT'"
+            "SELECT symbol, currency, current_price, business_summary, employees, "
+            "quarterly_income_json FROM fundamentals_cache WHERE symbol = 'MSFT'"
         ).fetchone()
         assert row[:3] == ("MSFT", "USD", 452.0)
         assert row[3] is None  # business_summary
         assert row[4] is None  # employees
+        assert row[5] is None  # quarterly_income_json (V4.24)
 
     def test_migration_is_idempotent_across_repeated_init_db_calls(self):
         c = self._old_schema_conn()
@@ -480,6 +481,7 @@ class TestFundamentalsCacheColumnMigration:
         db.init_db(conn=c)  # must not raise "duplicate column name"
         existing = {row[1] for row in c.execute("PRAGMA table_info(fundamentals_cache)").fetchall()}
         assert {"business_summary", "industry", "sector", "employees", "country", "city"} <= existing
+        assert {"quarterly_income_json", "quarterly_balance_json", "quarterly_cashflow_json"} <= existing
 
     def test_migration_allows_a_new_category_afterward(self):
         c = self._old_schema_conn()
@@ -833,6 +835,9 @@ class TestFundamentalsCache:
             "Income Statement": {"Total Revenue": {"2026-06-30": 245122.0}},
             "Balance Sheet": {"Total Assets": {"2026-06-30": 512163.0}},
             "Cash Flow": {"Free Cash Flow": {"2026-06-30": 74071.0}},
+            "Quarterly Income Statement": {"Total Revenue": {"2026-06-30": 64727.0}},
+            "Quarterly Balance Sheet": {"Total Assets": {"2026-06-30": 512163.0}},
+            "Quarterly Cash Flow": {"Free Cash Flow": {"2026-06-30": 20412.0}},
             "Current Price": 452.0, "Target Mean Price": 486.5, "Number Of Analysts": 42,
             "Business Summary": "Microsoft Corporation develops and licenses software.",
             "Industry": "Software - Infrastructure", "Sector": "Technology",
@@ -852,6 +857,9 @@ class TestFundamentalsCache:
         assert row["Income Statement"] == {"Total Revenue": {"2026-06-30": 245122.0}}
         assert row["Balance Sheet"] == {"Total Assets": {"2026-06-30": 512163.0}}
         assert row["Cash Flow"] == {"Free Cash Flow": {"2026-06-30": 74071.0}}
+        assert row["Quarterly Income Statement"] == {"Total Revenue": {"2026-06-30": 64727.0}}
+        assert row["Quarterly Balance Sheet"] == {"Total Assets": {"2026-06-30": 512163.0}}
+        assert row["Quarterly Cash Flow"] == {"Free Cash Flow": {"2026-06-30": 20412.0}}
         assert row["Current Price"] == 452.0
         assert row["Target Mean Price"] == 486.5
         assert row["Number Of Analysts"] == 42
@@ -908,15 +916,37 @@ class TestFundamentalsCache:
         assert pd.isna(row["Number Of Analysts"])
 
     def test_empty_statement_defaults_to_empty_dict_not_none(self, conn):
-        # A real ETF -- income_stmt/balance_sheet/cashflow are all empty DataFrames.
+        # A real ETF -- income_stmt/balance_sheet/cashflow (annual and quarterly)
+        # are all empty DataFrames.
         db.save_fundamentals_cache(
-            [self._row(**{"Income Statement": {}, "Balance Sheet": {}, "Cash Flow": {}})], conn=conn,
+            [self._row(**{
+                "Income Statement": {}, "Balance Sheet": {}, "Cash Flow": {},
+                "Quarterly Income Statement": {}, "Quarterly Balance Sheet": {}, "Quarterly Cash Flow": {},
+            })], conn=conn,
         )
         result = db.fetch_fundamentals_cache(conn=conn)
         row = result.iloc[0]
         assert row["Income Statement"] == {}
         assert row["Balance Sheet"] == {}
         assert row["Cash Flow"] == {}
+        assert row["Quarterly Income Statement"] == {}
+        assert row["Quarterly Balance Sheet"] == {}
+        assert row["Quarterly Cash Flow"] == {}
+
+    def test_row_saved_before_v4_24_migration_fetches_quarterly_as_empty_dict(self, conn):
+        # A real pre-V4.24 row has SQL NULL for the 3 new quarterly columns (the
+        # migration only adds the column, it doesn't backfill data) -- must decode
+        # to {} like any other symbol with no quarterly statements on file, not crash.
+        conn.execute(
+            "INSERT INTO fundamentals_cache (symbol, currency, current_price, fetched_at) "
+            "VALUES ('OLD', 'USD', 10.0, datetime('now'))"
+        )
+        conn.commit()
+        result = db.fetch_fundamentals_cache(conn=conn)
+        row = result[result["Symbol"] == "OLD"].iloc[0]
+        assert row["Quarterly Income Statement"] == {}
+        assert row["Quarterly Balance Sheet"] == {}
+        assert row["Quarterly Cash Flow"] == {}
 
     def test_multiple_symbols_in_one_call(self, conn):
         db.save_fundamentals_cache(
