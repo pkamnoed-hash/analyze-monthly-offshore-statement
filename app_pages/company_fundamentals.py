@@ -438,10 +438,14 @@ def _kpi_card(col, label: str, dates: list, values: list, delta_color: str, help
             # Annual: indexed by year only (dates[:4]) -- the full "YYYY-MM-DD"
             # period-end date was correct but needlessly precise for a sparkline
             # axis, and the day is always the fiscal year-end anyway. Quarterly:
-            # year-only would collide across same-year quarters, so "MM/YY" instead.
-            # height=150 (up from an original 60 matching the mockup) so the
+            # year-only would collide across same-year quarters, so "YY/MM" instead
+            # -- YEAR FIRST, not "MM/YY": st.bar_chart (Altair underneath) sorts a
+            # string-indexed series alphabetically, not by insertion order, so
+            # "MM/YY" scrambles across a year boundary (confirmed real: 01/26
+            # sorted before 04/25) while "YY/MM" sorts identically to chronological
+            # order. height=150 (up from an original 60 matching the mockup) so the
             # period-to-period shape is actually legible.
-            labels = [d[:4] for d in dates] if not quarterly else [f"{d[5:7]}/{d[2:4]}" for d in dates]
+            labels = [d[:4] for d in dates] if not quarterly else [f"{d[2:4]}/{d[5:7]}" for d in dates]
             series = pd.Series(
                 [v / 1e6 if v is not None and not pd.isna(v) else 0 for v in values],
                 index=labels,
