@@ -1,5 +1,15 @@
 # Changelog
 
+## New: Regenerate All on Auto Trendline (v4.25)
+
+- Auto Trendline now has a "Regenerate All" button that recaptures support/
+  resistance lines for every currently held symbol in one go, instead of one
+  symbol at a time. Asks you to confirm first (it discards any manual drags,
+  deletes, or added lines across your whole portfolio and can't be undone in
+  bulk), then runs paced at about one symbol per second so it doesn't trip
+  Yahoo Finance's rate limit. If a symbol fails to fetch mid-run, its previous
+  lines are left untouched rather than cleared.
+
 ## Fixed: a fully-sold stock could still show up on Stock Monitor (v4.24.1)
 
 - If a stock's buy and sell share counts were recorded to very slightly different
